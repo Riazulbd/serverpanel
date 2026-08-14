@@ -116,7 +116,7 @@ func (g *gateway) handleConn(conn net.Conn) {
 	g.sessions[serverID] = sess
 	g.mu.Unlock()
 	g.store.setConnected(serverID, true)
-	g.store.log(serverID, "agent.connected", fmt.Sprintf("remote=%s", conn.RemoteAddr()))
+	g.store.log(serverID, "", "agent.connected", fmt.Sprintf("remote=%s", conn.RemoteAddr()))
 	log.Printf("agent connected: server_id=%s remote=%s", serverID, conn.RemoteAddr())
 
 	// Explicit application-level ack: the agent should only report itself
@@ -134,7 +134,7 @@ func (g *gateway) handleConn(conn net.Conn) {
 		delete(g.sessions, serverID)
 		g.mu.Unlock()
 		g.store.setConnected(serverID, false)
-		g.store.log(serverID, "agent.disconnected", "")
+		g.store.log(serverID, "", "agent.disconnected", "")
 		conn.Close()
 	}()
 
@@ -149,7 +149,8 @@ func (g *gateway) handleConn(conn net.Conn) {
 			// Identity is already established from the client cert; Hello
 			// is informational (agent version) and logged, not trusted for auth.
 			if env.Hello != nil {
-				g.store.log(serverID, "agent.hello", fmt.Sprintf("agent_version=%s", env.Hello.AgentVersion))
+				g.store.setAgentVersion(serverID, env.Hello.AgentVersion)
+				g.store.log(serverID, "", "agent.hello", fmt.Sprintf("agent_version=%s", env.Hello.AgentVersion))
 			}
 		case proto.MsgHeartbeat:
 			if env.Heartbeat != nil {
@@ -161,7 +162,7 @@ func (g *gateway) handleConn(conn net.Conn) {
 			}
 		case proto.MsgTaskEvent:
 			if env.TaskEvent != nil {
-				g.store.log(serverID, "task.event", fmt.Sprintf("task_id=%s status=%s message=%q", env.TaskEvent.TaskID, env.TaskEvent.Status, env.TaskEvent.Message))
+				g.store.log(serverID, "", "task.event", fmt.Sprintf("task_id=%s status=%s message=%q", env.TaskEvent.TaskID, env.TaskEvent.Status, env.TaskEvent.Message))
 				sess.mu.Lock()
 				ch := sess.pending[env.TaskEvent.TaskID]
 				sess.mu.Unlock()
@@ -177,8 +178,9 @@ func (g *gateway) handleConn(conn net.Conn) {
 }
 
 // dispatch sends a task to a connected agent and waits (bounded by ctx) for
-// a terminal TaskEvent. Every call is audit-logged before the task is sent.
-func (g *gateway) dispatch(ctx context.Context, serverID, capability string, params map[string]any) (proto.TaskEvent, error) {
+// a terminal TaskEvent. Every call is audit-logged (with the requesting
+// user attributed via actor) before the task is sent.
+func (g *gateway) dispatch(ctx context.Context, serverID, actor, capability string, params map[string]any) (proto.TaskEvent, error) {
 	g.mu.Lock()
 	sess, ok := g.sessions[serverID]
 	g.mu.Unlock()
@@ -199,7 +201,7 @@ func (g *gateway) dispatch(ctx context.Context, serverID, capability string, par
 		sess.mu.Unlock()
 	}()
 
-	g.store.log(serverID, "task.dispatched", fmt.Sprintf("task_id=%s capability=%s", taskID, capability))
+	g.store.log(serverID, actor, "task.dispatched", fmt.Sprintf("task_id=%s capability=%s", taskID, capability))
 
 	sess.mu.Lock()
 	err := sess.enc.Encode(proto.Envelope{Type: proto.MsgTask, Task: &task})

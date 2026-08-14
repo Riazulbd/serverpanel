@@ -3,25 +3,21 @@ package main
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
-	"sync"
 	"time"
 )
 
-// store is an in-memory stand-in for the control plane's persistent state
-// (Postgres, in production — see docs/architecture.md). Kept as a single
-// mutex-guarded struct with a narrow method set so swapping the backing
-// store later doesn't require touching callers.
+// store is the control plane's persistence layer, backed by SQLite (see
+// db.go). Every method is a small, focused SQL statement — no caller
+// builds queries itself, which is what keeps this swappable for Postgres
+// later without touching apps/controlplane/http.go or gateway.go.
 type store struct {
-	mu sync.Mutex
-
-	servers map[string]*serverRecord
-	tokens  map[string]*bootstrapToken // key: sha256(token) hex
-	revoked map[string]bool            // key: cert serial (decimal string)
-	audit   []auditEntry
-	seq     int
+	db *sql.DB
 }
 
 type serverStatus string
@@ -54,46 +50,49 @@ type heartbeatSnapshot struct {
 	At          time.Time
 }
 
-type bootstrapToken struct {
-	ServerID  string
-	HashHex   string
-	ExpiresAt time.Time
-	Used      bool
-}
-
 type auditEntry struct {
 	Seq      int
 	At       time.Time
 	ServerID string
+	Actor    string
 	Action   string
 	Detail   string
 }
 
-func newStore() *store {
-	return &store{
-		servers: map[string]*serverRecord{},
-		tokens:  map[string]*bootstrapToken{},
-		revoked: map[string]bool{},
-	}
+func newStore(db *sql.DB) *store {
+	return &store{db: db}
 }
 
-func (s *store) log(serverID, action, detail string) {
-	s.seq++
-	s.audit = append(s.audit, auditEntry{Seq: s.seq, At: time.Now().UTC(), ServerID: serverID, Action: action, Detail: detail})
+// log appends an audit entry. actor is the authenticated user's email/id
+// for user-initiated actions, or "" for system/agent-originated events
+// (e.g. a heartbeat-driven status change).
+func (s *store) log(serverID, actor, action, detail string) {
+	_, err := s.db.Exec(
+		`INSERT INTO audit_log (at, server_id, actor, action, detail) VALUES (?, ?, ?, ?, ?)`,
+		time.Now().UTC().Format(time.RFC3339Nano), serverID, actor, action, detail,
+	)
+	if err != nil {
+		// Audit logging failures must never be silently swallowed in a
+		// production system (they'd undermine the audit trail's
+		// completeness guarantee); for this skeleton, surface it loudly.
+		fmt.Printf("AUDIT LOG WRITE FAILED: %v (action=%s server=%s)\n", err, action, serverID)
+	}
 }
 
 // createServer creates a pending server record and a fresh single-use,
 // short-lived bootstrap token for it. Only the token's hash is retained;
 // the plaintext is returned once, to the caller, for embedding in the
 // one-time install command.
-func (s *store) createServer(name, group string, tags []string, ttl time.Duration) (id string, token string, err error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
+func (s *store) createServer(name, group string, tags []string, ttl time.Duration, actor string) (id string, token string, err error) {
 	id = randID("srv")
-	s.servers[id] = &serverRecord{
-		ID: id, Name: name, Group: group, Tags: tags,
-		Status: statusPending, CreatedAt: time.Now().UTC(),
+	tagsJSON, _ := json.Marshal(tags)
+
+	_, err = s.db.Exec(
+		`INSERT INTO servers (id, name, grp, tags_json, status, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		id, name, group, string(tagsJSON), string(statusPending), time.Now().UTC().Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return "", "", fmt.Errorf("insert server: %w", err)
 	}
 
 	raw := make([]byte, 32)
@@ -103,130 +102,287 @@ func (s *store) createServer(name, group string, tags []string, ttl time.Duratio
 	token = hex.EncodeToString(raw)
 	hash := sha256.Sum256([]byte(token))
 	hashHex := hex.EncodeToString(hash[:])
-	s.tokens[hashHex] = &bootstrapToken{ServerID: id, HashHex: hashHex, ExpiresAt: time.Now().Add(ttl)}
+	expiresAt := time.Now().Add(ttl)
 
-	s.log(id, "server.created", fmt.Sprintf("name=%q group=%q", name, group))
-	s.log(id, "bootstrap_token.issued", fmt.Sprintf("expires_at=%s", s.tokens[hashHex].ExpiresAt.Format(time.RFC3339)))
+	_, err = s.db.Exec(
+		`INSERT INTO bootstrap_tokens (hash, server_id, expires_at) VALUES (?, ?, ?)`,
+		hashHex, id, expiresAt.Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return "", "", fmt.Errorf("insert bootstrap token: %w", err)
+	}
+
+	s.log(id, actor, "server.created", fmt.Sprintf("name=%q group=%q", name, group))
+	s.log(id, actor, "bootstrap_token.issued", fmt.Sprintf("expires_at=%s", expiresAt.Format(time.RFC3339)))
 	return id, token, nil
 }
 
-// redeemToken atomically validates and consumes a bootstrap token. The
-// plaintext token is never logged by this method or its caller — only the
-// server ID and outcome are.
+// redeemToken atomically validates and consumes a bootstrap token inside a
+// transaction, so two concurrent registration attempts with the same token
+// can never both succeed. The plaintext token is never logged by this
+// method or its caller — only the server ID and outcome are.
 func (s *store) redeemToken(token string) (serverID string, err error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	hash := sha256.Sum256([]byte(token))
 	hashHex := hex.EncodeToString(hash[:])
-	t, ok := s.tokens[hashHex]
-	if !ok {
-		return "", fmt.Errorf("unknown or already-consumed token")
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return "", err
 	}
-	if t.Used {
+	defer tx.Rollback()
+
+	var used int
+	var expiresAt string
+	row := tx.QueryRow(`SELECT server_id, used, expires_at FROM bootstrap_tokens WHERE hash = ?`, hashHex)
+	if err := row.Scan(&serverID, &used, &expiresAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", fmt.Errorf("unknown or already-consumed token")
+		}
+		return "", err
+	}
+	if used != 0 {
 		return "", fmt.Errorf("token already used")
 	}
-	if time.Now().After(t.ExpiresAt) {
-		delete(s.tokens, hashHex)
+	exp, err := time.Parse(time.RFC3339Nano, expiresAt)
+	if err != nil || time.Now().After(exp) {
+		tx.Exec(`DELETE FROM bootstrap_tokens WHERE hash = ?`, hashHex)
+		tx.Commit()
 		return "", fmt.Errorf("token expired")
 	}
-	t.Used = true
-	delete(s.tokens, hashHex) // single-use: consumed tokens are not retained
-	return t.ServerID, nil
+
+	// Single-use: consumed tokens are deleted outright rather than merely
+	// flagged, so they can never be inspected or replayed even by direct
+	// DB access.
+	if _, err := tx.Exec(`DELETE FROM bootstrap_tokens WHERE hash = ?`, hashHex); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(); err != nil {
+		return "", err
+	}
+	return serverID, nil
 }
 
-func (s *store) revokeToken(serverID string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for h, t := range s.tokens {
-		if t.ServerID == serverID {
-			delete(s.tokens, h)
-		}
-	}
-	s.log(serverID, "bootstrap_token.revoked", "")
+func (s *store) revokeToken(serverID, actor string) {
+	s.db.Exec(`DELETE FROM bootstrap_tokens WHERE server_id = ?`, serverID)
+	s.log(serverID, actor, "bootstrap_token.revoked", "")
 }
 
 func (s *store) markIssuedCert(serverID, serial string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if rec, ok := s.servers[serverID]; ok {
-		rec.CertSerial = serial
-		rec.Status = statusOffline
-	}
-	s.log(serverID, "agent.registered", fmt.Sprintf("cert_serial=%s", serial))
+	s.db.Exec(`UPDATE servers SET cert_serial = ?, status = ? WHERE id = ?`, serial, string(statusOffline), serverID)
+	s.log(serverID, "", "agent.registered", fmt.Sprintf("cert_serial=%s", serial))
 }
 
 func (s *store) isRevoked(serial string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.revoked[serial]
+	var n int
+	s.db.QueryRow(`SELECT COUNT(1) FROM revoked_certs WHERE serial = ?`, serial).Scan(&n)
+	return n > 0
 }
 
 // revokeServer revokes the server's issued certificate and marks it
 // disconnected. Re-connecting requires a brand new bootstrap token —
 // there is no path back to trust from a revoked certificate.
-func (s *store) revokeServer(serverID string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	rec, ok := s.servers[serverID]
+func (s *store) revokeServer(serverID, actor string) error {
+	rec, ok := s.get(serverID)
 	if !ok {
 		return fmt.Errorf("server not found")
 	}
 	if rec.CertSerial != "" {
-		s.revoked[rec.CertSerial] = true
+		_, err := s.db.Exec(
+			`INSERT OR REPLACE INTO revoked_certs (serial, server_id, revoked_at) VALUES (?, ?, ?)`,
+			rec.CertSerial, serverID, time.Now().UTC().Format(time.RFC3339Nano),
+		)
+		if err != nil {
+			return err
+		}
 	}
-	rec.Status = statusDisconnected
-	s.log(serverID, "agent.revoked", fmt.Sprintf("cert_serial=%s", rec.CertSerial))
+	if _, err := s.db.Exec(`UPDATE servers SET status = ? WHERE id = ?`, string(statusDisconnected), serverID); err != nil {
+		return err
+	}
+	s.log(serverID, actor, "agent.revoked", fmt.Sprintf("cert_serial=%s", rec.CertSerial))
 	return nil
 }
 
 func (s *store) setConnected(serverID string, connected bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	rec, ok := s.servers[serverID]
+	rec, ok := s.get(serverID)
 	if !ok {
 		return
 	}
+	newStatus := statusOffline
 	if connected {
-		rec.Status = statusConnected
-	} else if rec.Status != statusDisconnected {
-		rec.Status = statusOffline
+		newStatus = statusConnected
+	} else if rec.Status == statusDisconnected {
+		newStatus = statusDisconnected
 	}
-	rec.LastSeen = time.Now().UTC()
+	s.db.Exec(`UPDATE servers SET status = ?, last_seen = ? WHERE id = ?`,
+		string(newStatus), time.Now().UTC().Format(time.RFC3339Nano), serverID)
+}
+
+func (s *store) setAgentVersion(serverID, version string) {
+	s.db.Exec(`UPDATE servers SET agent_version = ? WHERE id = ?`, version, serverID)
 }
 
 func (s *store) recordHeartbeat(serverID string, hb heartbeatSnapshot) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if rec, ok := s.servers[serverID]; ok {
-		rec.LastHeartbeat = &hb
-		rec.LastSeen = hb.At
-	}
+	hbJSON, _ := json.Marshal(hb)
+	s.db.Exec(`UPDATE servers SET heartbeat_json = ?, last_seen = ? WHERE id = ?`,
+		string(hbJSON), hb.At.Format(time.RFC3339Nano), serverID)
 }
 
 func (s *store) get(serverID string) (*serverRecord, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	rec, ok := s.servers[serverID]
-	return rec, ok
+	row := s.db.QueryRow(
+		`SELECT id, name, grp, tags_json, status, cert_serial, created_at, last_seen, agent_version, heartbeat_json
+		 FROM servers WHERE id = ?`, serverID)
+	rec, err := scanServer(row)
+	if err != nil {
+		return nil, false
+	}
+	return rec, true
 }
 
 func (s *store) list() []*serverRecord {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([]*serverRecord, 0, len(s.servers))
-	for _, r := range s.servers {
-		out = append(out, r)
+	rows, err := s.db.Query(
+		`SELECT id, name, grp, tags_json, status, cert_serial, created_at, last_seen, agent_version, heartbeat_json
+		 FROM servers ORDER BY created_at DESC`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var out []*serverRecord
+	for rows.Next() {
+		rec, err := scanServer(rows)
+		if err != nil {
+			continue
+		}
+		out = append(out, rec)
 	}
 	return out
 }
 
+// rowScanner abstracts over *sql.Row and *sql.Rows, which share Scan but no
+// common interface in database/sql.
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanServer(row rowScanner) (*serverRecord, error) {
+	var rec serverRecord
+	var tagsJSON string
+	var lastSeen, heartbeatJSON sql.NullString
+	var createdAt string
+
+	if err := row.Scan(&rec.ID, &rec.Name, &rec.Group, &tagsJSON, &rec.Status, &rec.CertSerial,
+		&createdAt, &lastSeen, &rec.AgentVer, &heartbeatJSON); err != nil {
+		return nil, err
+	}
+
+	json.Unmarshal([]byte(tagsJSON), &rec.Tags)
+	rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+	if lastSeen.Valid {
+		rec.LastSeen, _ = time.Parse(time.RFC3339Nano, lastSeen.String)
+	}
+	if heartbeatJSON.Valid && heartbeatJSON.String != "" {
+		var hb heartbeatSnapshot
+		if json.Unmarshal([]byte(heartbeatJSON.String), &hb) == nil {
+			rec.LastHeartbeat = &hb
+		}
+	}
+	return &rec, nil
+}
+
+// maxKnownCertSerial scans every serial this control plane has ever issued
+// or revoked and returns the highest one seen (0 if none), so a freshly
+// loaded CA's serial counter can be seeded above it — see
+// loadOrCreateAgentCA.
+func (s *store) maxKnownCertSerial() int64 {
+	var max int64
+	rows, err := s.db.Query(`SELECT cert_serial FROM servers WHERE cert_serial != '' UNION SELECT serial FROM revoked_certs`)
+	if err != nil {
+		return 0
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var s string
+		if rows.Scan(&s) != nil {
+			continue
+		}
+		var n int64
+		if _, err := fmt.Sscanf(s, "%d", &n); err == nil && n > max {
+			max = n
+		}
+	}
+	return max
+}
+
 func (s *store) auditLog() []auditEntry {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([]auditEntry, len(s.audit))
-	copy(out, s.audit)
+	rows, err := s.db.Query(`SELECT seq, at, server_id, actor, action, detail FROM audit_log ORDER BY seq DESC LIMIT 500`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var out []auditEntry
+	for rows.Next() {
+		var e auditEntry
+		var at string
+		if err := rows.Scan(&e.Seq, &at, &e.ServerID, &e.Actor, &e.Action, &e.Detail); err != nil {
+			continue
+		}
+		e.At, _ = time.Parse(time.RFC3339Nano, at)
+		out = append(out, e)
+	}
 	return out
+}
+
+type siteRecord struct {
+	ID         string
+	ServerID   string
+	Domain     string
+	SystemUser string
+	Docroot    string
+	AppType    string
+	PHPVersion string
+	Status     string
+	CreatedAt  time.Time
+}
+
+func (s *store) listSites(serverID string) []*siteRecord {
+	rows, err := s.db.Query(
+		`SELECT id, server_id, domain, system_user, docroot, app_type, php_version, status, created_at
+		 FROM sites WHERE server_id = ? ORDER BY created_at DESC`, serverID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var out []*siteRecord
+	for rows.Next() {
+		var rec siteRecord
+		var createdAt string
+		if err := rows.Scan(&rec.ID, &rec.ServerID, &rec.Domain, &rec.SystemUser, &rec.Docroot,
+			&rec.AppType, &rec.PHPVersion, &rec.Status, &createdAt); err != nil {
+			continue
+		}
+		rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+		out = append(out, &rec)
+	}
+	return out
+}
+
+func (s *store) createSite(serverID, domain, systemUser, docroot, appType, phpVersion string) (*siteRecord, error) {
+	rec := &siteRecord{
+		ID: randID("site"), ServerID: serverID, Domain: domain, SystemUser: systemUser,
+		Docroot: docroot, AppType: appType, PHPVersion: phpVersion, Status: "active", CreatedAt: time.Now().UTC(),
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO sites (id, server_id, domain, system_user, docroot, app_type, php_version, status, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		rec.ID, rec.ServerID, rec.Domain, rec.SystemUser, rec.Docroot, rec.AppType, rec.PHPVersion, rec.Status,
+		rec.CreatedAt.Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return nil, err
+	}
+	return rec, nil
 }
 
 func randID(prefix string) string {

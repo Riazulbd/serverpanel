@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"math/big"
 	"net"
+	"os"
 	"sync"
 	"time"
 )
@@ -55,6 +56,74 @@ func newAgentCA() (*agentCA, error) {
 	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 
 	return &agentCA{rootCert: cert, rootKey: key, rootPEM: pemBytes, nextSN: 100}, nil
+}
+
+// loadOrCreateAgentCA persists the CA's signing key to disk (certPath,
+// keyPath) and reuses it across restarts. Without this, every control-plane
+// restart would mint a brand new CA — silently invalidating every already
+// -registered agent's certificate, since none of them would chain to the
+// new root anymore. That defeats the entire point of a durable,
+// certificate-based machine identity (docs/security-trust-model.md §2): a
+// restart is not a revocation event, and must not behave like one.
+//
+// startSerial seeds the serial-number counter above the highest serial
+// this control plane has ever issued (tracked via the servers/revoked_certs
+// tables, see store.maxKnownCertSerial) — required because reusing a
+// serial number that's already meaningful in the revocation list would be
+// a real ambiguity, not just a cosmetic issue.
+func loadOrCreateAgentCA(certPath, keyPath string, startSerial int64) (*agentCA, error) {
+	certPEM, certErr := os.ReadFile(certPath)
+	keyPEM, keyErr := os.ReadFile(keyPath)
+	if certErr == nil && keyErr == nil {
+		ca, err := parseAgentCA(certPEM, keyPEM)
+		if err != nil {
+			return nil, fmt.Errorf("parse existing CA at %s / %s: %w", certPath, keyPath, err)
+		}
+		if startSerial > ca.nextSN {
+			ca.nextSN = startSerial
+		}
+		return ca, nil
+	}
+
+	ca, err := newAgentCA()
+	if err != nil {
+		return nil, err
+	}
+	if startSerial > ca.nextSN {
+		ca.nextSN = startSerial
+	}
+	keyDER, err := x509.MarshalECPrivateKey(ca.rootKey)
+	if err != nil {
+		return nil, err
+	}
+	rootKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	if err := os.WriteFile(keyPath, rootKeyPEM, 0600); err != nil {
+		return nil, fmt.Errorf("persist CA key: %w", err)
+	}
+	if err := os.WriteFile(certPath, ca.rootPEM, 0644); err != nil {
+		return nil, fmt.Errorf("persist CA certificate: %w", err)
+	}
+	return ca, nil
+}
+
+func parseAgentCA(certPEM, keyPEM []byte) (*agentCA, error) {
+	certBlock, _ := pem.Decode(certPEM)
+	if certBlock == nil {
+		return nil, fmt.Errorf("invalid CA certificate PEM")
+	}
+	cert, err := x509.ParseCertificate(certBlock.Bytes)
+	if err != nil {
+		return nil, err
+	}
+	keyBlock, _ := pem.Decode(keyPEM)
+	if keyBlock == nil {
+		return nil, fmt.Errorf("invalid CA key PEM")
+	}
+	key, err := x509.ParseECPrivateKey(keyBlock.Bytes)
+	if err != nil {
+		return nil, err
+	}
+	return &agentCA{rootCert: cert, rootKey: key, rootPEM: certPEM, nextSN: 100}, nil
 }
 
 // CAPEM returns the PEM-encoded root certificate agents should pin.

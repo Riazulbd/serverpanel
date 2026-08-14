@@ -1,0 +1,14 @@
+# Build artifacts
+/controlplane
+/agent
+/apps/controlplane/controlplane
+/apps/agent/agent
+
+# Local runtime state (SQLite DB, persisted CA, agent identity) — never
+# commit real deployment secrets/state alongside the source.
+*.db
+*.db-shm
+*.db-wal
+agent-ca-cert.pem
+agent-ca-key.pem
+/serverpanel-agent/

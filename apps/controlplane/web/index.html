@@ -1,0 +1,539 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ServerPanel</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #ffffff; --border: #e2e5ea; --text: #1b1f27; --muted: #6b7280;
+    --primary: #4f46e5; --primary-dark: #4338ca; --danger: #dc2626; --danger-bg: #fef2f2;
+    --ok: #16a34a; --ok-bg: #f0fdf4; --warn: #d97706; --warn-bg: #fffbeb; --gray-bg: #f3f4f6;
+    --radius: 10px; --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-size: 14px;
+  }
+  a { color: var(--primary); text-decoration: none; }
+  button {
+    font: inherit; cursor: pointer; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--card); color: var(--text); padding: 8px 14px; transition: background .1s;
+  }
+  button:hover { background: var(--gray-bg); }
+  button.primary { background: var(--primary); border-color: var(--primary); color: #fff; }
+  button.primary:hover { background: var(--primary-dark); }
+  button.danger { background: var(--danger-bg); border-color: #fecaca; color: var(--danger); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  input, select, textarea {
+    font: inherit; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border);
+    background: #fff; color: var(--text); width: 100%;
+  }
+  label { font-size: 12px; color: var(--muted); display: block; margin-bottom: 4px; }
+  .field { margin-bottom: 12px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; }
+  .hidden { display: none !important; }
+  .center-screen { min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+  .auth-card { width: 360px; }
+  .auth-card h1 { font-size: 20px; margin: 0 0 4px; }
+  .auth-card p.sub { color: var(--muted); margin: 0 0 20px; }
+  .error { color: var(--danger); font-size: 13px; margin-top: 8px; min-height: 16px; }
+  .row { display: flex; gap: 8px; }
+  .row > * { flex: 1; }
+  header.topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 24px; background: var(--card); border-bottom: 1px solid var(--border);
+  }
+  header.topbar .brand { font-weight: 700; font-size: 16px; }
+  nav.tabs { display: flex; gap: 4px; }
+  nav.tabs button { border: none; background: none; padding: 8px 14px; border-radius: 8px; color: var(--muted); }
+  nav.tabs button.active { background: var(--gray-bg); color: var(--text); font-weight: 600; }
+  main { max-width: 1100px; margin: 0 auto; padding: 24px; }
+  .view { display: none; }
+  .view.active { display: block; }
+  .toolbar { display: flex; gap: 10px; margin-bottom: 16px; align-items: center; }
+  .toolbar input[type=search] { max-width: 280px; }
+  .spacer { flex: 1; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 13px; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .03em; }
+  tr.clickable { cursor: pointer; }
+  tr.clickable:hover { background: var(--gray-bg); }
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .badge.connected { background: var(--ok-bg); color: var(--ok); }
+  .badge.offline { background: var(--warn-bg); color: var(--warn); }
+  .badge.disconnected, .badge.pending { background: var(--gray-bg); color: var(--muted); }
+  .tag { display: inline-block; background: var(--gray-bg); border-radius: 6px; padding: 1px 8px; margin-right: 4px; font-size: 12px; color: var(--muted); }
+  pre.code {
+    background: #0f172a; color: #e2e8f0; padding: 14px; border-radius: 8px; overflow-x: auto;
+    font-family: var(--mono); font-size: 12.5px; white-space: pre-wrap; word-break: break-all;
+  }
+  .modal-backdrop {
+    position: fixed; inset: 0; background: rgba(15,23,42,.4); display: flex;
+    align-items: center; justify-content: center; z-index: 50;
+  }
+  .modal { background: var(--card); border-radius: var(--radius); padding: 24px; width: 420px; max-width: 90vw; max-height: 85vh; overflow-y: auto; }
+  .modal h2 { margin-top: 0; font-size: 16px; }
+  .breadcrumb { color: var(--muted); font-size: 13px; margin-bottom: 12px; }
+  .breadcrumb a { color: var(--muted); }
+  .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px,1fr)); gap: 12px; margin: 16px 0; }
+  .stat { background: var(--gray-bg); border-radius: 8px; padding: 12px; }
+  .stat .label { font-size: 11px; color: var(--muted); text-transform: uppercase; }
+  .stat .value { font-size: 20px; font-weight: 700; margin-top: 2px; }
+  .actions-grid { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+  .task-result { margin-top: 12px; }
+  .task-result.running { color: var(--warn); }
+  .task-result.ok { color: var(--ok); }
+  .task-result.fail { color: var(--danger); }
+  .muted { color: var(--muted); }
+  .section-title { font-size: 15px; font-weight: 700; margin: 28px 0 10px; }
+  footer.hint { color: var(--muted); font-size: 12px; margin-top: 24px; }
+</style>
+</head>
+<body>
+
+<div id="authScreen" class="center-screen hidden">
+  <div class="card auth-card">
+    <div id="loginPane">
+      <h1>ServerPanel</h1>
+      <p class="sub">Sign in to your control plane</p>
+      <div class="field"><label>Email</label><input id="loginEmail" type="email" autocomplete="username"></div>
+      <div class="field"><label>Password</label><input id="loginPassword" type="password" autocomplete="current-password"></div>
+      <button class="primary" style="width:100%" onclick="doLogin()">Sign in</button>
+      <div class="error" id="loginError"></div>
+      <p class="sub" style="margin-top:16px">No account yet? <a href="#" onclick="showSignup();return false;">Create the first admin account</a></p>
+    </div>
+    <div id="signupPane" class="hidden">
+      <h1>Create account</h1>
+      <p class="sub">Set up the initial admin account</p>
+      <div class="field"><label>Email</label><input id="signupEmail" type="email"></div>
+      <div class="field"><label>Password (min. 12 characters)</label><input id="signupPassword" type="password"></div>
+      <button class="primary" style="width:100%" onclick="doSignup()">Create account</button>
+      <div class="error" id="signupError"></div>
+      <p class="sub" style="margin-top:16px"><a href="#" onclick="showLogin();return false;">Back to sign in</a></p>
+    </div>
+    <div id="mfaPane" class="hidden">
+      <h1>Two-factor code</h1>
+      <p class="sub">Enter the 6-digit code from your authenticator app</p>
+      <div class="field"><input id="mfaCode" inputmode="numeric" maxlength="6" placeholder="000000"></div>
+      <button class="primary" style="width:100%" onclick="doMfaChallenge()">Verify</button>
+      <div class="error" id="mfaError"></div>
+    </div>
+  </div>
+</div>
+
+<div id="appScreen" class="hidden">
+  <header class="topbar">
+    <div class="brand">ServerPanel</div>
+    <nav class="tabs">
+      <button id="tabServers" onclick="showTab('servers')" class="active">Servers</button>
+      <button id="tabAudit" onclick="showTab('audit')">Audit Log</button>
+      <button id="tabSecurity" onclick="showTab('security')">Security</button>
+    </nav>
+    <div><span class="muted" id="meEmail"></span> &nbsp; <button onclick="doLogout()">Sign out</button></div>
+  </header>
+
+  <main>
+    <div id="view-servers" class="view active">
+      <div class="toolbar">
+        <input type="search" id="serverSearch" placeholder="Search by name, group, or tag..." oninput="renderServerList()">
+        <div class="spacer"></div>
+        <button class="primary" onclick="openNewServerModal()">+ New server</button>
+      </div>
+      <div class="card" style="padding:0">
+        <table>
+          <thead><tr><th>Name</th><th>Status</th><th>Group</th><th>Tags</th><th>Agent version</th><th>Last seen</th></tr></thead>
+          <tbody id="serverTableBody"></tbody>
+        </table>
+      </div>
+      <p class="muted" id="serverEmptyState" style="margin-top:16px"></p>
+    </div>
+
+    <div id="view-serverDetail" class="view">
+      <div class="breadcrumb"><a href="#" onclick="showTab('servers');return false;">&larr; All servers</a></div>
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <h2 id="detailName" style="margin:0"></h2>
+          <span id="detailStatus" class="badge"></span>
+        </div>
+        <div class="stat-grid" id="detailStats"></div>
+
+        <div class="section-title">Actions</div>
+        <div class="actions-grid">
+          <button onclick="dispatchQuick('system.ping', {})">Ping</button>
+          <button onclick="dispatchQuick('diagnostics.basic', {})">Run diagnostics</button>
+          <button class="primary" onclick="dispatchQuick('stack.install', {profile:'phase1-lemp'})">Install Phase 1 stack (nginx/PHP/MariaDB/Redis)</button>
+          <button class="danger" onclick="revokeServer()">Revoke &amp; disconnect</button>
+        </div>
+        <div id="taskResult" class="task-result hidden"></div>
+
+        <div class="section-title" style="display:flex;justify-content:space-between;align-items:center">
+          <span>Sites</span>
+          <button onclick="openNewSiteModal()">+ New site</button>
+        </div>
+        <div id="sitesList" class="muted">No sites yet.</div>
+      </div>
+    </div>
+
+    <div id="view-audit" class="view">
+      <div class="card" style="padding:0">
+        <table>
+          <thead><tr><th>Time</th><th>Server</th><th>Actor</th><th>Action</th><th>Detail</th></tr></thead>
+          <tbody id="auditTableBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div id="view-security" class="view">
+      <div class="card" style="max-width:480px">
+        <h2 style="margin-top:0">Two-factor authentication</h2>
+        <div id="totpEnrollPane">
+          <p class="muted">Protect this account with an authenticator app (Google Authenticator, 1Password, Authy, ...).</p>
+          <button class="primary" onclick="startTotpEnroll()">Enable 2FA</button>
+        </div>
+        <div id="totpVerifyPane" class="hidden">
+          <p class="muted">Scan this into your authenticator app, or enter the secret manually, then confirm with a code:</p>
+          <pre class="code" id="totpSecret"></pre>
+          <div class="field"><label>6-digit code</label><input id="totpVerifyCode" inputmode="numeric" maxlength="6"></div>
+          <button class="primary" onclick="confirmTotpEnroll()">Confirm and enable</button>
+        </div>
+        <div class="error" id="securityError"></div>
+      </div>
+    </div>
+  </main>
+
+  <footer class="hint" style="text-align:center">ServerPanel Phase 1 — see docs/product-plan.md for roadmap</footer>
+</div>
+
+<div id="modalRoot"></div>
+
+<script>
+const API = '/api/v1';
+let state = { me: null, servers: [], selectedServerId: null, pollTimer: null };
+
+async function api(path, opts) {
+  opts = opts || {};
+  opts.credentials = 'include';
+  opts.headers = Object.assign({'Content-Type': 'application/json'}, opts.headers || {});
+  const res = await fetch(path, opts);
+  let body = null;
+  try { body = await res.json(); } catch (e) {}
+  if (!res.ok) {
+    const msg = (body && body.error) ? body.error : ('HTTP ' + res.status);
+    throw new Error(msg);
+  }
+  return body;
+}
+
+function showLogin() {
+  document.getElementById('signupPane').classList.add('hidden');
+  document.getElementById('mfaPane').classList.add('hidden');
+  document.getElementById('loginPane').classList.remove('hidden');
+}
+function showSignup() {
+  document.getElementById('loginPane').classList.add('hidden');
+  document.getElementById('signupPane').classList.remove('hidden');
+}
+function showMfa() {
+  document.getElementById('loginPane').classList.add('hidden');
+  document.getElementById('signupPane').classList.add('hidden');
+  document.getElementById('mfaPane').classList.remove('hidden');
+}
+
+async function doSignup() {
+  const email = document.getElementById('signupEmail').value.trim();
+  const password = document.getElementById('signupPassword').value;
+  const err = document.getElementById('signupError');
+  err.textContent = '';
+  try {
+    await api(API + '/auth/signup', {method:'POST', body: JSON.stringify({email, password})});
+    document.getElementById('loginEmail').value = email;
+    document.getElementById('loginPassword').value = password;
+    showLogin();
+    await doLogin();
+  } catch (e) { err.textContent = e.message; }
+}
+
+async function doLogin() {
+  const email = document.getElementById('loginEmail').value.trim();
+  const password = document.getElementById('loginPassword').value;
+  const err = document.getElementById('loginError');
+  err.textContent = '';
+  try {
+    const res = await api(API + '/auth/login', {method:'POST', body: JSON.stringify({email, password})});
+    if (res.mfa_required) { showMfa(); return; }
+    await bootApp();
+  } catch (e) { err.textContent = e.message; }
+}
+
+async function doMfaChallenge() {
+  const code = document.getElementById('mfaCode').value.trim();
+  const err = document.getElementById('mfaError');
+  err.textContent = '';
+  try {
+    await api(API + '/auth/mfa/challenge', {method:'POST', body: JSON.stringify({code})});
+    await bootApp();
+  } catch (e) { err.textContent = e.message; }
+}
+
+async function doLogout() {
+  try { await api(API + '/auth/logout', {method:'POST'}); } catch (e) {}
+  document.getElementById('appScreen').classList.add('hidden');
+  document.getElementById('authScreen').classList.remove('hidden');
+  showLogin();
+}
+
+async function bootApp() {
+  state.me = await api(API + '/auth/me');
+  document.getElementById('meEmail').textContent = state.me.email;
+  document.getElementById('authScreen').classList.add('hidden');
+  document.getElementById('appScreen').classList.remove('hidden');
+  showTab('servers');
+  await refreshServers();
+  if (state.pollTimer) clearInterval(state.pollTimer);
+  state.pollTimer = setInterval(refreshServers, 10000);
+}
+
+function showTab(name) {
+  ['servers','serverDetail','audit','security'].forEach(v => {
+    document.getElementById('view-' + v).classList.toggle('active', v === name);
+  });
+  ['Servers','Audit','Security'].forEach(t => {
+    const id = 'tab' + t;
+    const el = document.getElementById(id);
+    if (el) el.classList.toggle('active', id.toLowerCase() === ('tab' + name).toLowerCase());
+  });
+  if (name === 'audit') refreshAudit();
+}
+
+async function refreshServers() {
+  try {
+    state.servers = await api(API + '/servers') || [];
+    renderServerList();
+    if (state.selectedServerId) renderServerDetail(state.selectedServerId);
+  } catch (e) { /* session likely expired; ignore during background poll */ }
+}
+
+function statusBadge(status) {
+  return '<span class="badge ' + status + '">' + status + '</span>';
+}
+
+function renderServerList() {
+  const q = (document.getElementById('serverSearch').value || '').toLowerCase();
+  const body = document.getElementById('serverTableBody');
+  const filtered = state.servers.filter(s => {
+    if (!q) return true;
+    const hay = [s.Name, s.Group, ...(s.Tags||[])].join(' ').toLowerCase();
+    return hay.includes(q);
+  });
+  body.innerHTML = filtered.map(s => `
+    <tr class="clickable" onclick="openServerDetail('${s.ID}')">
+      <td>${escapeHtml(s.Name)}</td>
+      <td>${statusBadge(s.Status)}</td>
+      <td>${escapeHtml(s.Group||'')}</td>
+      <td>${(s.Tags||[]).map(t=>'<span class="tag">'+escapeHtml(t)+'</span>').join('')}</td>
+      <td class="muted">${escapeHtml(s.AgentVer||'—')}</td>
+      <td class="muted">${s.LastSeen && s.LastSeen[0] !== '0' ? new Date(s.LastSeen).toLocaleString() : 'never'}</td>
+    </tr>`).join('');
+  document.getElementById('serverEmptyState').textContent = filtered.length === 0 ? 'No servers match, or none connected yet.' : '';
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function openNewServerModal() {
+  const root = document.getElementById('modalRoot');
+  root.innerHTML = `
+    <div class="modal-backdrop" onclick="if(event.target===this) closeModal()">
+      <div class="modal">
+        <h2>Connect a new server</h2>
+        <div class="field"><label>Name</label><input id="newServerName" placeholder="e.g. client-a-prod"></div>
+        <div class="field"><label>Group</label><input id="newServerGroup" placeholder="e.g. production"></div>
+        <div class="field"><label>Tags (comma separated)</label><input id="newServerTags" placeholder="agency-x, wordpress"></div>
+        <button class="primary" style="width:100%" onclick="createServer()">Create &amp; get install command</button>
+        <div class="error" id="newServerError"></div>
+        <div id="installCommandBox" class="hidden">
+          <p class="section-title" style="margin-top:20px">Run this on a clean Ubuntu 24.04 VPS, as root:</p>
+          <pre class="code" id="installCommandText"></pre>
+          <p class="muted" id="tokenExpiryNote"></p>
+          <button style="width:100%" onclick="closeModal()">Done</button>
+        </div>
+      </div>
+    </div>`;
+}
+function closeModal() { document.getElementById('modalRoot').innerHTML = ''; refreshServers(); }
+
+function openNewSiteModal() {
+  const root = document.getElementById('modalRoot');
+  root.innerHTML = `
+    <div class="modal-backdrop" onclick="if(event.target===this) closeModal()">
+      <div class="modal">
+        <h2>New site</h2>
+        <div class="field"><label>Domain</label><input id="newSiteDomain" placeholder="e.g. example.com"></div>
+        <div class="field">
+          <label>Application type</label>
+          <select id="newSiteAppType">
+            <option value="wordpress">WordPress</option>
+            <option value="php">Custom PHP</option>
+            <option value="static">Static HTML</option>
+          </select>
+        </div>
+        <button class="primary" style="width:100%" onclick="createSite()">Create site</button>
+        <div class="error" id="newSiteError"></div>
+        <p class="muted" id="newSiteStatus"></p>
+      </div>
+    </div>`;
+}
+
+async function createSite() {
+  const domain = document.getElementById('newSiteDomain').value.trim();
+  const appType = document.getElementById('newSiteAppType').value;
+  const err = document.getElementById('newSiteError');
+  const status = document.getElementById('newSiteStatus');
+  err.textContent = '';
+  status.textContent = 'Creating isolated system user, php-fpm pool, and nginx vhost...';
+  try {
+    const res = await api(API + '/servers/' + state.selectedServerId + '/sites', {
+      method: 'POST', body: JSON.stringify({domain, app_type: appType, php_version: '8.3'})
+    });
+    status.textContent = 'Site created. Temporary test domain: ' + res.temp_domain;
+    const sites = await api(API + '/servers/' + state.selectedServerId + '/sites');
+    renderSites(sites || []);
+  } catch (e) {
+    status.textContent = '';
+    err.textContent = e.message;
+  }
+}
+
+async function createServer() {
+  const name = document.getElementById('newServerName').value.trim();
+  const group = document.getElementById('newServerGroup').value.trim();
+  const tags = document.getElementById('newServerTags').value.split(',').map(t=>t.trim()).filter(Boolean);
+  const err = document.getElementById('newServerError');
+  err.textContent = '';
+  try {
+    const res = await api(API + '/servers', {method:'POST', body: JSON.stringify({name, group, tags})});
+    document.getElementById('installCommandText').textContent = res.install_command;
+    document.getElementById('tokenExpiryNote').textContent =
+      'This install command contains a single-use token that expires in ' + res.token_expires_in_s + ' seconds and can only be used once.';
+    document.getElementById('installCommandBox').classList.remove('hidden');
+  } catch (e) { err.textContent = e.message; }
+}
+
+async function openServerDetail(id) {
+  state.selectedServerId = id;
+  showTab('serverDetail');
+  document.getElementById('taskResult').classList.add('hidden');
+  await renderServerDetail(id);
+  try {
+    const sites = await api(API + '/servers/' + id + '/sites');
+    renderSites(sites || []);
+  } catch (e) {}
+}
+
+function renderSites(sites) {
+  const el = document.getElementById('sitesList');
+  if (!sites.length) { el.textContent = 'No sites yet.'; return; }
+  el.innerHTML = '<table><thead><tr><th>Domain</th><th>Type</th><th>PHP</th><th>Status</th></tr></thead><tbody>' +
+    sites.map(s => `<tr><td>${escapeHtml(s.Domain)}</td><td>${escapeHtml(s.AppType)}</td><td>${escapeHtml(s.PHPVersion||'—')}</td><td>${escapeHtml(s.Status)}</td></tr>`).join('') +
+    '</tbody></table>';
+}
+
+async function renderServerDetail(id) {
+  let s;
+  try { s = await api(API + '/servers/' + id); } catch (e) { return; }
+  document.getElementById('detailName').textContent = s.Name;
+  document.getElementById('detailStatus').outerHTML = statusBadge(s.Status).replace('<span', '<span id="detailStatus"');
+  const hb = s.LastHeartbeat;
+  const stats = [
+    ['Status', s.Status],
+    ['Agent version', s.AgentVer || '—'],
+    ['Uptime', hb ? formatUptime(hb.UptimeSecs) : '—'],
+    ['Load (1m)', hb ? hb.LoadAvg1.toFixed(2) : '—'],
+    ['Memory used', hb ? hb.MemUsedPct.toFixed(0) + '%' : '—'],
+    ['Disk used', hb ? hb.DiskUsedPct.toFixed(0) + '%' : '—'],
+  ];
+  document.getElementById('detailStats').innerHTML = stats.map(([label,value]) =>
+    `<div class="stat"><div class="label">${label}</div><div class="value">${value}</div></div>`).join('');
+}
+
+function formatUptime(secs) {
+  const d = Math.floor(secs/86400), h = Math.floor((secs%86400)/3600), m = Math.floor((secs%3600)/60);
+  return `${d}d ${h}h ${m}m`;
+}
+
+async function dispatchQuick(capability, params) {
+  const box = document.getElementById('taskResult');
+  box.className = 'task-result running';
+  box.textContent = capability === 'stack.install'
+    ? 'Installing stack... this can take several minutes on a fresh server.'
+    : 'Running ' + capability + '...';
+  box.classList.remove('hidden');
+  try {
+    const res = await api(API + '/servers/' + state.selectedServerId + '/tasks', {
+      method: 'POST', body: JSON.stringify({capability, params})
+    });
+    box.className = 'task-result ' + (res.status === 'succeeded' ? 'ok' : 'fail');
+    box.textContent = capability + ': ' + res.status + (res.detail ? (' — ' + res.detail) : (res.message ? (' — ' + res.message) : ''));
+  } catch (e) {
+    box.className = 'task-result fail';
+    box.textContent = capability + ' failed: ' + e.message;
+  }
+}
+
+async function revokeServer() {
+  if (!confirm('Revoke this server\'s certificate and disconnect it? It cannot reconnect without a brand new install.')) return;
+  try {
+    await api(API + '/servers/' + state.selectedServerId + '/revoke', {method:'POST'});
+    await refreshServers();
+  } catch (e) { alert(e.message); }
+}
+
+async function refreshAudit() {
+  try {
+    const entries = await api(API + '/audit') || [];
+    document.getElementById('auditTableBody').innerHTML = entries.map(e => `
+      <tr>
+        <td class="muted">${new Date(e.At).toLocaleString()}</td>
+        <td>${escapeHtml(e.ServerID||'—')}</td>
+        <td>${escapeHtml(e.Actor||'system')}</td>
+        <td>${escapeHtml(e.Action)}</td>
+        <td class="muted">${escapeHtml(e.Detail||'')}</td>
+      </tr>`).join('');
+  } catch (e) {}
+}
+
+async function startTotpEnroll() {
+  const err = document.getElementById('securityError'); err.textContent = '';
+  try {
+    const res = await api(API + '/auth/totp/enroll', {method:'POST'});
+    document.getElementById('totpSecret').textContent = res.secret + '\n\n' + res.otpauth_uri;
+    document.getElementById('totpEnrollPane').classList.add('hidden');
+    document.getElementById('totpVerifyPane').classList.remove('hidden');
+  } catch (e) { err.textContent = e.message; }
+}
+
+async function confirmTotpEnroll() {
+  const code = document.getElementById('totpVerifyCode').value.trim();
+  const err = document.getElementById('securityError'); err.textContent = '';
+  try {
+    await api(API + '/auth/totp/verify', {method:'POST', body: JSON.stringify({code})});
+    document.getElementById('totpVerifyPane').innerHTML = '<p class="muted">Two-factor authentication is now enabled on this account.</p>';
+  } catch (e) { err.textContent = e.message; }
+}
+
+(async function init() {
+  try {
+    await api(API + '/auth/me');
+    await bootApp();
+  } catch (e) {
+    document.getElementById('authScreen').classList.remove('hidden');
+    showLogin();
+  }
+})();
+</script>
+</body>
+</html>

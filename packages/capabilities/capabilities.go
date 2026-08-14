@@ -16,9 +16,14 @@ import (
 	"time"
 )
 
+// Progress reports incremental status for a long-running capability (e.g.
+// "installing nginx (3/11)") back to the control plane as it happens,
+// rather than only at completion.
+type Progress func(message string)
+
 // Handler executes one capability. Params have already been type-asserted
 // from the task's raw JSON object by the registry before Handler is called.
-type Handler func(ctx context.Context, params map[string]any) (detail string, err error)
+type Handler func(ctx context.Context, params map[string]any, progress Progress) (detail string, err error)
 
 // Registry is the fixed capability -> handler map. It is built once at
 // startup by Default() and never mutated at runtime by remote input.
@@ -27,9 +32,25 @@ type Registry map[string]Handler
 // Names of the capabilities Phase 1 ships. Adding a new one is a code
 // change + review, not a runtime registration.
 const (
-	CapSystemPing      = "system.ping"
-	CapServiceControl  = "service.control"
-	CapDiagnosticsBase = "diagnostics.basic"
+	CapSystemPing       = "system.ping"
+	CapServiceControl   = "service.control"
+	CapDiagnosticsBase  = "diagnostics.basic"
+	CapStackInstall     = "stack.install"
+	CapSiteCreate       = "site.create"
+	CapSiteSetPHP       = "site.set_php_version"
+	CapSiteSetStatus    = "site.set_status"
+	CapWordPressInstall = "app.wordpress_install"
+	CapSSLIssueLE       = "ssl.issue_letsencrypt"
+	CapSSLInstallCustom = "ssl.install_custom"
+	CapDBCreate         = "db.create"
+	CapDBDelete         = "db.delete"
+	CapDBList           = "db.list"
+	CapFileList         = "file.list"
+	CapFileRead         = "file.read"
+	CapFileWrite        = "file.write"
+	CapFileDelete       = "file.delete"
+	CapBackupRun        = "backup.run"
+	CapLogsTail         = "logs.tail"
 )
 
 // managedUnits is the allow-list of systemd units the agent will ever act
@@ -55,28 +76,47 @@ var serviceActions = map[string]bool{
 // Default returns the Phase 1 capability registry.
 func Default() Registry {
 	return Registry{
-		CapSystemPing:      handleSystemPing,
-		CapServiceControl:  handleServiceControl,
-		CapDiagnosticsBase: handleDiagnosticsBasic,
+		CapSystemPing:       handleSystemPing,
+		CapServiceControl:   handleServiceControl,
+		CapDiagnosticsBase:  handleDiagnosticsBasic,
+		CapStackInstall:     handleStackInstall,
+		CapSiteCreate:       handleSiteCreate,
+		CapSiteSetPHP:       handleSiteSetPHP,
+		CapSiteSetStatus:    handleSiteSetStatus,
+		CapWordPressInstall: handleWordPressInstall,
+		CapSSLIssueLE:       handleSSLIssueLetsEncrypt,
+		CapSSLInstallCustom: handleSSLInstallCustom,
+		CapDBCreate:         handleDBCreate,
+		CapDBDelete:         handleDBDelete,
+		CapDBList:           handleDBList,
+		CapFileList:         handleFileList,
+		CapFileRead:         handleFileRead,
+		CapFileWrite:        handleFileWrite,
+		CapFileDelete:       handleFileDelete,
+		CapBackupRun:        handleBackupRun,
+		CapLogsTail:         handleLogsTail,
 	}
 }
 
 // Dispatch validates that name is a known capability and runs it. It never
 // falls through to a generic executor for unknown names.
-func (r Registry) Dispatch(ctx context.Context, name string, params map[string]any) (string, error) {
+func (r Registry) Dispatch(ctx context.Context, name string, params map[string]any, progress Progress) (string, error) {
 	h, ok := r[name]
 	if !ok {
 		return "", fmt.Errorf("capability %q is not in the agent's allow-list", name)
 	}
-	return h(ctx, params)
+	if progress == nil {
+		progress = func(string) {}
+	}
+	return h(ctx, params, progress)
 }
 
-func handleSystemPing(ctx context.Context, params map[string]any) (string, error) {
+func handleSystemPing(ctx context.Context, params map[string]any, progress Progress) (string, error) {
 	hostname, _ := os.Hostname()
 	return fmt.Sprintf("pong from %s at %s", hostname, time.Now().UTC().Format(time.RFC3339)), nil
 }
 
-func handleServiceControl(ctx context.Context, params map[string]any) (string, error) {
+func handleServiceControl(ctx context.Context, params map[string]any, progress Progress) (string, error) {
 	unit, _ := params["unit"].(string)
 	action, _ := params["action"].(string)
 
@@ -97,7 +137,7 @@ func handleServiceControl(ctx context.Context, params map[string]any) (string, e
 	return strings.TrimSpace(string(out)), nil
 }
 
-func handleDiagnosticsBasic(ctx context.Context, params map[string]any) (string, error) {
+func handleDiagnosticsBasic(ctx context.Context, params map[string]any, progress Progress) (string, error) {
 	var findings []string
 
 	for unit := range managedUnits {

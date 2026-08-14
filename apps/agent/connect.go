@@ -93,10 +93,17 @@ func handleTask(ctx context.Context, enc *json.Encoder, reg capabilities.Registr
 
 	send(proto.TaskEvent{Status: proto.TaskRunning, Message: "starting " + task.Capability})
 
-	taskCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	// Stack installs and app deployments (apt installs, WordPress core
+	// download, ...) can legitimately take minutes over a slow VPS network
+	// link; a short timeout here would abort a perfectly healthy install.
+	taskCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 
-	detail, err := reg.Dispatch(taskCtx, task.Capability, task.Params)
+	progress := func(message string) {
+		send(proto.TaskEvent{Status: proto.TaskRunning, Message: message})
+	}
+
+	detail, err := reg.Dispatch(taskCtx, task.Capability, task.Params, progress)
 	if err != nil {
 		send(proto.TaskEvent{Status: proto.TaskFailed, Message: err.Error()})
 		return
@@ -112,7 +119,13 @@ func heartbeatLoop(ctx context.Context, enc *json.Encoder) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			hb := proto.Heartbeat{SentAt: time.Now().UTC(), UptimeSecs: uptimeSecs()}
+			hb := proto.Heartbeat{
+				SentAt:      time.Now().UTC(),
+				UptimeSecs:  uptimeSecs(),
+				LoadAvg1:    loadAvg1(),
+				MemUsedPct:  memUsedPct(),
+				DiskUsedPct: diskUsedPct(),
+			}
 			_ = enc.Encode(proto.Envelope{Type: proto.MsgHeartbeat, Heartbeat: &hb})
 		}
 	}

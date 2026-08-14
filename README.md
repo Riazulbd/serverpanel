@@ -23,6 +23,10 @@ Before any implementation, the product/architecture groundwork lives in `docs/`:
 - [`docs/security-trust-model.md`](docs/security-trust-model.md) — agent registration
   flow, mTLS and certificate rotation, revocation, and the safe SSH/firewall
   "commit-confirm" rollback mechanism.
+- [`docs/implementation-status.md`](docs/implementation-status.md) — what's actually
+  built and tested as of now (control plane, agent, capabilities, dashboard), how it was
+  verified, and what's still open. Read this before assuming a feature described
+  elsewhere in `docs/` already exists in code.
 
 ## Development priority
 

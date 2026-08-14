@@ -14,29 +14,50 @@ import (
 // listener from the mTLS agent gateway (apps/controlplane/gateway.go) — a
 // browser session never gets anywhere near the agent-facing port.
 //
-// NOTE: this skeleton has no session/2FA auth wired in yet (see
-// docs/product-plan.md Phase 1 milestone list — that's tracked as separate
-// follow-up work); every handler here is otherwise structured the way the
-// authenticated version will be, with the store as the single source of
-// truth and every mutating action audit-logged.
+// Every /api/v1/* route requires an authenticated, MFA-satisfied session
+// (see auth.go requireAuth); only registration, login/signup, and the MFA
+// challenge endpoint are reachable without one, matching the routes listed
+// in routes() below exactly.
 type apiServer struct {
 	store       *store
 	ca          *agentCA
 	gw          *gateway
 	gatewayAddr string
 	tokenTTL    time.Duration
+	publicDir   string // static dashboard assets; see dashboard.go
 }
 
 func (a *apiServer) routes() http.Handler {
 	mux := http.NewServeMux()
+
+	// Agent-facing: no session, authenticated instead by the one-time
+	// bootstrap token (see docs/security-trust-model.md §1).
 	mux.HandleFunc("POST /agents/register", a.handleRegister)
-	mux.HandleFunc("POST /api/v1/servers", a.handleCreateServer)
-	mux.HandleFunc("GET /api/v1/servers", a.handleListServers)
-	mux.HandleFunc("GET /api/v1/servers/{id}", a.handleGetServer)
-	mux.HandleFunc("POST /api/v1/servers/{id}/revoke", a.handleRevokeServer)
-	mux.HandleFunc("POST /api/v1/servers/{id}/tasks", a.handleDispatchTask)
-	mux.HandleFunc("GET /api/v1/audit", a.handleAudit)
+
+	// Auth: unauthenticated by definition (this is how a session is
+	// obtained), except /api/v1/auth/me which requires one.
+	mux.HandleFunc("POST /api/v1/auth/signup", a.handleSignup)
+	mux.HandleFunc("POST /api/v1/auth/login", a.handleLogin)
+	mux.HandleFunc("POST /api/v1/auth/logout", a.handleLogout)
+	mux.HandleFunc("POST /api/v1/auth/mfa/challenge", a.handleMFAChallenge)
+	mux.HandleFunc("GET /api/v1/auth/me", a.requireAuth(a.handleMe))
+	mux.HandleFunc("POST /api/v1/auth/totp/enroll", a.requireAuth(a.handleTOTPEnroll))
+	mux.HandleFunc("POST /api/v1/auth/totp/verify", a.requireAuth(a.handleTOTPVerify))
+
+	// Everything else that manages servers/tasks/audit requires a full
+	// session.
+	mux.HandleFunc("POST /api/v1/servers", a.requireAuth(a.handleCreateServer))
+	mux.HandleFunc("GET /api/v1/servers", a.requireAuth(a.handleListServers))
+	mux.HandleFunc("GET /api/v1/servers/{id}", a.requireAuth(a.handleGetServer))
+	mux.HandleFunc("POST /api/v1/servers/{id}/revoke", a.requireAuth(a.handleRevokeServer))
+	mux.HandleFunc("POST /api/v1/servers/{id}/tasks", a.requireAuth(a.handleDispatchTask))
+	mux.HandleFunc("GET /api/v1/servers/{id}/sites", a.requireAuth(a.handleListSites))
+	mux.HandleFunc("POST /api/v1/servers/{id}/sites", a.requireAuth(a.handleCreateSite))
+	mux.HandleFunc("GET /api/v1/audit", a.requireAuth(a.handleAudit))
+
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
+
+	a.mountDashboard(mux)
 	return mux
 }
 
@@ -92,6 +113,7 @@ func (a *apiServer) handleRegister(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *apiServer) handleCreateServer(w http.ResponseWriter, r *http.Request) {
+	actor := sessionFromContext(r.Context()).Email
 	var req struct {
 		Name  string   `json:"name"`
 		Group string   `json:"group"`
@@ -101,7 +123,7 @@ func (a *apiServer) handleCreateServer(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "name is required")
 		return
 	}
-	id, token, err := a.store.createServer(req.Name, req.Group, req.Tags, a.tokenTTL)
+	id, token, err := a.store.createServer(req.Name, req.Group, req.Tags, a.tokenTTL, actor)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -137,17 +159,19 @@ func (a *apiServer) handleGetServer(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *apiServer) handleRevokeServer(w http.ResponseWriter, r *http.Request) {
+	actor := sessionFromContext(r.Context()).Email
 	id := r.PathValue("id")
-	if err := a.store.revokeServer(id); err != nil {
+	if err := a.store.revokeServer(id, actor); err != nil {
 		writeErr(w, http.StatusNotFound, err.Error())
 		return
 	}
-	a.store.revokeToken(id)
+	a.store.revokeToken(id, actor)
 	a.gw.forceDisconnect(id)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "revoked"})
 }
 
 func (a *apiServer) handleDispatchTask(w http.ResponseWriter, r *http.Request) {
+	actor := sessionFromContext(r.Context()).Email
 	id := r.PathValue("id")
 	var req struct {
 		Capability string         `json:"capability"`
@@ -158,10 +182,10 @@ func (a *apiServer) handleDispatchTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 	defer cancel()
 
-	ev, err := a.gw.dispatch(ctx, id, req.Capability, req.Params)
+	ev, err := a.gw.dispatch(ctx, id, actor, req.Capability, req.Params)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, err.Error())
 		return
@@ -171,4 +195,9 @@ func (a *apiServer) handleDispatchTask(w http.ResponseWriter, r *http.Request) {
 
 func (a *apiServer) handleAudit(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, a.store.auditLog())
+}
+
+func (a *apiServer) handleListSites(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	writeJSON(w, http.StatusOK, a.store.listSites(id))
 }
