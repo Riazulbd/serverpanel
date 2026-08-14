@@ -1,6 +1,11 @@
 # Server Agent Security & Trust Model
 
-## 1. Registration flow (bootstrap token → machine identity)
+> **Status note:** written as the pre-implementation trust-model design. §1–§4 are
+> implemented and were exercised in real integration testing (see `TESTING.md`); §5–§6
+> describe Phase 2 mechanisms (commit-confirm SSH/firewall changes, self-repair) that do
+> not exist in code yet. Each section below is annotated with its current status.
+
+## 1. Registration flow (bootstrap token → machine identity) — **implemented**
 
 ```mermaid
 sequenceDiagram
@@ -42,24 +47,36 @@ Properties this guarantees:
 - **Revocable**: an unused token can be revoked from the dashboard (e.g., user made a
   mistake, wants to reissue); an already-exchanged identity is revoked separately (§3).
 
-## 2. Ongoing authentication: mutual TLS
+## 2. Ongoing authentication: mutual TLS — **partially implemented**
 
 - All agent ↔ control-plane traffic (registration excluded, which is TLS + token) uses
   **mTLS**: the gateway only accepts connections presenting a valid, non-revoked
   certificate issued by the internal Agent CA, and the agent verifies the gateway's
   certificate/pinned CA to prevent MITM or connecting to a spoofed endpoint.
+  **Implemented as described** — see `apps/controlplane/gateway.go` `handleConn`.
 - Client certs are **short-lived** (e.g. 30–90 days) and **auto-rotated**: before
   expiry, the agent requests renewal authenticated by its current still-valid cert (no
   shared long-lived secret is ever reused for renewal). If a renewal window is missed
   (agent offline past expiry), the agent falls back to a manual re-registration flow
   requiring a fresh bootstrap token from the dashboard — this is an intentional
   fail-closed behavior, not silent re-trust.
+  **Not yet implemented**: certs are issued with a fixed 30-day TTL
+  (`apps/controlplane/http.go` `handleRegister`) and there is no renewal
+  capability/endpoint yet — an agent whose cert expires must be manually
+  re-registered with a fresh bootstrap token today. Auto-rotation before expiry is
+  tracked as a known gap in `SYSTEM.md`.
 - The Agent CA's private key is held in a dedicated, tightly access-controlled service
   (e.g. `step-ca` or HSM-backed KMS in later stages), separate from the general
   application database, so a control-plane app-tier compromise doesn't automatically
   hand over CA signing power.
+  **Not yet implemented**: the CA is in-process (`apps/controlplane/ca.go`), with its
+  key persisted to disk alongside the SQLite database rather than in a separate
+  tightly-scoped service. This is a real, correctly-functioning PKI (persisted,
+  correctly bound identities, correctly enforced revocation — see `TESTING.md`), just
+  not yet isolated as its own trust boundary; that separation is an infrastructure
+  decision for production deployment, not a code change.
 
-## 3. Revocation
+## 3. Revocation — **implemented**
 
 - Dashboard "Disconnect server" / "Revoke agent" immediately:
   1. Adds the certificate serial to a revocation list checked on every gateway
@@ -75,8 +92,11 @@ Properties this guarantees:
   doc) gated on signature verification of the new binary against the platform's release
   signing key, so a revoked/compromised control plane can't be used to push an arbitrary
   binary — the agent independently verifies the signature before swapping itself out.
+  **Not yet implemented**: there is no `agent.self_update` capability yet. Upgrading an
+  agent today means re-running the installer with a newer `--version`; see
+  `OPERATIONS.md` §Upgrade and rollback.
 
-## 4. Compromise containment (defense in depth on the VPS)
+## 4. Compromise containment (defense in depth on the VPS) — **implemented**
 
 - Each hosted application runs as its **own Linux system user** with its own PHP-FPM
   pool, `open_basedir`, disabled dangerous PHP functions, and file ownership — a
@@ -92,8 +112,16 @@ Properties this guarantees:
 - All privileged capability invocations are written to an append-only, tamper-evident
   audit log (server-side, in the control plane — not only on the VPS, so a VPS
   compromise can't erase its own history).
+  **Implemented as described** — see `store.log`/`store.auditLog`; every capability
+  dispatch is logged before the task is sent (`gateway.dispatch`), and the audit log
+  is append-only SQL (no UPDATE/DELETE path exists for `audit_log` rows).
+  **Not yet implemented**: privilege separation. The agent process currently runs
+  entirely as root for its whole lifetime — there is no narrow root helper or Linux
+  capabilities split yet. "No general shell exec" already holds (the capability
+  allow-list is the enforcement point, not process privilege), but full defense in
+  depth per this section's original intent is still open.
 
-## 5. Safe SSH / firewall changes ("commit-confirm")
+## 5. Safe SSH / firewall changes ("commit-confirm") — **not yet implemented (Phase 2)**
 
 Any change that could lock the user out of SSH or break connectivity (SSH port change,
 disabling password auth, disabling root login, UFW rule changes, IP allow-listing)
@@ -130,10 +158,26 @@ requirement, not an optional safety net — the rollback timer runs locally on t
 so it still fires even if the control-plane connection itself is what got cut off by the
 bad change.
 
-## 6. Diagnostics and repair are opt-in, never automatic
+This entire flow (risky-change staging, local rollback timer, confirm-or-revert) has no
+code yet — there is no SSH/firewall management UI, no `network.apply_risky_change`
+capability, and no rollback-timer mechanism. UFW and Fail2Ban are installed with safe
+defaults by `stack.install` (see `SYSTEM.md` §Feature list) but are not yet
+user-editable through the dashboard. This is deliberately scoped to Phase 2
+(`product-plan.md` §9) since it's meaningful, security-sensitive work in its own right
+and Phase 1 doesn't expose any SSH/firewall-editing surface for it to protect yet.
+
+## 6. Diagnostics and repair are opt-in, never automatic — **partially implemented**
 
 Diagnostic checks (§ product plan Phase 1) only ever *propose* a fix with a plain-language
 explanation, severity, and affected component. Applying a suggested repair requires
 explicit user approval and is itself logged as an audited action — the diagnostic engine
 has read/inspect capabilities but repairs go through the same allow-listed capability +
 audit path as any other change, never a separate "just fix it" backdoor.
+
+**As built**: `diagnostics.basic` (`packages/capabilities/capabilities.go`) exists and
+is read-only exactly as this section requires — it reports each managed systemd unit's
+`is-active` state and proposes nothing itself. There is no "suggested repair" UI or
+one-click-apply-fix flow yet; a human reading the diagnostic output and dispatching an
+explicit capability (e.g. `service.control` restart) is the current repair path, which
+already satisfies "never automatic" — the plain-language suggestion layer on top is
+unbuilt.

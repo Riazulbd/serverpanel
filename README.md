@@ -13,20 +13,28 @@ authenticated connection.
 
 ## Start here
 
-Before any implementation, the product/architecture groundwork lives in `docs/`:
-
-- [`docs/product-plan.md`](docs/product-plan.md) — architecture comparison, trust model
-  summary, infra cost, data retention, milestones, MVP cost, risks, postponed features,
-  and open product-owner questions.
-- [`docs/architecture.md`](docs/architecture.md) — detailed control-plane and agent
-  architecture, component diagram, task/RPC model, and repo layout proposal.
-- [`docs/security-trust-model.md`](docs/security-trust-model.md) — agent registration
-  flow, mTLS and certificate rotation, revocation, and the safe SSH/firewall
-  "commit-confirm" rollback mechanism.
-- [`docs/implementation-status.md`](docs/implementation-status.md) — what's actually
-  built and tested as of now (control plane, agent, capabilities, dashboard), how it was
-  verified, and what's still open. Read this before assuming a feature described
-  elsewhere in `docs/` already exists in code.
+- [`docs/SYSTEM.md`](docs/SYSTEM.md) — **start here.** The single reference for what
+  this project is, the complete feature list with current implementation status,
+  architecture, database schema, known limitations, and links to every other doc.
+- [`docs/product-plan.md`](docs/product-plan.md) — the original pre-implementation
+  plan: architecture comparison, trust model summary, infra cost, data retention,
+  milestones, MVP cost, risks, postponed features, and open product-owner questions.
+  Still the source of truth for what's intentionally *not* built yet.
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — control-plane and agent
+  architecture, component diagram, task/RPC model, repo layout (with "as built" notes
+  where the implementation simplified the original proposal).
+- [`docs/SECURITY.md`](docs/SECURITY.md) — agent registration flow, mTLS and
+  certificate rotation, revocation, per-app isolation — each section marked
+  implemented/partial/not-yet-built.
+- [`docs/API.md`](docs/API.md) — every public API endpoint and the agent gateway wire
+  protocol.
+- [`docs/TESTING.md`](docs/TESTING.md) — automated test coverage, what's been manually
+  verified against a real host vs. not verified anywhere yet, and how to run the suite.
+- [`docs/OPERATIONS.md`](docs/OPERATIONS.md) — running it, backups, monitoring,
+  upgrade/rollback, troubleshooting.
+- [`docs/INSTALLATION.md`](docs/INSTALLATION.md) — local dev setup and a clean-Ubuntu
+  production install walkthrough.
+- [`CHANGELOG.md`](CHANGELOG.md) — dated log of what changed and why.
 
 ## Development priority
 

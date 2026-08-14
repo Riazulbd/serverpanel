@@ -1,5 +1,11 @@
 # Architecture
 
+> **Status note:** this document was written before implementation began, as the
+> pre-build architecture proposal. Phase 1 has since been built and the design held up
+> well, with a few deliberate simplifications called out inline below (marked **As
+> built**). For what's actually implemented today, see [`SYSTEM.md`](SYSTEM.md); this
+> document remains the source of truth for the target architecture at full scale.
+
 ## 1. Component overview
 
 ```mermaid
@@ -48,6 +54,15 @@ flowchart LR
     AGG --> DB
     AGG --> OBJ
 ```
+
+**As built:** Phase 1 has no Redis, no object storage, and no separate job-queue
+process — the control plane is one binary backed by one SQLite file
+(`modernc.org/sqlite`, pure Go, no cgo), and task dispatch is a synchronous
+request/response over the gateway's persistent connection rather than an async queue.
+This keeps local dev and a single-VPS control-plane deployment to "run one binary,
+point it at one file," and is a straightforward swap to Postgres later (see
+`db.go`) once multi-instance control-plane deployment is needed — every caller goes
+through the `store` type's method set, never raw SQL, by design.
 
 Key property: the **agent always initiates the outbound connection** to the control
 plane (standard HTTPS/WSS egress, port 443). No inbound port needs to be opened on the
@@ -108,6 +123,15 @@ this is the mechanism that satisfies "must not offer arbitrary shell-command exe
 - Heartbeats carry lightweight health/metrics snapshots (CPU/RAM/disk/load, service
   states) at a modest interval (e.g. 30–60s), independent of task traffic.
 
+**As built:** the transport is a single persistent TLS 1.3 (`crypto/tls`,
+`RequireAndVerifyClientCert`) TCP connection carrying newline-delimited JSON
+`Envelope`s (`packages/proto`), not gRPC — this was simpler to implement with zero
+extra dependencies and is easy to replace with gRPC later since `proto.Envelope`
+already models the same Task/TaskEvent/Heartbeat/Hello shape a protobuf schema would.
+The on-disk task journal for surviving an agent restart mid-task is **not yet
+implemented** — a task in flight when the agent restarts is simply lost and must be
+re-dispatched; this is called out in `SYSTEM.md`'s known-limitations section.
+
 ## 5. Data flow for logs/metrics (bandwidth-conscious)
 
 Raw nginx/php/app logs are **not** shipped wholesale to the control plane. The agent:
@@ -122,7 +146,9 @@ Raw nginx/php/app logs are **not** shipped wholesale to the control plane. The a
    "advanced log monitoring" search) and never assumes the control plane is a full log
    warehouse.
 
-## 6. Proposed repo layout (for when implementation starts)
+## 6. Repo layout
+
+Proposed layout at the time this document was first written:
 
 ```
 /apps/dashboard        # Browser SPA (control-plane frontend)
@@ -135,5 +161,24 @@ Raw nginx/php/app logs are **not** shipped wholesale to the control plane. The a
 /docs                    # This documentation
 ```
 
-This is a proposal for Phase 1 scaffolding, not yet created — implementation should
-start once the plan in `docs/product-plan.md` is confirmed with the product owner.
+**As built** (simpler than proposed — the public API and agent gateway turned out not
+to need separate deployable processes for Phase 1, so they share one Go module and one
+running binary, structured as two distinct types (`apiServer`, `gateway`) that could
+still be split into separate processes later without a protocol change):
+
+```
+/apps/controlplane      # Public HTTP API (apiServer) + agent mTLS gateway (gateway),
+                         # one binary; embeds the dashboard (web/index.html)
+/apps/agent              # Server agent (single static binary, Go, stdlib + a
+                         # Unix-socket MySQL driver)
+/packages/capabilities   # The agent's fixed, allow-listed capability handlers
+/packages/proto          # Shared Envelope/Task/TaskEvent/Heartbeat wire types
+/docs                    # This documentation
+```
+
+No `/apps/dashboard` SPA and no `/packages/ui` exist — the dashboard is one
+self-contained, dependency-free HTML/CSS/JS file (`apps/controlplane/web/index.html`),
+a deliberate choice to avoid a frontend build pipeline for Phase 1 (see `SYSTEM.md`
+§Frontend architecture for the rationale and its limits). There is no `/infra`
+directory yet; control-plane deployment is currently "run the binary," documented in
+`OPERATIONS.md` rather than codified as IaC.
