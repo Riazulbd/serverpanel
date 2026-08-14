@@ -1,0 +1,24 @@
+[Unit]
+Description=ServerPanel Agent
+Documentation=https://github.com/riazulbd/serverpanel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Registration (-api/-token) is only needed the first time; once an
+# identity exists in /etc/serverpanel-agent the agent reconnects using it,
+# so no secret is ever kept in this unit file's command line long-term.
+ExecStart=/usr/local/bin/serverpanel-agent --data-dir=/etc/serverpanel-agent
+Restart=on-failure
+RestartSec=5s
+
+# The agent process itself is not sandboxed away from root (it needs to
+# manage systemd units, nginx/php-fpm config, etc. via the allow-listed
+# capabilities in packages/capabilities), but logging and filesystem access
+# are still scoped where it costs nothing to do so.
+ProtectHome=true
+NoNewPrivileges=false
+
+[Install]
+WantedBy=multi-user.target
