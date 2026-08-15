@@ -174,6 +174,12 @@
           <button onclick="openNewSiteModal()">+ New site</button>
         </div>
         <div id="sitesList" class="muted">No sites yet.</div>
+
+        <div class="section-title" style="display:flex;justify-content:space-between;align-items:center">
+          <span>Backups</span>
+          <button onclick="openNewBackupModal()">+ New backup</button>
+        </div>
+        <div id="backupsList" class="muted">No backups yet.</div>
       </div>
     </div>
 
@@ -211,7 +217,7 @@
 
 <script>
 const API = '/api/v1';
-let state = { me: null, servers: [], selectedServerId: null, pollTimer: null };
+let state = { me: null, servers: [], sites: [], selectedServerId: null, pollTimer: null };
 
 async function api(path, opts) {
   opts = opts || {};
@@ -430,8 +436,10 @@ async function openServerDetail(id) {
   await renderServerDetail(id);
   try {
     const sites = await api(API + '/servers/' + id + '/sites');
-    renderSites(sites || []);
+    state.sites = sites || [];
+    renderSites(state.sites);
   } catch (e) {}
+  await refreshBackups();
 }
 
 function renderSites(sites) {
@@ -440,6 +448,110 @@ function renderSites(sites) {
   el.innerHTML = '<table><thead><tr><th>Domain</th><th>Type</th><th>PHP</th><th>Status</th></tr></thead><tbody>' +
     sites.map(s => `<tr><td>${escapeHtml(s.Domain)}</td><td>${escapeHtml(s.AppType)}</td><td>${escapeHtml(s.PHPVersion||'—')}</td><td>${escapeHtml(s.Status)}</td></tr>`).join('') +
     '</tbody></table>';
+}
+
+function siteLabel(siteId) {
+  const site = state.sites.find(s => s.ID === siteId);
+  return site ? site.Domain : (siteId ? siteId : 'whole server');
+}
+
+async function refreshBackups() {
+  try {
+    const backups = await api(API + '/servers/' + state.selectedServerId + '/backups');
+    renderBackups(backups || []);
+  } catch (e) {}
+}
+
+function renderBackups(backups) {
+  const el = document.getElementById('backupsList');
+  if (!backups.length) { el.textContent = 'No backups yet.'; return; }
+  el.innerHTML = '<table><thead><tr><th>Created</th><th>Site</th><th>Scope</th><th>Size</th><th>SHA-256</th><th></th></tr></thead><tbody>' +
+    backups.map(b => `<tr>
+      <td class="muted">${new Date(b.CreatedAt).toLocaleString()}</td>
+      <td>${escapeHtml(siteLabel(b.SiteID))}</td>
+      <td>${escapeHtml(b.Scope)}</td>
+      <td class="muted">${formatBytes(b.SizeBytes)}</td>
+      <td class="muted" title="${escapeHtml(b.SHA256)}">${escapeHtml(b.SHA256.slice(0,12))}...</td>
+      <td><button onclick="restoreBackup('${b.ID}')">Restore</button></td>
+    </tr>`).join('') +
+    '</tbody></table>';
+}
+
+function formatBytes(n) {
+  if (!n) return '0 B';
+  const units = ['B','KB','MB','GB','TB'];
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return n.toFixed(i === 0 ? 0 : 1) + ' ' + units[i];
+}
+
+function openNewBackupModal() {
+  const root = document.getElementById('modalRoot');
+  const siteOptions = ['<option value="">Whole server files (no site selected)</option>']
+    .concat(state.sites.map(s => `<option value="${s.ID}">${escapeHtml(s.Domain)}</option>`)).join('');
+  root.innerHTML = `
+    <div class="modal-backdrop" onclick="if(event.target===this) closeModal()">
+      <div class="modal">
+        <h2>New backup</h2>
+        <div class="field">
+          <label>Scope</label>
+          <select id="newBackupScope" onchange="toggleBackupDBField()">
+            <option value="files">Files only</option>
+            <option value="db">Database only</option>
+            <option value="full">Files + database</option>
+          </select>
+        </div>
+        <div class="field" id="newBackupSiteField">
+          <label>Site (for files)</label>
+          <select id="newBackupSite">${siteOptions}</select>
+        </div>
+        <div class="field hidden" id="newBackupDBField">
+          <label>Database name</label>
+          <input id="newBackupDBName" placeholder="e.g. site_example_com">
+        </div>
+        <button class="primary" style="width:100%" onclick="createBackup()">Create backup</button>
+        <div class="error" id="newBackupError"></div>
+        <p class="muted" id="newBackupStatus"></p>
+      </div>
+    </div>`;
+}
+
+function toggleBackupDBField() {
+  const scope = document.getElementById('newBackupScope').value;
+  document.getElementById('newBackupDBField').classList.toggle('hidden', scope === 'files');
+  document.getElementById('newBackupSiteField').classList.toggle('hidden', scope === 'db');
+}
+
+async function createBackup() {
+  const scope = document.getElementById('newBackupScope').value;
+  const siteId = document.getElementById('newBackupSite').value;
+  const dbName = document.getElementById('newBackupDBName').value.trim();
+  const err = document.getElementById('newBackupError');
+  const status = document.getElementById('newBackupStatus');
+  err.textContent = '';
+  status.textContent = 'Running backup... this can take a while for large sites or databases.';
+  try {
+    await api(API + '/servers/' + state.selectedServerId + '/backups', {
+      method: 'POST', body: JSON.stringify({site_id: siteId, scope, db_name: dbName})
+    });
+    status.textContent = 'Backup complete.';
+    await refreshBackups();
+  } catch (e) {
+    status.textContent = '';
+    err.textContent = e.message;
+  }
+}
+
+async function restoreBackup(backupId) {
+  const dbName = prompt('If this backup includes a database, enter the target database name to restore into (leave blank for a files-only backup):', '') || '';
+  if (!confirm('Restore this backup? A checkpoint of the current state will be taken first, but this will overwrite current files/database with the backed-up version.')) return;
+  try {
+    await api(API + '/servers/' + state.selectedServerId + '/backups/' + backupId + '/restore', {
+      method: 'POST', body: JSON.stringify({db_name: dbName})
+    });
+    alert('Restore complete.');
+    await refreshBackups();
+  } catch (e) { alert('Restore failed: ' + e.message); }
 }
 
 async function renderServerDetail(id) {

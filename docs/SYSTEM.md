@@ -124,10 +124,19 @@ webhook push-to-deploy, deploy keys, or rollback exist in this codebase yet.
   does not yet re-verify it automatically |
 | Local storage | ✅ |
 | S3-compatible / Amazon S3 / R2 / B2 / Spaces / Wasabi | ⬜ Phase 2 |
-| Restore (same or another server) | ⬜ **not implemented — there is no restore
-  capability yet, only `backup.run`.** This is the most significant gap relative to
-  the "backup and restore model" the product plan calls for; see `OPERATIONS.md`. |
-| Pre-restore checkpoints, progress tracking, failure recovery | ⬜ depends on restore |
+| Restore (same server) | ✅ `backup.restore` — checksum-verified, archive-member-
+  validated, chowns files back to the site's isolated system user, imports a `.sql`
+  dump via `mysql`. Restoring a backup onto a *different* server (cross-server
+  migration) is not implemented — that needs a way to transfer the archive between
+  agents first, tracked as Phase 2 (`product-plan.md` §9). |
+| Pre-restore checkpoints | ✅ `backup.restore` takes a best-effort backup of current
+  state before making any change, and returns its path (`checkpoint_path`) |
+| Progress tracking | ✅ every restore step (checksum verify, member validation,
+  checkpoint, extraction/import) reports through the same `Progress` callback
+  `backup.run` uses, surfaced as intermediate `TaskEvent`s |
+| Failure recovery | 🚧 a failed restore leaves the pre-restore checkpoint archive on
+  disk (its path is returned) for a human to restore from again; there is no
+  automatic rollback-on-failure yet |
 
 ### Security and monitoring
 See `SECURITY.md` for the detailed, section-by-section implemented-vs-planned
@@ -145,11 +154,12 @@ Phase boundaries and full milestone/estimate tables are in `product-plan.md` §6
 is the condensed status:
 
 - **Phase 1 — secure working foundation:** ~90% of the *capability* surface exists and
-  is tested per-capability (see the tables above); the biggest real gaps are backup
-  **restore**, an automated test suite (now added, see `TESTING.md`), SSL auto-renewal,
-  and agent cert auto-rotation. Not "GA-ready" yet, but the architecture and security
-  primitives it depends on (mTLS, allow-listed capabilities, per-app isolation, audit
-  log) are real and proven, not stubs.
+  is tested per-capability (see the tables above), including backup **restore** (added
+  after the previous documentation pass — see §19 and `CHANGELOG.md`). Remaining real
+  gaps: a durable background job queue (task dispatch is still synchronous), SSL
+  auto-renewal, and agent cert auto-rotation. Not "GA-ready" yet, but the architecture
+  and security primitives it depends on (mTLS, allow-listed capabilities, per-app
+  isolation, audit log) are real and proven, not stubs.
 - **Phase 2 — professional server management:** not started. Git deployment,
   cron/process management, SSH/firewall management UI, remote backups, cross-server
   migration all remain ⬜.
@@ -278,9 +288,8 @@ Current capability list: `system.ping`, `service.control`, `diagnostics.basic`,
 `stack.install`, `site.create`, `site.set_php_version`, `site.set_status`,
 `app.wordpress_install`, `ssl.issue_letsencrypt`, `ssl.install_custom`, `db.create`,
 `db.delete`, `db.list`, `file.list`, `file.read`, `file.write`, `file.delete`,
-`backup.run`, `logs.tail`. Notably absent (by design, until reviewed and added):
-`backup.restore`, `git.deploy`, `cron.upsert`, `ssh.*`, `firewall.*`,
-`agent.self_update`.
+`backup.run`, `backup.restore`, `logs.tail`. Notably absent (by design, until reviewed
+and added): `git.deploy`, `cron.upsert`, `ssh.*`, `firewall.*`, `agent.self_update`.
 
 ## 13. Installation and deployment
 
@@ -343,12 +352,24 @@ defenses on the file manager (`resolveScopedPath`).
 
 ## 19. Backup and restore model
 
-**Backup**: implemented (`backup.run` — local, checksummed tar.gz of DB and/or files).
-**Restore**: **not implemented**. This is the single largest functional gap in the
-Phase 1 feature set relative to what the product plan calls for, and should be the
-next priority after this documentation pass — see `OPERATIONS.md` §Backup and restore
-for the concrete plan (a `backup.restore` capability mirroring `backup.run`'s
-validation approach, plus a pre-restore checkpoint step).
+**Backup**: implemented (`backup.run` — local, checksummed tar.gz of DB and/or files;
+archive filenames include a random suffix, not just a second-granularity timestamp, so
+two backups of the same site/scope in the same second can never collide — see
+`CHANGELOG.md` for the bug this fixes).
+
+**Restore**: implemented (`backup.restore`), same-server only. Safety properties, in
+order: (1) the archive path must resolve inside the managed backup directory
+(`resolveBackupArchivePath`, the same symlink-safe pattern the file manager uses); (2)
+its SHA-256 must match the checksum the control plane recorded when the backup was
+created — the API layer only ever dispatches the path/checksum from its own `backups`
+table, never a client-supplied one; (3) every member path inside the archive is listed
+and validated against the declared scope *before* anything is extracted, so a
+corrupted or mismatched archive can't write outside where it's scoped to; (4) a
+best-effort pre-restore checkpoint of current state is taken before any mutation. What
+it does not yet do: cross-server restore (the archive never leaves the agent that
+created it), scheduled/automatic restore, or automatic rollback if a restore fails
+partway through (the pre-restore checkpoint exists precisely so a human can restore
+from it manually in that case).
 
 ## 20. Monitoring and alerting
 
@@ -359,7 +380,10 @@ all ⬜, scoped to Phase 2 per `product-plan.md` §9.
 
 ## 21. Known limitations
 
-- No backup **restore** capability (see §19).
+- Backup restore is same-server only — no cross-server restore/migration path yet
+  (see §19).
+- No scheduled/automatic backups — `backup.run`/`backup.restore` are both on-demand
+  only, dispatched from the dashboard or API.
 - No on-disk agent task journal — a task in flight when the agent process restarts is
   lost, not resumed (see `ARCHITECTURE.md` §4 "As built").
 - No agent certificate auto-renewal before its 30-day expiry (see `SECURITY.md` §2).

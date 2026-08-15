@@ -2,6 +2,51 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-15 — Backup restore: capability, persistence, dashboard UI
+
+- Implemented `backup.restore` (`packages/capabilities/backup.go`), closing the
+  largest functional gap flagged in the previous pass. Safety properties: the archive
+  path must resolve inside the managed backup directory (`resolveBackupArchivePath`,
+  symlink-safe, same pattern as the file manager's `resolveScopedPath`); its SHA-256
+  must match a caller-supplied `expected_sha256` or the restore is refused outright;
+  every member path inside the archive is listed and validated against the declared
+  restore scope *before* anything is extracted (`validateBackupArchiveMembers`),
+  rejecting a corrupted or mismatched-scope archive rather than extracting it; a
+  best-effort pre-restore checkpoint of current state is taken before any mutation
+  (`createBackupArchive`, factored out of `backup.run` so both share it); database
+  restore imports a `.sql` dump via `mysql`; file restore extracts back to the
+  archive's original absolute path and restores ownership to the site's isolated
+  system user (`siteSystemUserFromPath`).
+- **Found and fixed a real bug while testing the above**: backup archive filenames
+  used a second-granularity timestamp only, so `backup.restore`'s own pre-restore
+  checkpoint — running seconds (or less) after the backup it's restoring from — could
+  collide with and silently overwrite the original archive with a fresh snapshot of
+  already-corrupted state, which extraction then read back from post-overwrite. Caught
+  by `TestBackupRunAndRestoreFilesRoundTrip` on its first run; fixed with a random
+  filename suffix (see `docs/TESTING.md` §4 for the full writeup).
+- Wired backup persistence and restore into the control plane: `store.go` gained
+  `createBackup`/`listBackups`/`getBackup`/`getSite`; new `apps/controlplane/backups.go`
+  dispatches `backup.run`/`backup.restore` and only persists/acts on agent-confirmed
+  success (same pattern `handleCreateSite` already used for sites); new routes
+  `GET/POST /api/v1/servers/{id}/backups` and
+  `POST /api/v1/servers/{id}/backups/{backupId}/restore` — restore always dispatches
+  the archive path/checksum from the control plane's own stored record, never a
+  client-supplied one.
+- Added a "Backups" section to the dashboard (`apps/controlplane/web/index.html`):
+  list backups per server with scope/size/checksum, a "+ New backup" modal (scope
+  selector with site/db-name fields that show/hide per scope), and a one-click
+  "Restore" action with a confirmation prompt. Manually verified with a real running
+  control-plane binary (curl through the full create/list/validate/404/502 flow) and a
+  headless-Chromium (Playwright) pass through login → server detail → new-backup modal
+  → scope toggling, no console errors.
+- Added 16 new automated tests (11 in `packages/capabilities`, 4 store-level + 1 HTTP
+  route test in `apps/controlplane`; 64 total, up from 48), including a real
+  end-to-end files-scope backup→drift→restore round trip against real files, a real
+  system user, and real `tar` — not mocked. `db`/`full`-scope paths remain untested by
+  `go test` (no MariaDB in this sandbox — see `docs/TESTING.md` §2/§5).
+- Updated `docs/SYSTEM.md` §2/§3/§19/§21, `docs/API.md`, `docs/OPERATIONS.md` §3, and
+  `docs/TESTING.md` to reflect all of the above.
+
 ## 2026-08-14 — Automated test suite, doc restructuring
 
 - Added `go test` coverage across `apps/controlplane` and `packages/capabilities`

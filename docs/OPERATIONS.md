@@ -40,22 +40,28 @@ dashboard).
 
 ## 3. Backup and restore
 
-**Backup** (implemented): dispatch the `backup.run` capability
-(`POST /api/v1/servers/{id}/tasks` with `{"capability": "backup.run", "params": {...}}`)
-— see `packages/capabilities/backup.go` for its `scope`/`target` params. It writes a
-checksummed local tar.gz on the VPS itself and records the checksum in its
-`TaskEvent.detail`. The control plane's `backups` table schema exists (`db.go`) but
-nothing currently writes a row into it automatically — wiring `backup.run`'s dispatch
-through a persistence step analogous to `handleCreateSite` (dispatch → parse result →
-insert row) is a small, well-scoped next task.
+**Backup** (implemented): from the dashboard, open a server, "Backups" → "+ New
+backup" (choose scope and, for a `files`/`full` backup, which site). Via the API:
+`POST /api/v1/servers/{id}/backups` with `{"site_id": "...", "scope": "...",
+"db_name": "..."}` — see `API.md`. This dispatches `backup.run`
+(`packages/capabilities/backup.go`), which writes a checksummed local tar.gz on the VPS
+itself, and only on success persists a row in the control plane's `backups` table
+(`site_id`, `scope`, `path`, `size_bytes`, `sha256`, `created_at`) — the same
+dispatch-then-persist pattern `handleCreateSite` uses for sites.
 
-**Restore** (not implemented): there is no `backup.restore` capability yet. Until one
-exists, restoring from a `backup.run` archive is a fully manual process: SSH to the
-VPS, locate the tar.gz under wherever `backup.run` wrote it, verify its SHA-256 against
-the value in the task's `detail`, and manually extract/restore the DB dump and/or
-files. **Do not represent backup/restore as a complete, tested feature until a real
-`backup.restore` capability exists and has been exercised end-to-end** — see
-`SYSTEM.md` §19 and §21, and `TESTING.md` §5 item 1 for the recommended next step.
+**Restore** (implemented, same-server only): from the dashboard, click "Restore" next
+to a backup in that server's Backups list; via the API,
+`POST /api/v1/servers/{id}/backups/{backupId}/restore`. The control plane always
+dispatches the `archive_path` and `expected_sha256` from its own `backups` row — never
+anything the client supplies — so a restore can only ever target an archive this
+control plane created and already checksummed. `backup.restore` itself
+(`packages/capabilities/backup.go`) re-verifies the checksum, validates every archive
+member against the declared restore scope before extracting anything, takes a
+best-effort pre-restore checkpoint of current state first, then imports the `.sql`
+dump via `mysql` and/or extracts files back to their original location and restores
+their ownership to the site's isolated system user. See `SYSTEM.md` §19 for the full
+safety-property list and current limitations (no cross-server restore yet, no
+automatic rollback on a failed restore — use the returned `checkpoint_path`).
 
 ## 4. Monitoring and alerting
 

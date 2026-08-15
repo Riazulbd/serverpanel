@@ -245,3 +245,82 @@ func TestCreateAndListSites(t *testing.T) {
 		t.Fatalf("domain = %q, want example.sslip.io", sites[0].Domain)
 	}
 }
+
+func TestGetSiteReturnsNotFoundForUnknownID(t *testing.T) {
+	st := newTestStore(t)
+	if _, ok := st.getSite("no-such-site"); ok {
+		t.Fatal("expected getSite to report not-found for an unknown id")
+	}
+}
+
+func TestGetSiteRoundTrip(t *testing.T) {
+	st := newTestStore(t)
+	id, _, err := st.createServer("web-7", "", nil, time.Hour, "admin@example.com")
+	if err != nil {
+		t.Fatalf("createServer: %v", err)
+	}
+	created, err := st.createSite(id, "example.com", "site_example_com", "/home/sites/site_example_com/public", "wordpress", "8.3")
+	if err != nil {
+		t.Fatalf("createSite: %v", err)
+	}
+	got, ok := st.getSite(created.ID)
+	if !ok {
+		t.Fatal("expected getSite to find the just-created site")
+	}
+	if got.Domain != "example.com" || got.ServerID != id {
+		t.Fatalf("getSite = %+v, want domain=example.com server=%s", got, id)
+	}
+}
+
+func TestCreateAndListBackups(t *testing.T) {
+	st := newTestStore(t)
+	id, _, err := st.createServer("web-8", "", nil, time.Hour, "admin@example.com")
+	if err != nil {
+		t.Fatalf("createServer: %v", err)
+	}
+	site, err := st.createSite(id, "example.com", "site_example_com", "/home/sites/site_example_com/public", "wordpress", "8.3")
+	if err != nil {
+		t.Fatalf("createSite: %v", err)
+	}
+
+	rec, err := st.createBackup(id, site.ID, "files", "/var/backups/serverpanel/example-files-20260101T000000Z-ab12cd34.tar.gz", 4096, "deadbeef")
+	if err != nil {
+		t.Fatalf("createBackup: %v", err)
+	}
+	if rec.ID == "" || rec.Status != "completed" {
+		t.Fatalf("createBackup returned an unexpected record: %+v", rec)
+	}
+
+	backups := st.listBackups(id)
+	if len(backups) != 1 {
+		t.Fatalf("listBackups returned %d backups, want 1", len(backups))
+	}
+	if backups[0].SHA256 != "deadbeef" || backups[0].SiteID != site.ID {
+		t.Fatalf("listed backup = %+v, want sha256=deadbeef site=%s", backups[0], site.ID)
+	}
+
+	got, ok := st.getBackup(rec.ID)
+	if !ok {
+		t.Fatal("expected getBackup to find the just-created backup")
+	}
+	if got.Path != rec.Path {
+		t.Fatalf("getBackup path = %q, want %q", got.Path, rec.Path)
+	}
+
+	// A server that has no backups yet must get an empty list, not an error
+	// or a nil-vs-empty-slice surprise the dashboard would have to special-case.
+	otherID, _, err := st.createServer("web-9", "", nil, time.Hour, "admin@example.com")
+	if err != nil {
+		t.Fatalf("createServer: %v", err)
+	}
+	if got := st.listBackups(otherID); len(got) != 0 {
+		t.Fatalf("listBackups for a server with no backups = %v, want empty", got)
+	}
+}
+
+func TestGetBackupReturnsNotFoundForUnknownID(t *testing.T) {
+	st := newTestStore(t)
+	if _, ok := st.getBackup("no-such-backup"); ok {
+		t.Fatal("expected getBackup to report not-found for an unknown id")
+	}
+}

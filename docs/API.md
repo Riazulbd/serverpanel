@@ -43,6 +43,9 @@ protected route; there is no route that skips it by omission.
 | `POST` | `/api/v1/servers/{id}/tasks` | Dispatch an arbitrary allow-listed capability (see §3) |
 | `GET` | `/api/v1/servers/{id}/sites` | List sites on a server |
 | `POST` | `/api/v1/servers/{id}/sites` | Dispatch `site.create` and persist the resulting site record |
+| `GET` | `/api/v1/servers/{id}/backups` | List backups recorded for a server |
+| `POST` | `/api/v1/servers/{id}/backups` | Dispatch `backup.run` and persist the resulting backup record |
+| `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a previously recorded backup |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -102,6 +105,38 @@ Dispatches `site.create`, and only on the agent reporting success, persists a `s
 row. → `201 {"site": {...siteRecord}, "temp_domain": "<user>.<ip-with-dashes>.sslip.io"}`.
 A dispatch failure or agent-side failure never leaves an orphan site record — the
 row is written after (and only after) the agent confirms success.
+
+### `POST /api/v1/servers/{id}/backups`
+```json
+{"site_id": "site_abc123", "scope": "files", "db_name": ""}
+```
+`scope` is one of `db`, `files`, `full`. `site_id` is optional — when set, its
+`docroot` is used as `site_root` for a `files`/`full` backup; omit it for a
+whole-server `db`-scope backup. `db_name` is required for `db`/`full`. Dispatches
+`backup.run`, and only on the agent reporting success, persists a `backups` row (same
+"never leave an orphan/fictitious record" rule as site creation). →
+`201 {...backupRecord}` (`ID`, `ServerID`, `SiteID`, `Scope`, `Path`, `SizeBytes`,
+`SHA256`, `Status`, `CreatedAt`). Missing `scope` → `400`. No connected agent, or a
+transport-level dispatch failure → `502`. The agent rejecting the request (e.g. bad
+`db_name`) → `422`.
+
+### `GET /api/v1/servers/{id}/backups`
+→ `200 [...backupRecord]`, newest first, `[]`/`null` if none exist yet.
+
+### `POST /api/v1/servers/{id}/backups/{backupId}/restore`
+```json
+{"db_name": "site_example_com"}
+```
+`db_name` is only needed to override the target database name for a `db`/`full`-scope
+restore; omit it for a `files`-scope restore. The `archive_path` and `expected_sha256`
+dispatched to the agent always come from the `backups` row this control plane itself
+recorded when the backup was created — never from anything the client supplies — so a
+restore can only ever target an archive this control plane created and already
+checksummed. A `backupId` that doesn't exist, or belongs to a different server, → `404`
+before any agent dispatch is attempted. → `200 {"status": "restored", "detail": "..."}`
+on success. See `SYSTEM.md` §19 and `packages/capabilities/backup.go` for the
+checksum-verification, archive-member-validation, and pre-restore-checkpoint steps the
+agent itself performs before touching anything.
 
 ### `POST /agents/register`
 ```json
