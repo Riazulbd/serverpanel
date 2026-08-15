@@ -43,6 +43,9 @@ protected route; there is no route that skips it by omission.
 | `POST` | `/api/v1/servers/{id}/tasks` | Dispatch an arbitrary allow-listed capability (see §3) |
 | `GET` | `/api/v1/servers/{id}/sites` | List sites on a server |
 | `POST` | `/api/v1/servers/{id}/sites` | Dispatch `site.create` and persist the resulting site record |
+| `GET` | `/api/v1/servers/{id}/backups` | List backups recorded for a server |
+| `POST` | `/api/v1/servers/{id}/backups` | Dispatch `backup.run` and persist the resulting backup record |
+| `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a recorded backup |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -102,6 +105,30 @@ Dispatches `site.create`, and only on the agent reporting success, persists a `s
 row. → `201 {"site": {...siteRecord}, "temp_domain": "<user>.<ip-with-dashes>.sslip.io"}`.
 A dispatch failure or agent-side failure never leaves an orphan site record — the
 row is written after (and only after) the agent confirms success.
+
+### `POST /api/v1/servers/{id}/backups`
+```json
+{"scope": "files", "site_id": "site_...", "db_name": ""}
+```
+`scope` is `db`, `files`, or `full`. For `files`/`full`, `site_id` must reference a
+site already recorded on this server — the agent's `site_root`/`system_user` are
+derived from that site's own recorded `docroot`/`system_user`, never taken from the
+request body, so a caller can't point a backup at an arbitrary path. For `db`/`full`,
+`db_name` is required. Dispatches `backup.run` and, only on success, persists a
+`backups` row. → `201` with the `backupRecord` JSON (`ID`, `ServerID`, `SiteID`,
+`Scope`, `Path`, `SizeBytes`, `SHA256`, `DBName`, `Status`, `CreatedAt`).
+
+### `POST /api/v1/servers/{id}/backups/{backupId}/restore`
+No request body — every parameter the agent needs (`backup_path`, `expected_sha256`,
+`scope`, `db_name`, and, via the backup's recorded `site_id`, `site_root`/
+`system_user`) comes from the already-persisted `backups`/`sites` rows, not from the
+caller. Dispatches `backup.restore` (see `SYSTEM.md` §12 and §19 for what that does,
+including the automatic pre-restore checkpoint). → `200
+{"restored_from": {...backupRecord}, "checkpoint": {...backupRecord}|null}` — the
+checkpoint the agent took immediately before restoring is itself persisted as a new
+backup row, so it appears in a subsequent `GET .../backups` and can itself be restored
+from if the restore produced an unwanted result. Unknown `backupId` → `404`. A
+`files`/`full` backup whose site has since been deleted → `422`.
 
 ### `POST /agents/register`
 ```json

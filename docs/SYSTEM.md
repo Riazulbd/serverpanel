@@ -120,14 +120,21 @@ webhook push-to-deploy, deploy keys, or rollback exist in this codebase yet.
 | Scheduling, retention policies | ⬜ not implemented (backups are on-demand only) |
 | Encryption | ⬜ not implemented (local tar.gz is unencrypted; relies on host
   filesystem permissions today) |
-| Backup verification | 🚧 SHA-256 checksum is recorded and returned; the dashboard
-  does not yet re-verify it automatically |
+| Backup verification | ✅ SHA-256 checksum recorded on creation; `backup.restore`
+  re-verifies it against the archive before restoring if `expected_sha256` is passed
+  (the control plane always passes the recorded checksum) |
 | Local storage | ✅ |
 | S3-compatible / Amazon S3 / R2 / B2 / Spaces / Wasabi | ⬜ Phase 2 |
-| Restore (same or another server) | ⬜ **not implemented — there is no restore
-  capability yet, only `backup.run`.** This is the most significant gap relative to
-  the "backup and restore model" the product plan calls for; see `OPERATIONS.md`. |
-| Pre-restore checkpoints, progress tracking, failure recovery | ⬜ depends on restore |
+| Restore (same server) | ✅ `backup.restore` — see §12. Restoring to a *different*
+  server (cross-server migration) is not implemented: the capability only ever writes
+  to paths on the same agent it dispatches to. |
+| Pre-restore checkpoints | ✅ automatic — see §12 |
+| Progress tracking | 🚧 `Progress` messages are emitted per step but the dashboard's
+  restore button doesn't stream them; it only shows the terminal result |
+| Failure recovery | 🚧 a failed checkpoint aborts the restore before any destructive
+  step; a failure *during* the destructive step itself (e.g. `mysql` restore fails
+  partway through a multi-statement dump) is not transactional — the pre-restore
+  checkpoint exists specifically so that case is recoverable by restoring it |
 
 ### Security and monitoring
 See `SECURITY.md` for the detailed, section-by-section implemented-vs-planned
@@ -145,11 +152,12 @@ Phase boundaries and full milestone/estimate tables are in `product-plan.md` §6
 is the condensed status:
 
 - **Phase 1 — secure working foundation:** ~90% of the *capability* surface exists and
-  is tested per-capability (see the tables above); the biggest real gaps are backup
-  **restore**, an automated test suite (now added, see `TESTING.md`), SSL auto-renewal,
-  and agent cert auto-rotation. Not "GA-ready" yet, but the architecture and security
-  primitives it depends on (mTLS, allow-listed capabilities, per-app isolation, audit
-  log) are real and proven, not stubs.
+  is tested per-capability (see the tables above); backup **restore** is now
+  implemented and tested (2026-08-15, see §12 and `TESTING.md`) — remaining real gaps
+  are SSL auto-renewal, agent cert auto-rotation, and a durable background-job queue
+  (task dispatch is still synchronous request/response). Not "GA-ready" yet, but the
+  architecture and security primitives it depends on (mTLS, allow-listed capabilities,
+  per-app isolation, audit log) are real and proven, not stubs.
 - **Phase 2 — professional server management:** not started. Git deployment,
   cron/process management, SSH/firewall management UI, remote backups, cross-server
   migration all remain ⬜.
@@ -183,8 +191,8 @@ Go, standard library `net/http` (Go 1.22+ method+pattern routing, e.g.
 `"POST /api/v1/servers"`), no web framework. Two logical components sharing one
 process and one `*store`:
 
-- **`apiServer`** (`http.go`, `auth.go`, `sites.go`, `dashboard.go`) — the public,
-  session-authenticated API + dashboard host.
+- **`apiServer`** (`http.go`, `auth.go`, `sites.go`, `backups.go`, `dashboard.go`) —
+  the public, session-authenticated API + dashboard host.
 - **`gateway`** (`gateway.go`) — the mTLS-only, certificate-authenticated agent-facing
   listener. See `API.md` for the full endpoint/message list.
 
@@ -222,7 +230,11 @@ The agent has **no shell-exec entry point in its protocol or code** — see §8.
 ## 8. Database schema
 
 SQLite, schema defined inline in `apps/controlplane/db.go` (`CREATE TABLE IF NOT
-EXISTS`, applied on every `openDB` call — idempotent, no separate migration tool yet):
+EXISTS`, applied on every `openDB` call — idempotent, no separate migration tool yet;
+`db.go`'s `applyMigrations` is the minimal additive-only stopgap for columns added to
+a table after it may already exist on disk, e.g. `backups.db_name` below — each
+statement is a no-op if already applied, so it's safe to run against any existing
+database on every startup):
 
 | Table | Purpose |
 |---|---|
@@ -233,7 +245,7 @@ EXISTS`, applied on every `openDB` call — idempotent, no separate migration to
 | `revoked_certs` | cert serial → server, revoked-at (checked on every gateway handshake) |
 | `audit_log` | append-only: seq, timestamp, server, actor, action, detail |
 | `sites` | id, server, domain, system user, docroot, app type, PHP version, status |
-| `backups` | id, server, site, scope, path, size, sha256, status, created_at |
+| `backups` | id, server, site (optional), scope, path, size, sha256, db name, status, created_at |
 
 No ORM — every query is a small, explicit SQL statement in `store.go`. All secrets
 (session tokens, bootstrap tokens) are stored only as SHA-256 hashes; passwords use
@@ -278,9 +290,23 @@ Current capability list: `system.ping`, `service.control`, `diagnostics.basic`,
 `stack.install`, `site.create`, `site.set_php_version`, `site.set_status`,
 `app.wordpress_install`, `ssl.issue_letsencrypt`, `ssl.install_custom`, `db.create`,
 `db.delete`, `db.list`, `file.list`, `file.read`, `file.write`, `file.delete`,
-`backup.run`, `logs.tail`. Notably absent (by design, until reviewed and added):
-`backup.restore`, `git.deploy`, `cron.upsert`, `ssh.*`, `firewall.*`,
+`backup.run`, `backup.restore`, `logs.tail`. Notably absent (by design, until
+reviewed and added): `git.deploy`, `cron.upsert`, `ssh.*`, `firewall.*`,
 `agent.self_update`.
+
+`backup.restore` (added 2026-08-15): restores a database and/or a site's files from
+an archive `backup.run` created. Never accepts an arbitrary filesystem path — the
+archive must resolve (following symlinks) under the fixed `backupBaseDir`
+(`/var/backups/serverpanel`), and a files/full restore's target must resolve under
+`/home/sites/`, the same boundary `file.write`/`site.create` already enforce. If the
+caller supplies `expected_sha256`, the archive's checksum is verified before anything
+is touched. Before making any change, it takes a fresh backup of whatever is live
+right now (a "pre-restore checkpoint") using the same scope/target being restored; if
+that checkpoint backup fails, the restore is aborted before any destructive step
+runs. The control-plane HTTP layer (`apps/controlplane/backups.go`) derives the
+restore target from the backup's own recorded `site_id` rather than trusting a
+request body, and persists the checkpoint the agent took as its own new `backups` row
+so it appears in the dashboard and can itself be restored from.
 
 ## 13. Installation and deployment
 
@@ -343,12 +369,17 @@ defenses on the file manager (`resolveScopedPath`).
 
 ## 19. Backup and restore model
 
-**Backup**: implemented (`backup.run` — local, checksummed tar.gz of DB and/or files).
-**Restore**: **not implemented**. This is the single largest functional gap in the
-Phase 1 feature set relative to what the product plan calls for, and should be the
-next priority after this documentation pass — see `OPERATIONS.md` §Backup and restore
-for the concrete plan (a `backup.restore` capability mirroring `backup.run`'s
-validation approach, plus a pre-restore checkpoint step).
+**Backup**: implemented (`backup.run` — local, checksummed tar.gz of DB and/or files),
+persisted as a `backups` row via `POST /api/v1/servers/{id}/backups` (see `API.md`).
+**Restore**: implemented (2026-08-15) — `backup.restore` (see §12) restores a database
+and/or a site's files from a previously-recorded backup, dispatched via
+`POST /api/v1/servers/{id}/backups/{backupId}/restore`. Every restore automatically
+takes a fresh "pre-restore checkpoint" backup of the live state immediately before
+making any change, and that checkpoint is itself persisted as a new `backups` row —
+so a bad restore is itself recoverable the same way. What's still missing: restoring
+*to a different server* than the one the backup was taken from (cross-server
+migration — Phase 2), scheduled/automatic backups (on-demand only today), retention
+policies, encryption at rest, and remote/object storage (S3-compatible — Phase 2).
 
 ## 20. Monitoring and alerting
 
@@ -359,7 +390,9 @@ all ⬜, scoped to Phase 2 per `product-plan.md` §9.
 
 ## 21. Known limitations
 
-- No backup **restore** capability (see §19).
+- Backup/restore is local-storage and single-server only: no scheduling, retention
+  policies, encryption at rest, remote/object storage, or cross-server restore yet
+  (see §19).
 - No on-disk agent task journal — a task in flight when the agent process restarts is
   lost, not resumed (see `ARCHITECTURE.md` §4 "As built").
 - No agent certificate auto-renewal before its 30-day expiry (see `SECURITY.md` §2).

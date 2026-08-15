@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -29,7 +30,32 @@ func openDB(path string) (*sql.DB, error) {
 		db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
+	if err := applyMigrations(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("apply migrations: %w", err)
+	}
 	return db, nil
+}
+
+// applyMigrations covers schema changes made to a table after it may
+// already exist on disk, which "CREATE TABLE IF NOT EXISTS" alone can't
+// apply. There's no separate migration tool yet (see ARCHITECTURE.md) — this
+// is the minimal, additive-only stopgap: each statement is guarded to
+// tolerate already having been applied, so it's safe to run on every
+// startup against any database, old or new.
+func applyMigrations(db *sql.DB) error {
+	stmts := []string{
+		`ALTER TABLE backups ADD COLUMN db_name TEXT NOT NULL DEFAULT ''`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			if strings.Contains(err.Error(), "duplicate column name") {
+				continue
+			}
+			return fmt.Errorf("%s: %w", stmt, err)
+		}
+	}
+	return nil
 }
 
 const schema = `

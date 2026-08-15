@@ -33,6 +33,24 @@ func run(ctx context.Context, name string, args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), err
 }
 
+// runWithStdinFile executes a fixed argv (same no-shell guarantee as run)
+// with the given file's contents piped to the child process's stdin — used
+// for restoring a `mysql dbName < dump.sql`-style command without ever
+// building a shell string.
+func runWithStdinFile(ctx context.Context, stdinPath string, name string, args ...string) (string, error) {
+	f, err := os.Open(stdinPath)
+	if err != nil {
+		return "", fmt.Errorf("open stdin file: %w", err)
+	}
+	defer f.Close()
+
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Stdin = f
+	cmd.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
+	out, err := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out)), err
+}
+
 // isPackageInstalled reports whether an apt package is already installed,
 // which is what makes stack installation idempotent/safely-retryable: a
 // re-run skips every step whose target state already holds.

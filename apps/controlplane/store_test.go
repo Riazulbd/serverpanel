@@ -245,3 +245,60 @@ func TestCreateAndListSites(t *testing.T) {
 		t.Fatalf("domain = %q, want example.sslip.io", sites[0].Domain)
 	}
 }
+
+func TestCreateAndListAndGetBackups(t *testing.T) {
+	st := newTestStore(t)
+	id, _, err := st.createServer("web-7", "", nil, time.Hour, "admin@example.com")
+	if err != nil {
+		t.Fatalf("createServer: %v", err)
+	}
+	site, err := st.createSite(id, "example.sslip.io", "site_abc123", "/home/sites/site_abc123/public", "wordpress", "8.3")
+	if err != nil {
+		t.Fatalf("createSite: %v", err)
+	}
+
+	rec, err := st.createBackup(id, site.ID, "full", "/var/backups/serverpanel/example-full-x.tar.gz", 12345, "deadbeef", "example_db")
+	if err != nil {
+		t.Fatalf("createBackup: %v", err)
+	}
+	if rec.Status != "completed" {
+		t.Fatalf("status = %q, want completed", rec.Status)
+	}
+
+	backups := st.listBackups(id)
+	if len(backups) != 1 {
+		t.Fatalf("listBackups returned %d backups, want 1", len(backups))
+	}
+	if backups[0].DBName != "example_db" || backups[0].SiteID != site.ID {
+		t.Fatalf("backup = %+v, want db_name=example_db site_id=%s", backups[0], site.ID)
+	}
+
+	got, ok := st.getBackup(id, rec.ID)
+	if !ok {
+		t.Fatal("getBackup: expected to find the backup just created")
+	}
+	if got.SHA256 != "deadbeef" {
+		t.Fatalf("sha256 = %q, want deadbeef", got.SHA256)
+	}
+
+	if _, ok := st.getBackup(id, "bkp_doesnotexist"); ok {
+		t.Fatal("getBackup: expected an unknown backup id to return ok=false")
+	}
+}
+
+func TestGetSiteScopesToServer(t *testing.T) {
+	st := newTestStore(t)
+	id1, _, _ := st.createServer("web-8", "", nil, time.Hour, "admin@example.com")
+	id2, _, _ := st.createServer("web-9", "", nil, time.Hour, "admin@example.com")
+	site, err := st.createSite(id1, "example.sslip.io", "site_abc123", "/home/sites/site_abc123/public", "static", "")
+	if err != nil {
+		t.Fatalf("createSite: %v", err)
+	}
+
+	if _, ok := st.getSite(id1, site.ID); !ok {
+		t.Fatal("expected getSite to find the site under its owning server")
+	}
+	if _, ok := st.getSite(id2, site.ID); ok {
+		t.Fatal("expected getSite to refuse a site id under a different server")
+	}
+}

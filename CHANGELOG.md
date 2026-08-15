@@ -2,6 +2,53 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-15 — Backup restore capability, backup persistence, dashboard backup UI
+
+- Added the `backup.restore` agent capability (`packages/capabilities/backup.go`):
+  restores a database (`mysql dbName < dump.sql`) and/or a site's files
+  (`cp -a` + re-`chown`) from a `backup.run` archive. Never accepts an arbitrary
+  filesystem path — the archive must resolve under the fixed `backupBaseDir`
+  (following symlinks), and a files/full restore target must resolve under
+  `/home/sites/`, the same boundary the file manager and `site.create` already
+  enforce. Verifies the archive's SHA-256 against a caller-supplied checksum before
+  touching anything, and — before making any change — takes a fresh "pre-restore
+  checkpoint" backup of whatever is currently live, aborting the restore before any
+  destructive step if that checkpoint itself fails.
+- Wired `backup.run`'s and the new `backup.restore`'s dispatch through actual
+  persistence for the first time: `apps/controlplane/backups.go`
+  (`handleCreateBackup`/`handleListBackups`/`handleRestoreBackup`) plus new `store`
+  methods and a `backups.db_name` schema column (added via a new minimal
+  `applyMigrations` step in `db.go`, since the table may already exist on disk). A
+  files/full backup or restore's target is always derived from the request's
+  `site_id` against the already-recorded `sites` table — never trusted directly from
+  the request body — so a caller can't point either operation at an arbitrary path.
+  A restore's pre-restore checkpoint is itself persisted as a new backup row, so it's
+  visible in the dashboard and can itself be restored from.
+- Added three new endpoints (`GET`/`POST /api/v1/servers/{id}/backups`,
+  `POST .../backups/{backupId}/restore`) and a "Backups" section to the dashboard's
+  server-detail view: a table of recorded backups with a Restore button, and a modal
+  to start a new db/files/full backup.
+- New tests: a real end-to-end `backup.run` → corrupt live data → `backup.restore` →
+  verify original content came back round trip (using a real tar archive and a real
+  `useradd`-created system user, not mocks), checksum-mismatch/invalid-scope/path-
+  escape rejection tests, backup/site store-layer CRUD and cross-server-scoping tests,
+  and an HTTP-layer test for the new endpoints' input validation. 56 test functions
+  total now (was 48), all passing; `go vet`/`gofmt` clean.
+- Found and fixed two defects while writing this pass (see `TESTING.md` §4 for
+  detail): `backup.run`'s output filename had only second-resolution uniqueness, so
+  two backups of the same target within the same second could silently collide and
+  overwrite each other — caught by the new restore round-trip test taking a
+  checkpoint moments after the backup it was restoring from; fixed with a random
+  4-byte hex filename suffix. Also found (and fixed in the test, not production code)
+  that calling a capability handler directly with a `nil` `Progress` — bypassing
+  `Registry.Dispatch`'s nil-guard — panics if the handler reaches a `progress(...)`
+  call before any early-return validation.
+- Updated `SYSTEM.md`, `API.md`, `OPERATIONS.md`, and `TESTING.md` to reflect that
+  backup restore is now implemented and tested rather than the previously-documented
+  single largest functional gap; database-scope restore's `mysqldump`/`mysql` path
+  remains unverified against a real MariaDB instance (none available in this
+  sandboxed environment), documented as the next real-VPS verification item.
+
 ## 2026-08-14 — Automated test suite, doc restructuring
 
 - Added `go test` coverage across `apps/controlplane` and `packages/capabilities`

@@ -40,22 +40,32 @@ dashboard).
 
 ## 3. Backup and restore
 
-**Backup** (implemented): dispatch the `backup.run` capability
-(`POST /api/v1/servers/{id}/tasks` with `{"capability": "backup.run", "params": {...}}`)
-— see `packages/capabilities/backup.go` for its `scope`/`target` params. It writes a
-checksummed local tar.gz on the VPS itself and records the checksum in its
-`TaskEvent.detail`. The control plane's `backups` table schema exists (`db.go`) but
-nothing currently writes a row into it automatically — wiring `backup.run`'s dispatch
-through a persistence step analogous to `handleCreateSite` (dispatch → parse result →
-insert row) is a small, well-scoped next task.
+**Backup** (implemented): `POST /api/v1/servers/{id}/backups` with
+`{"scope": "db"|"files"|"full", "site_id": "...", "db_name": "..."}` dispatches the
+`backup.run` capability (see `packages/capabilities/backup.go`) and, only on success,
+persists a `backups` row (`apps/controlplane/backups.go` `handleCreateBackup`). It
+writes a checksummed local tar.gz on the VPS itself. `GET /api/v1/servers/{id}/backups`
+lists everything recorded for a server.
 
-**Restore** (not implemented): there is no `backup.restore` capability yet. Until one
-exists, restoring from a `backup.run` archive is a fully manual process: SSH to the
-VPS, locate the tar.gz under wherever `backup.run` wrote it, verify its SHA-256 against
-the value in the task's `detail`, and manually extract/restore the DB dump and/or
-files. **Do not represent backup/restore as a complete, tested feature until a real
-`backup.restore` capability exists and has been exercised end-to-end** — see
-`SYSTEM.md` §19 and §21, and `TESTING.md` §5 item 1 for the recommended next step.
+**Restore** (implemented, 2026-08-15): `POST
+/api/v1/servers/{id}/backups/{backupId}/restore` dispatches the `backup.restore`
+capability for a previously-recorded backup — no request body; the archive path,
+checksum, scope, and (via the backup's recorded `site_id`) restore target all come
+from what's already persisted, never from the caller. Before touching anything, the
+agent takes a fresh "pre-restore checkpoint" backup of the live state and aborts the
+restore before any destructive step if that checkpoint itself fails; on success, the
+checkpoint is persisted as its own new `backups` row (so it shows up in the dashboard
+and can itself be restored from). See `SYSTEM.md` §12 and §19 for the full design, and
+`packages/capabilities/backup_test.go` for the exercised end-to-end round trip (backup
+→ corrupt live data → restore → verify original content came back, plus a checksum-
+mismatch rejection test). Database-scope restore (`mysql dbName < dump.sql`) uses the
+same code path but has not been exercised against a real MariaDB instance in this
+sandboxed environment (no `mysql`/`mysqld` binaries available here) — see
+`TESTING.md` for what remains real-VPS-only verification.
+
+**Still not implemented**: restoring to a *different* server than the one the backup
+was taken from (cross-server migration), scheduled/automatic backups, retention
+policies, encryption at rest, and remote/object storage (S3-compatible) — all Phase 2.
 
 ## 4. Monitoring and alerting
 
