@@ -2,6 +2,51 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-15 — Backup restore, SSL auto-renewal, and the backups API/UI
+
+- **Added `backup.restore`**, the capability the previous pass flagged as the single
+  largest functional gap (`packages/capabilities/backup.go`). Safety model: it always
+  takes a fresh pre-restore checkpoint of the live state before changing anything and
+  aborts cleanly if that checkpoint fails; a files/full restore moves the current site
+  directory aside (same-filesystem rename) rather than deleting it, rolling back
+  automatically if the restored copy can't be put in place; a db restore streams the
+  archived dump into `mysql <dbname>` via `cmd.Stdin` (no shell). The archive path is
+  validated against path traversal and symlink escape the same way the file manager's
+  `resolveScopedPath` already does (`resolveBackupPath`).
+- **Control plane**: new `backups` store methods (`createBackup`/`listBackups`/
+  `getBackup`/`getSite`) and three new endpoints —
+  `POST /api/v1/servers/{id}/sites/{siteId}/backups` (dispatches `backup.run`,
+  persists a row only on success, mirroring `handleCreateSite`'s pattern),
+  `GET /api/v1/servers/{id}/backups`, and
+  `POST /api/v1/servers/{id}/backups/{backupId}/restore` (dispatches `backup.restore`
+  using the archive path/scope/db name **recorded on the backup**, never anything the
+  caller supplies — this is what keeps restore from reaching an arbitrary path or
+  database). Added a `db_name` column to the `backups` table via a best-effort
+  `ALTER TABLE` run on every `openDB` (there's still no real migration tool — see
+  `docs/OPERATIONS.md` §5).
+- **Dashboard**: a new Backups panel on the server-detail view — a "Back up" button
+  per site (scope + optional DB name modal) and a backups table with size/scope/
+  status and a "Restore" button (with a confirmation prompt and the resulting
+  checkpoint path shown on completion).
+- **SSL auto-renewal**: `stack.install` now explicitly enables `certbot.timer` (it
+  isn't always on by default depending on the base image), closing the other gap the
+  previous pass's `SYSTEM.md` flagged as missing.
+- **Tests**: 9 new test functions. `packages/capabilities/backup_test.go` proves the
+  restore path for real — not just parameter validation — with an end-to-end
+  files-scope round trip (back up a site, corrupt the live copy, restore, assert it's
+  back to exactly the backed-up state and that files added after the backup are gone)
+  plus a "restoring site A's archive into site B's root fails and leaves B untouched"
+  safety test. `apps/controlplane/store_test.go` and `http_test.go` cover the new
+  store methods and the backup API's auth-gating, 404s, and — the important one — that
+  a backup can't be restored through a different server's ID. The db-scope restore
+  path (`mysql` import) is validated for parameter handling only, since this sandbox
+  has no MariaDB installed; see `docs/TESTING.md` for what that leaves for a real-host
+  pass.
+- Updated `docs/SYSTEM.md`, `docs/API.md`, `docs/OPERATIONS.md`, `docs/ARCHITECTURE.md`,
+  and `docs/TESTING.md` to reflect all of the above — restore is no longer listed as
+  ⬜, and the remaining real gap is restoring to a *different* server, not restoring at
+  all.
+
 ## 2026-08-14 — Automated test suite, doc restructuring
 
 - Added `go test` coverage across `apps/controlplane` and `packages/capabilities`

@@ -244,4 +244,64 @@ func TestCreateAndListSites(t *testing.T) {
 	if sites[0].Domain != "example.sslip.io" {
 		t.Fatalf("domain = %q, want example.sslip.io", sites[0].Domain)
 	}
+
+	got, ok := st.getSite(sites[0].ID)
+	if !ok {
+		t.Fatal("getSite: expected the just-created site to be found")
+	}
+	if got.SystemUser != "sp_abc123" {
+		t.Fatalf("getSite SystemUser = %q, want sp_abc123", got.SystemUser)
+	}
+	if _, ok := st.getSite("site_does_not_exist"); ok {
+		t.Fatal("getSite: expected an unknown site ID to be reported as not found")
+	}
+}
+
+func TestCreateGetListBackups(t *testing.T) {
+	st := newTestStore(t)
+	serverID, _, err := st.createServer("web-7", "", nil, time.Hour, "admin@example.com")
+	if err != nil {
+		t.Fatalf("createServer: %v", err)
+	}
+	site, err := st.createSite(serverID, "example.com", "sp_ex1", "/home/sites/sp_ex1/public", "wordpress", "8.3")
+	if err != nil {
+		t.Fatalf("createSite: %v", err)
+	}
+
+	rec, err := st.createBackup(serverID, site.ID, "full",
+		"/var/backups/serverpanel/sp_ex1-full-20260101T000000Z.tar.gz", 12345, "deadbeef", "completed", "wp_ex1")
+	if err != nil {
+		t.Fatalf("createBackup: %v", err)
+	}
+	if rec.ID == "" {
+		t.Fatal("createBackup: expected a generated ID")
+	}
+
+	backups := st.listBackups(serverID)
+	if len(backups) != 1 {
+		t.Fatalf("listBackups returned %d backups, want 1", len(backups))
+	}
+	if backups[0].DBName != "wp_ex1" || backups[0].SHA256 != "deadbeef" || backups[0].SizeBytes != 12345 {
+		t.Fatalf("unexpected backup record: %+v", backups[0])
+	}
+
+	got, ok := st.getBackup(rec.ID)
+	if !ok {
+		t.Fatal("getBackup: expected the just-created backup to be found")
+	}
+	if got.Path != rec.Path {
+		t.Fatalf("getBackup Path = %q, want %q", got.Path, rec.Path)
+	}
+
+	// A backup for a different server must never show up in this server's
+	// list — listBackups is the read path the dashboard and
+	// handleRestoreBackup's ownership check both rely on.
+	otherServerID, _, _ := st.createServer("web-8", "", nil, time.Hour, "admin@example.com")
+	if backups := st.listBackups(otherServerID); len(backups) != 0 {
+		t.Fatalf("listBackups for unrelated server returned %d backups, want 0", len(backups))
+	}
+
+	if _, ok := st.getBackup("bak_does_not_exist"); ok {
+		t.Fatal("getBackup: expected an unknown backup ID to be reported as not found")
+	}
 }

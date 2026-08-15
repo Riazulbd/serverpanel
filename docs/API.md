@@ -43,6 +43,9 @@ protected route; there is no route that skips it by omission.
 | `POST` | `/api/v1/servers/{id}/tasks` | Dispatch an arbitrary allow-listed capability (see §3) |
 | `GET` | `/api/v1/servers/{id}/sites` | List sites on a server |
 | `POST` | `/api/v1/servers/{id}/sites` | Dispatch `site.create` and persist the resulting site record |
+| `GET` | `/api/v1/servers/{id}/backups` | List backups recorded for a server |
+| `POST` | `/api/v1/servers/{id}/sites/{siteId}/backups` | Dispatch `backup.run` for a site and persist the resulting backup record |
+| `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a previously recorded backup |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -102,6 +105,34 @@ Dispatches `site.create`, and only on the agent reporting success, persists a `s
 row. → `201 {"site": {...siteRecord}, "temp_domain": "<user>.<ip-with-dashes>.sslip.io"}`.
 A dispatch failure or agent-side failure never leaves an orphan site record — the
 row is written after (and only after) the agent confirms success.
+
+### `POST /api/v1/servers/{id}/sites/{siteId}/backups`
+```json
+{"scope": "db"|"files"|"full", "db_name": "wp_example"}
+```
+`db_name` is required when `scope` is `db` or `full`, ignored otherwise. Looks up the
+site (404 if it doesn't belong to this server), dispatches `backup.run` with
+`site_root` set to the site's home directory (not just its docroot — the whole
+isolated `/home/sites/<system_user>`), and, only on the agent reporting success,
+persists a `backups` row. → `201` with the `backupRecord` JSON (`ID`, `ServerID`,
+`SiteID`, `Scope`, `Path`, `SizeBytes`, `SHA256`, `Status`, `CreatedAt`, `DBName`).
+Uses a 20-minute dispatch timeout (wider than the 120s default) since a full backup of
+a large site/database can legitimately take a while. `422` if `backup.run` fails on
+the agent (message included); a failure is still recorded in the audit log
+(`backup.failed`) even though no `backups` row is written for it.
+
+### `POST /api/v1/servers/{id}/backups/{backupId}/restore`
+No request body. Looks up the backup record (404 if it doesn't exist or belongs to a
+different server — the ownership check that keeps one server's backups from being
+restorable through another server's ID) and dispatches `backup.restore` using the
+archive path, scope, and database name **recorded on that backup**, never anything
+supplied by the caller. For a files/full-scope backup, also resolves the owning site's
+current home directory as the restore target. → `200
+{"status": "restored", "backup_id": "...", "checkpoint_path": "..."}` —
+`checkpoint_path` is the pre-restore checkpoint the agent always takes before
+overwriting anything (see `SYSTEM.md` §19 and `OPERATIONS.md` §3). `422` if
+`backup.restore` fails on the agent (message included; the audit log records
+`backup.restore_failed` with the underlying error either way).
 
 ### `POST /agents/register`
 ```json

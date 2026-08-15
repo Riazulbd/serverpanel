@@ -385,6 +385,100 @@ func (s *store) createSite(serverID, domain, systemUser, docroot, appType, phpVe
 	return rec, nil
 }
 
+// getSite looks up a single site by ID, used by handleCreateBackup and
+// handleRestoreBackup to resolve a site's system user / docroot before
+// dispatching a backup.run / backup.restore task — the dashboard never
+// supplies those filesystem paths itself.
+func (s *store) getSite(siteID string) (*siteRecord, bool) {
+	row := s.db.QueryRow(
+		`SELECT id, server_id, domain, system_user, docroot, app_type, php_version, status, created_at
+		 FROM sites WHERE id = ?`, siteID)
+	var rec siteRecord
+	var createdAt string
+	if err := row.Scan(&rec.ID, &rec.ServerID, &rec.Domain, &rec.SystemUser, &rec.Docroot,
+		&rec.AppType, &rec.PHPVersion, &rec.Status, &createdAt); err != nil {
+		return nil, false
+	}
+	rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+	return &rec, true
+}
+
+type backupRecord struct {
+	ID        string
+	ServerID  string
+	SiteID    string
+	Scope     string
+	Path      string
+	SizeBytes int64
+	SHA256    string
+	Status    string
+	CreatedAt time.Time
+	DBName    string
+}
+
+// createBackup persists the record of a completed backup.run task — the
+// only place backup.run's result (path/size/checksum) is retained once the
+// task response itself is gone, and what handleRestoreBackup later reads
+// back to know which archive path (and, for a db/full scope, which
+// database name) to hand backup.restore.
+func (s *store) createBackup(serverID, siteID, scope, path string, sizeBytes int64, sha256, status, dbName string) (*backupRecord, error) {
+	rec := &backupRecord{
+		ID: randID("bak"), ServerID: serverID, SiteID: siteID, Scope: scope, Path: path,
+		SizeBytes: sizeBytes, SHA256: sha256, Status: status, CreatedAt: time.Now().UTC(), DBName: dbName,
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO backups (id, server_id, site_id, scope, path, size_bytes, sha256, status, created_at, db_name)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		rec.ID, rec.ServerID, rec.SiteID, rec.Scope, rec.Path, rec.SizeBytes, rec.SHA256, rec.Status,
+		rec.CreatedAt.Format(time.RFC3339Nano), rec.DBName,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return rec, nil
+}
+
+func (s *store) listBackups(serverID string) []*backupRecord {
+	rows, err := s.db.Query(
+		`SELECT id, server_id, site_id, scope, path, size_bytes, sha256, status, created_at, db_name
+		 FROM backups WHERE server_id = ? ORDER BY created_at DESC`, serverID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var out []*backupRecord
+	for rows.Next() {
+		var rec backupRecord
+		var createdAt string
+		if err := rows.Scan(&rec.ID, &rec.ServerID, &rec.SiteID, &rec.Scope, &rec.Path,
+			&rec.SizeBytes, &rec.SHA256, &rec.Status, &createdAt, &rec.DBName); err != nil {
+			continue
+		}
+		rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+		out = append(out, &rec)
+	}
+	return out
+}
+
+func (s *store) getBackup(id string) (*backupRecord, bool) {
+	row := s.db.QueryRow(
+		`SELECT id, server_id, site_id, scope, path, size_bytes, sha256, status, created_at, db_name
+		 FROM backups WHERE id = ?`, id)
+	var rec backupRecord
+	var createdAt string
+	if err := row.Scan(&rec.ID, &rec.ServerID, &rec.SiteID, &rec.Scope, &rec.Path,
+		&rec.SizeBytes, &rec.SHA256, &rec.Status, &createdAt, &rec.DBName); err != nil {
+		return nil, false
+	}
+	rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+	return &rec, true
+}
+
+func (s *store) setBackupStatus(id, status string) {
+	s.db.Exec(`UPDATE backups SET status = ? WHERE id = ?`, status, id)
+}
+
 func randID(prefix string) string {
 	n, _ := rand.Int(rand.Reader, big.NewInt(1<<62))
 	return fmt.Sprintf("%s_%x", prefix, n)

@@ -40,22 +40,44 @@ dashboard).
 
 ## 3. Backup and restore
 
-**Backup** (implemented): dispatch the `backup.run` capability
-(`POST /api/v1/servers/{id}/tasks` with `{"capability": "backup.run", "params": {...}}`)
-— see `packages/capabilities/backup.go` for its `scope`/`target` params. It writes a
-checksummed local tar.gz on the VPS itself and records the checksum in its
-`TaskEvent.detail`. The control plane's `backups` table schema exists (`db.go`) but
-nothing currently writes a row into it automatically — wiring `backup.run`'s dispatch
-through a persistence step analogous to `handleCreateSite` (dispatch → parse result →
-insert row) is a small, well-scoped next task.
+**Backup** (implemented): `POST /api/v1/servers/{id}/sites/{siteId}/backups` with
+`{"scope": "db"|"files"|"full", "db_name": "..."}` (`db_name` required for `db`/`full`)
+dispatches the `backup.run` capability against that site's home directory
+(`packages/capabilities/backup.go`), then — only on success — persists a row in the
+`backups` table (`apps/controlplane/backups.go` `handleCreateBackup`, mirroring
+`handleCreateSite`'s "dispatch → parse result → insert row, only on success" pattern).
+`GET /api/v1/servers/{id}/backups` lists them. The archive itself is a checksummed
+(SHA-256) local tar.gz written on the VPS under `/var/backups/serverpanel/`; the
+control plane never receives or stores the archive's contents, only its path/size/
+checksum.
 
-**Restore** (not implemented): there is no `backup.restore` capability yet. Until one
-exists, restoring from a `backup.run` archive is a fully manual process: SSH to the
-VPS, locate the tar.gz under wherever `backup.run` wrote it, verify its SHA-256 against
-the value in the task's `detail`, and manually extract/restore the DB dump and/or
-files. **Do not represent backup/restore as a complete, tested feature until a real
-`backup.restore` capability exists and has been exercised end-to-end** — see
-`SYSTEM.md` §19 and §21, and `TESTING.md` §5 item 1 for the recommended next step.
+**Restore** (implemented): `POST /api/v1/servers/{id}/backups/{backupId}/restore`
+dispatches the `backup.restore` capability (`handleRestoreBackup`) using the archive
+path, scope, and (for db/full) database name recorded when the backup was created —
+the dashboard/API caller never supplies a filesystem path or database name directly,
+which is what keeps restore from being usable to reach anything outside a backup this
+control plane itself produced. On the agent side, `handleBackupRestore`:
+
+1. Always takes a fresh checkpoint backup of the current live state first (same scope/
+   target), and aborts without changing anything if that checkpoint fails.
+2. For a files/full restore, moves the current site directory aside (same-filesystem
+   rename) rather than deleting it, and only removes that aside copy after the
+   restored copy is confirmed in place — a failed restore rolls back automatically.
+3. Reports the checkpoint's own path back in the result, so an operator can always get
+   back to the pre-restore state even after a successful restore, by restoring that
+   checkpoint in turn.
+
+Verified with a real round-trip test (`packages/capabilities/backup_test.go`
+`TestBackupRunAndRestoreFilesRoundTrip`): back up a site, corrupt the live copy
+(overwrite a file, add a new one), restore, and assert the live copy exactly matches
+the backed-up state again. The db-scope path (`mysqldump`/`mysql` import) is exercised
+by parameter validation only in this environment, which has no MariaDB installed — see
+`TESTING.md` §What hasn't been verified.
+
+**Known gaps** (unchanged from before this pass, still real): no scheduling/retention
+policy (backups are on-demand only), no encryption at rest, no remote/S3-compatible
+storage backend, no automatic re-verification of a stored backup's checksum. See
+`SYSTEM.md` §19 and `product-plan.md` for where these sit in the roadmap.
 
 ## 4. Monitoring and alerting
 
@@ -75,12 +97,18 @@ for reconnect-loop messages, which indicate a network or certificate problem.
 ## 5. Upgrade and rollback
 
 **Control plane**: no automated upgrade mechanism. Build a new binary, stop the old
-process, start the new one pointed at the same `-db`/`-ca-dir`. Because every schema
-change so far has been additive `CREATE TABLE IF NOT EXISTS` statements (no destructive
-migrations exist in this codebase), an old binary can generally be restarted against a
-DB a newer binary has already touched, but this has not been formalized as a supported
-downgrade path — take a copy of the `.db` file and the CA dir before upgrading so a
-rollback is "restore the file," not "hope for the best."
+process, start the new one pointed at the same `-db`/`-ca-dir`. Every schema change so
+far has been additive: either a new `CREATE TABLE IF NOT EXISTS` (only runs once, on
+first DB creation) or, for a new column on an existing table (e.g. `backups.db_name`,
+added alongside `backup.restore`), a best-effort `ALTER TABLE ... ADD COLUMN` run on
+every `openDB` call that tolerates the "duplicate column" error on a database that
+already has it (`apps/controlplane/db.go`). There is still no real migration tool or
+versioned migration history — this is a deliberate, documented stopgap, not a
+long-term answer, and a `DROP COLUMN`/rename/type-change would need one written by
+hand. An old binary can generally be restarted against a DB a newer binary has already
+touched, but this has not been formalized as a supported downgrade path — take a copy
+of the `.db` file and the CA dir before upgrading so a rollback is "restore the file,"
+not "hope for the best."
 
 **Agent**: no self-update mechanism yet (`SECURITY.md` §3). Re-run `install.sh` with a
 newer `--version` to upgrade; this replaces the binary and restarts the systemd unit,

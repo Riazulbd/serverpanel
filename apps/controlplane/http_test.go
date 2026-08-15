@@ -209,3 +209,100 @@ func TestRegisterEndpointRejectsBadToken(t *testing.T) {
 		t.Fatalf("register with bad token status = %d, want 401", rec.Code)
 	}
 }
+
+// TestBackupRoutesRequireAuth is the same "no session, no access" guarantee
+// TestSignupLoginProtectedRouteFlow checks for the rest of the API, applied
+// to the three backup endpoints added alongside backup.restore.
+func TestBackupRoutesRequireAuth(t *testing.T) {
+	a := newTestAPIServer(t)
+	h := a.routes()
+
+	rec := doJSON(t, h, "GET", "/api/v1/servers/srv_x/backups", nil, nil)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("list backups without auth status = %d, want 401", rec.Code)
+	}
+	rec = doJSON(t, h, "POST", "/api/v1/servers/srv_x/sites/site_x/backups", map[string]string{"scope": "files"}, nil)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("create backup without auth status = %d, want 401", rec.Code)
+	}
+	rec = doJSON(t, h, "POST", "/api/v1/servers/srv_x/backups/bak_x/restore", nil, nil)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("restore backup without auth status = %d, want 401", rec.Code)
+	}
+}
+
+// TestBackupFlowValidationAndOwnership exercises everything about the
+// backup routes that doesn't require a live connected agent: unknown-site/
+// unknown-backup 404s, scope/db_name validation, an empty list for a fresh
+// server, and — the important security property — that a backup belonging
+// to one server can't be restored through another server's ID.
+func TestBackupFlowValidationAndOwnership(t *testing.T) {
+	secureCookies = false
+	defer func() { secureCookies = true }()
+
+	a := newTestAPIServer(t)
+	h := a.routes()
+
+	doJSON(t, h, "POST", "/api/v1/auth/signup", map[string]string{
+		"Email": "ops@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	rec := doJSON(t, h, "POST", "/api/v1/auth/login", map[string]string{
+		"Email": "ops@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	cookie := sessionCookie(rec)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers", map[string]any{"Name": "web-9"}, cookie)
+	var created struct {
+		ServerID string `json:"server_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+
+	// Empty list for a server with no backups yet.
+	rec = doJSON(t, h, "GET", "/api/v1/servers/"+created.ServerID+"/backups", nil, cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list backups status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if body := rec.Body.String(); body != "null\n" && body != "[]\n" {
+		t.Fatalf("expected an empty backup list, got %q", body)
+	}
+
+	// Creating a backup for a site that doesn't exist must 404, not try to
+	// dispatch anything to the agent.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/sites/site_missing/backups",
+		map[string]string{"scope": "files"}, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("create backup for missing site status = %d, want 404, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// Restoring a backup that doesn't exist must also 404.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/backups/bak_missing/restore", nil, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("restore missing backup status = %d, want 404, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// A backup that exists but belongs to a *different* server must not be
+	// restorable through this server's ID — the ownership check in
+	// handleRestoreBackup, exercised directly against the store since doing
+	// this via handleCreateBackup would require a live connected agent.
+	site, err := a.store.createSite(created.ServerID, "example.com", "sp_ex9", "/home/sites/sp_ex9/public", "static", "")
+	if err != nil {
+		t.Fatalf("createSite: %v", err)
+	}
+	backup, err := a.store.createBackup(created.ServerID, site.ID, "files",
+		"/var/backups/serverpanel/sp_ex9-files-20260101T000000Z.tar.gz", 100, "abc", "completed", "")
+	if err != nil {
+		t.Fatalf("createBackup: %v", err)
+	}
+	rec = doJSON(t, h, "POST", "/api/v1/servers/srv_other_server/backups/"+backup.ID+"/restore", nil, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("restore backup via a different server ID status = %d, want 404, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// Listing now shows the one backup we inserted directly.
+	rec = doJSON(t, h, "GET", "/api/v1/servers/"+created.ServerID+"/backups", nil, cookie)
+	var list []backupRecord
+	json.Unmarshal(rec.Body.Bytes(), &list)
+	if len(list) != 1 || list[0].ID != backup.ID {
+		t.Fatalf("expected the one inserted backup in the list, got %+v", list)
+	}
+}

@@ -29,6 +29,16 @@ func openDB(path string) (*sql.DB, error) {
 		db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
+
+	// Best-effort additive migration: there is no separate migration tool
+	// yet (see docs/OPERATIONS.md "Upgrade and rollback"), so a column
+	// added after a database already exists is applied here with ALTER
+	// TABLE, tolerating the "duplicate column" error on a database that
+	// already has it. This keeps `CREATE TABLE IF NOT EXISTS` (which only
+	// runs once, on first creation) from silently leaving existing
+	// databases behind on every later schema addition.
+	db.Exec(`ALTER TABLE backups ADD COLUMN db_name TEXT NOT NULL DEFAULT ''`)
+
 	return db, nil
 }
 
@@ -106,6 +116,7 @@ CREATE TABLE IF NOT EXISTS backups (
 	size_bytes INTEGER NOT NULL DEFAULT 0,
 	sha256     TEXT NOT NULL DEFAULT '',
 	status     TEXT NOT NULL,
-	created_at TEXT NOT NULL
+	created_at TEXT NOT NULL,
+	db_name    TEXT NOT NULL DEFAULT ''
 );
 `

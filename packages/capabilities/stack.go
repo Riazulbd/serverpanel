@@ -140,6 +140,24 @@ func phase1LEMPSteps() []installStep {
 			},
 		},
 		{
+			Name: "certbot automatic renewal timer",
+			Check: func(ctx context.Context) bool {
+				out, _ := run(ctx, "systemctl", "is-enabled", "certbot.timer")
+				return out == "enabled"
+			},
+			// The certbot apt package ships a systemd timer that checks
+			// twice daily for certificates due for renewal and only
+			// touches ones within 30 days of expiry, but it isn't always
+			// enabled by default on every Ubuntu image — enabling it
+			// explicitly here is what makes "Automatic SSL renewal" an
+			// actual guarantee rather than something that happens to work
+			// depending on the base image.
+			Run: func(ctx context.Context) error {
+				_, err := run(ctx, "systemctl", "enable", "--now", "certbot.timer")
+				return err
+			},
+		},
+		{
 			Name:  "ufw",
 			Check: func(ctx context.Context) bool { return isPackageInstalled(ctx, "ufw") },
 			Run:   func(ctx context.Context) error { _, err := aptInstall(ctx, "ufw"); return err },
