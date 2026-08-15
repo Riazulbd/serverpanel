@@ -2,6 +2,48 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-15 — Backup restore, backup lifecycle wired into the API/dashboard, mobile responsiveness fixes
+
+- **`backup.restore` capability** (`packages/capabilities/backup.go`): the single
+  largest documented functional gap from the prior pass. Verifies the archive's SHA-256
+  checksum, takes a fresh `backup.run` pre-restore checkpoint of the current files state
+  before overwriting anything (aborting the restore if the checkpoint itself fails),
+  extracts the archive, and restores the database dump (via `mysql`) and/or files (via
+  `cp -a`, after clearing the target directory's contents). `backup_path` is validated
+  against the fixed `backupBaseDir` with the same symlink-escape-resistant approach
+  `resolveScopedPath` uses for site roots (`validateBackupPath`).
+- **Backup lifecycle wired end-to-end**, previously only a bare, unreachable-from-the-UI
+  agent capability: new `apps/controlplane/backups.go` with
+  `POST /api/v1/servers/{id}/backups` (dispatch `backup.run`, persist a `backups` row
+  only on confirmed success — the same pattern `handleCreateSite` uses),
+  `GET /api/v1/servers/{id}/backups` (list), and
+  `POST /api/v1/servers/{id}/backups/{backupId}/restore` (dispatch `backup.restore`
+  using the recorded backup's path/scope/checksum). New `store` methods `getSite`,
+  `createBackup`, `listBackups`, `getBackup`. New dashboard UI: a "Backups" section on
+  the server-detail page with a "Run backup" modal (scope/site/DB-name fields that
+  toggle based on scope) and a "Restore…" button per backup.
+- **Real bug found and fixed**: `backup.run`'s output filename used only
+  second-granularity timestamps, so two backups of the same site/scope started within
+  the same second could collide and silently overwrite each other — caught by
+  `TestBackupRunRestoreFilesRoundTrip` failing on its first run (restored content came
+  back as the post-mutation state, because the restore's own pre-restore checkpoint had
+  overwritten the archive being restored). Fixed with a random 4-byte hex filename
+  suffix (`randSuffix()`).
+- **Dashboard mobile responsiveness**: verified with real headless-Chromium (Playwright)
+  automation at 320/375/390/414/768/1024px across every view — the first pass found and
+  this pass fixed real overflow (topbar not wrapping, a hard-coded 360px auth-card
+  width, tables overflowing the page instead of scrolling within their own box). See
+  `docs/TESTING.md` §4 for the full before/after.
+- Tests: `packages/capabilities/backup_test.go` (new — `validateBackupPath`'s
+  traversal/symlink-escape defenses, scope validation, checksum-mismatch rejection, and
+  a real `backup.run` → mutate → `backup.restore` → verify round trip for the `files`
+  scope), plus new `apps/controlplane` store/HTTP tests for the backup endpoints.
+  62 test functions total (was 48), all passing under `go test ./...` and
+  `go test ./... -race`.
+- Docs: updated `SYSTEM.md`, `API.md`, `OPERATIONS.md`, and `TESTING.md` to reflect
+  restore now being implemented and tested, and mobile responsiveness now being
+  verified rather than an open gap.
+
 ## 2026-08-14 — Automated test suite, doc restructuring
 
 - Added `go test` coverage across `apps/controlplane` and `packages/capabilities`

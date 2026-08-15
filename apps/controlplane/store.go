@@ -385,6 +385,96 @@ func (s *store) createSite(serverID, domain, systemUser, docroot, appType, phpVe
 	return rec, nil
 }
 
+func (s *store) getSite(serverID, siteID string) (*siteRecord, bool) {
+	row := s.db.QueryRow(
+		`SELECT id, server_id, domain, system_user, docroot, app_type, php_version, status, created_at
+		 FROM sites WHERE id = ? AND server_id = ?`, siteID, serverID)
+	var rec siteRecord
+	var createdAt string
+	if err := row.Scan(&rec.ID, &rec.ServerID, &rec.Domain, &rec.SystemUser, &rec.Docroot,
+		&rec.AppType, &rec.PHPVersion, &rec.Status, &createdAt); err != nil {
+		return nil, false
+	}
+	rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+	return &rec, true
+}
+
+// backupRecord mirrors the `backups` table (db.go). status is currently
+// always "completed" (createBackup only ever persists a row once
+// backup.run has already succeeded on the agent) — the column exists ahead
+// of a future async/scheduled backup flow (product-plan.md §9) where a row
+// could be created in a "running" or "failed" state first.
+type backupRecord struct {
+	ID        string
+	ServerID  string
+	SiteID    string
+	Scope     string
+	Path      string
+	SizeBytes int64
+	SHA256    string
+	Status    string
+	CreatedAt time.Time
+}
+
+func (s *store) createBackup(serverID, siteID, scope, path string, sizeBytes int64, sha256sum, status string) (*backupRecord, error) {
+	rec := &backupRecord{
+		ID: randID("bkp"), ServerID: serverID, SiteID: siteID, Scope: scope, Path: path,
+		SizeBytes: sizeBytes, SHA256: sha256sum, Status: status, CreatedAt: time.Now().UTC(),
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO backups (id, server_id, site_id, scope, path, size_bytes, sha256, status, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		rec.ID, rec.ServerID, rec.SiteID, rec.Scope, rec.Path, rec.SizeBytes, rec.SHA256, rec.Status,
+		rec.CreatedAt.Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return nil, err
+	}
+	return rec, nil
+}
+
+func (s *store) listBackups(serverID string) []*backupRecord {
+	rows, err := s.db.Query(
+		`SELECT id, server_id, site_id, scope, path, size_bytes, sha256, status, created_at
+		 FROM backups WHERE server_id = ? ORDER BY created_at DESC`, serverID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var out []*backupRecord
+	for rows.Next() {
+		rec, err := scanBackup(rows)
+		if err != nil {
+			continue
+		}
+		out = append(out, rec)
+	}
+	return out
+}
+
+func (s *store) getBackup(serverID, backupID string) (*backupRecord, bool) {
+	row := s.db.QueryRow(
+		`SELECT id, server_id, site_id, scope, path, size_bytes, sha256, status, created_at
+		 FROM backups WHERE id = ? AND server_id = ?`, backupID, serverID)
+	rec, err := scanBackup(row)
+	if err != nil {
+		return nil, false
+	}
+	return rec, true
+}
+
+func scanBackup(row rowScanner) (*backupRecord, error) {
+	var rec backupRecord
+	var createdAt string
+	if err := row.Scan(&rec.ID, &rec.ServerID, &rec.SiteID, &rec.Scope, &rec.Path,
+		&rec.SizeBytes, &rec.SHA256, &rec.Status, &createdAt); err != nil {
+		return nil, err
+	}
+	rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+	return &rec, nil
+}
+
 func randID(prefix string) string {
 	n, _ := rand.Int(rand.Reader, big.NewInt(1<<62))
 	return fmt.Sprintf("%s_%x", prefix, n)

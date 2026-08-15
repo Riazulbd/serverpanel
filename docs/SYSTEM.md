@@ -116,18 +116,29 @@ webhook push-to-deploy, deploy keys, or rollback exist in this codebase yet.
 ### Backup and restoration
 | Feature | Status |
 |---|---|
-| DB/file/full backups | ✅ `backup.run` — checksummed local tar.gz |
+| DB/file/full backups | ✅ `backup.run` — checksummed local tar.gz; dedicated
+  `POST /api/v1/servers/{id}/backups` endpoint dispatches it and persists a `backups`
+  row only on confirmed success |
 | Scheduling, retention policies | ⬜ not implemented (backups are on-demand only) |
 | Encryption | ⬜ not implemented (local tar.gz is unencrypted; relies on host
   filesystem permissions today) |
-| Backup verification | 🚧 SHA-256 checksum is recorded and returned; the dashboard
-  does not yet re-verify it automatically |
+| Backup verification | ✅ SHA-256 checksum recorded at backup time and re-verified by
+  `backup.restore` before it touches anything (mismatch aborts the restore) |
 | Local storage | ✅ |
 | S3-compatible / Amazon S3 / R2 / B2 / Spaces / Wasabi | ⬜ Phase 2 |
-| Restore (same or another server) | ⬜ **not implemented — there is no restore
-  capability yet, only `backup.run`.** This is the most significant gap relative to
-  the "backup and restore model" the product plan calls for; see `OPERATIONS.md`. |
-| Pre-restore checkpoints, progress tracking, failure recovery | ⬜ depends on restore |
+| Restore (same server) | ✅ `backup.restore` — extracts the archive, verifies its
+  checksum, restores DB dump and/or files, dispatched via
+  `POST /api/v1/servers/{id}/backups/{backupId}/restore` (dashboard: "Restore…" button
+  in the server-detail Backups list) |
+| Restore to a different server | ⬜ not implemented — the recorded backup path only
+  exists on the originating agent's local disk; needs a remote (S3-compatible) storage
+  backend first (Phase 2) |
+| Pre-restore checkpoints | ✅ `backup.restore` takes a fresh `backup.run` of the
+  current files state before overwriting anything (for `files`/`full` scope); aborts
+  the restore if the checkpoint itself fails |
+| Progress tracking, failure recovery | 🚧 `Progress` callbacks report incremental
+  status during a restore, surfaced in the `TaskEvent` stream; the dashboard shows a
+  single running/ok/fail state, not a step-by-step progress bar |
 
 ### Security and monitoring
 See `SECURITY.md` for the detailed, section-by-section implemented-vs-planned
@@ -145,11 +156,12 @@ Phase boundaries and full milestone/estimate tables are in `product-plan.md` §6
 is the condensed status:
 
 - **Phase 1 — secure working foundation:** ~90% of the *capability* surface exists and
-  is tested per-capability (see the tables above); the biggest real gaps are backup
-  **restore**, an automated test suite (now added, see `TESTING.md`), SSL auto-renewal,
-  and agent cert auto-rotation. Not "GA-ready" yet, but the architecture and security
-  primitives it depends on (mTLS, allow-listed capabilities, per-app isolation, audit
-  log) are real and proven, not stubs.
+  is tested per-capability (see the tables above); backup **restore** is now
+  implemented and tested (see `TESTING.md`) — the remaining real gaps are SSL
+  auto-renewal, agent cert auto-rotation, and scheduled/remote (S3-compatible) backups.
+  Not "GA-ready" yet, but the architecture and security primitives it depends on (mTLS,
+  allow-listed capabilities, per-app isolation, audit log) are real and proven, not
+  stubs.
 - **Phase 2 — professional server management:** not started. Git deployment,
   cron/process management, SSH/firewall management UI, remote backups, cross-server
   migration all remain ⬜.
@@ -173,9 +185,11 @@ bundler, no `node_modules`), embedded into the Go binary via `//go:embed`. Plain
 handles the session token directly — `HttpOnly` cookie). This trades "modern SPA
 tooling" for "the entire frontend is one deployable file with zero build step and zero
 frontend dependency surface to patch," a deliberate Phase 1 choice given the security-
-sensitive nature of the product. It is not yet verified mobile-responsive at the
-320–768px breakpoints called out in the original requirements — see `TESTING.md`
-§Known gaps for what a future pass needs to check with real browser automation.
+sensitive nature of the product. Verified mobile-responsive (no horizontal overflow) at
+320/375/390/414/768/1024px with real headless-Chromium automation — see `TESTING.md`
+§4; every table is wrapped in a `.table-wrap` (`overflow-x: auto`) container and the
+topbar/auth-card wrap/constrain themselves at narrow widths rather than overflowing the
+page.
 
 ## 6. Backend architecture
 
@@ -243,8 +257,9 @@ bcrypt (cost 12); nothing is stored in plaintext.
 
 Full list with request/response shapes in `API.md`. Summary: `/api/v1/auth/*`
 (signup/login/logout/TOTP enroll+verify/MFA challenge/me), `/api/v1/servers*` (CRUD,
-revoke, task dispatch, sites, audit), `/agents/register` (the one unauthenticated
-agent-facing endpoint, secured by the bootstrap token itself), `/healthz`.
+revoke, task dispatch, sites, backups + restore, audit), `/agents/register` (the one
+unauthenticated agent-facing endpoint, secured by the bootstrap token itself),
+`/healthz`.
 
 ## 10. Background jobs
 
@@ -278,9 +293,8 @@ Current capability list: `system.ping`, `service.control`, `diagnostics.basic`,
 `stack.install`, `site.create`, `site.set_php_version`, `site.set_status`,
 `app.wordpress_install`, `ssl.issue_letsencrypt`, `ssl.install_custom`, `db.create`,
 `db.delete`, `db.list`, `file.list`, `file.read`, `file.write`, `file.delete`,
-`backup.run`, `logs.tail`. Notably absent (by design, until reviewed and added):
-`backup.restore`, `git.deploy`, `cron.upsert`, `ssh.*`, `firewall.*`,
-`agent.self_update`.
+`backup.run`, `backup.restore`, `logs.tail`. Notably absent (by design, until reviewed
+and added): `git.deploy`, `cron.upsert`, `ssh.*`, `firewall.*`, `agent.self_update`.
 
 ## 13. Installation and deployment
 
@@ -343,12 +357,15 @@ defenses on the file manager (`resolveScopedPath`).
 
 ## 19. Backup and restore model
 
-**Backup**: implemented (`backup.run` — local, checksummed tar.gz of DB and/or files).
-**Restore**: **not implemented**. This is the single largest functional gap in the
-Phase 1 feature set relative to what the product plan calls for, and should be the
-next priority after this documentation pass — see `OPERATIONS.md` §Backup and restore
-for the concrete plan (a `backup.restore` capability mirroring `backup.run`'s
-validation approach, plus a pre-restore checkpoint step).
+**Backup**: implemented (`backup.run` — local, checksummed tar.gz of DB and/or files;
+`POST /api/v1/servers/{id}/backups` dispatches it and persists a `backups` row only on
+confirmed agent success). **Restore**: implemented (`backup.restore` — verifies the
+archive's checksum, takes a pre-restore checkpoint of the current files state before
+overwriting anything, extracts the archive, restores the DB dump via `mysql` and/or the
+files via `cp -a`; dispatched via
+`POST /api/v1/servers/{id}/backups/{backupId}/restore`). Same-server only for now —
+see `OPERATIONS.md` §Backup and restore for why cross-server restore needs a remote
+storage backend first, and for the full request/response shapes.
 
 ## 20. Monitoring and alerting
 
@@ -359,22 +376,28 @@ all ⬜, scoped to Phase 2 per `product-plan.md` §9.
 
 ## 21. Known limitations
 
-- No backup **restore** capability (see §19).
+- Backup restore is **same-server only** — the recorded backup path only exists on the
+  originating agent's local disk; cross-server restore needs a remote (S3-compatible)
+  storage backend first (see §19, Phase 2).
 - No on-disk agent task journal — a task in flight when the agent process restarts is
-  lost, not resumed (see `ARCHITECTURE.md` §4 "As built").
+  lost, not resumed (see `ARCHITECTURE.md` §4 "As built"). This also applies to a
+  `backup.restore` interrupted mid-flight: its own pre-restore checkpoint (§19) is the
+  recovery path, not an automatic resume.
 - No agent certificate auto-renewal before its 30-day expiry (see `SECURITY.md` §2).
 - No agent self-update mechanism (see `SECURITY.md` §3).
-- No background job queue — task dispatch is synchronous and bounded by a 120s HTTP
-  timeout; this will not scale past a moderate number of concurrent long-running tasks
-  (e.g. many simultaneous `stack.install` runs) without becoming a queue.
+- No background job queue — task dispatch is synchronous and bounded by an HTTP
+  timeout (120s for most tasks; `backup.run`/`backup.restore` use longer 180s/300s
+  timeouts given they can involve large archives — see `API.md`); this will not scale
+  past a moderate number of concurrent long-running tasks (e.g. many simultaneous
+  `stack.install` or `backup.restore` runs) without becoming a queue.
 - Single-user model: no organizations/teams/RBAC yet.
 - The in-process CA, while functionally correct, is not yet isolated as its own
   tightly-scoped trust boundary (see `SECURITY.md` §2).
-- `systemctl start/stop/restart` and Let's Encrypt issuance have not been verified in
-  *this* environment (no systemd as PID 1, no public DNS) — see `TESTING.md` §What
-  hasn't been verified.
-- Dashboard mobile responsiveness (320–768px) has not been verified with real browser
-  automation in this session — see `TESTING.md` §Known gaps.
+- `systemctl start/stop/restart`, Let's Encrypt issuance, and `backup.run`/
+  `backup.restore`'s `db`/`full` scopes (the `mysqldump`/`mysql` path) have not been
+  verified in *this* environment (no systemd as PID 1, no public DNS, no MariaDB
+  client installed) — see `TESTING.md` §What hasn't been verified. The `files`-scope
+  backup/restore round trip *has* been verified for real in this environment.
 - No CI pipeline / automated vulnerability scanning configured yet.
 
 ## 22. Performance decisions
@@ -393,6 +416,11 @@ all ⬜, scoped to Phase 2 per `product-plan.md` §9.
   `isPackageInstalled`, "don't clobber an existing deployment on a retried create" in
   `writeDefaultIndex`), so a retried task after a transient failure is safe/cheap
   rather than needing its own separate retry-safety design.
+- `backup.run`'s output filenames include a random 4-byte hex suffix (`randSuffix()`),
+  not just a second-granularity timestamp — cheap uniqueness that avoids two backups of
+  the same site/scope started within the same second colliding on one path (a real bug
+  found via `backup.restore`'s own pre-restore checkpoint doing exactly that — see
+  `TESTING.md` §5).
 
 ## 23. Test strategy
 

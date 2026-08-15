@@ -35,26 +35,33 @@
   .field { margin-bottom: 12px; }
   .card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; }
   .hidden { display: none !important; }
-  .center-screen { min-height: 100vh; display: flex; align-items: center; justify-content: center; }
-  .auth-card { width: 360px; }
+  .center-screen { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 16px; }
+  .auth-card { width: 360px; max-width: 100%; }
   .auth-card h1 { font-size: 20px; margin: 0 0 4px; }
   .auth-card p.sub { color: var(--muted); margin: 0 0 20px; }
   .error { color: var(--danger); font-size: 13px; margin-top: 8px; min-height: 16px; }
   .row { display: flex; gap: 8px; }
   .row > * { flex: 1; }
   header.topbar {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 12px 24px; background: var(--card); border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 16px;
+    padding: 12px 16px; background: var(--card); border-bottom: 1px solid var(--border);
   }
   header.topbar .brand { font-weight: 700; font-size: 16px; }
-  nav.tabs { display: flex; gap: 4px; }
+  header.topbar > div:last-child { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+  nav.tabs { display: flex; gap: 4px; flex-wrap: wrap; }
   nav.tabs button { border: none; background: none; padding: 8px 14px; border-radius: 8px; color: var(--muted); }
   nav.tabs button.active { background: var(--gray-bg); color: var(--text); font-weight: 600; }
   main { max-width: 1100px; margin: 0 auto; padding: 24px; }
+  .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  @media (max-width: 640px) {
+    main { padding: 14px; }
+    .modal { padding: 18px; }
+    .stat-grid { grid-template-columns: repeat(auto-fit, minmax(105px,1fr)); gap: 8px; }
+  }
   .view { display: none; }
   .view.active { display: block; }
-  .toolbar { display: flex; gap: 10px; margin-bottom: 16px; align-items: center; }
-  .toolbar input[type=search] { max-width: 280px; }
+  .toolbar { display: flex; gap: 10px; margin-bottom: 16px; align-items: center; flex-wrap: wrap; }
+  .toolbar input[type=search] { max-width: 280px; flex: 1 1 160px; }
   .spacer { flex: 1; }
   table { width: 100%; border-collapse: collapse; }
   th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 13px; }
@@ -142,7 +149,7 @@
         <div class="spacer"></div>
         <button class="primary" onclick="openNewServerModal()">+ New server</button>
       </div>
-      <div class="card" style="padding:0">
+      <div class="card table-wrap" style="padding:0">
         <table>
           <thead><tr><th>Name</th><th>Status</th><th>Group</th><th>Tags</th><th>Agent version</th><th>Last seen</th></tr></thead>
           <tbody id="serverTableBody"></tbody>
@@ -174,11 +181,18 @@
           <button onclick="openNewSiteModal()">+ New site</button>
         </div>
         <div id="sitesList" class="muted">No sites yet.</div>
+
+        <div class="section-title" style="display:flex;justify-content:space-between;align-items:center">
+          <span>Backups</span>
+          <button onclick="openNewBackupModal()">+ Run backup</button>
+        </div>
+        <div id="backupResult" class="task-result hidden"></div>
+        <div id="backupsList" class="muted">No backups yet.</div>
       </div>
     </div>
 
     <div id="view-audit" class="view">
-      <div class="card" style="padding:0">
+      <div class="card table-wrap" style="padding:0">
         <table>
           <thead><tr><th>Time</th><th>Server</th><th>Actor</th><th>Action</th><th>Detail</th></tr></thead>
           <tbody id="auditTableBody"></tbody>
@@ -211,7 +225,7 @@
 
 <script>
 const API = '/api/v1';
-let state = { me: null, servers: [], selectedServerId: null, pollTimer: null };
+let state = { me: null, servers: [], sites: [], backups: [], selectedServerId: null, pollTimer: null };
 
 async function api(path, opts) {
   opts = opts || {};
@@ -427,19 +441,144 @@ async function openServerDetail(id) {
   state.selectedServerId = id;
   showTab('serverDetail');
   document.getElementById('taskResult').classList.add('hidden');
+  document.getElementById('backupResult').classList.add('hidden');
   await renderServerDetail(id);
   try {
     const sites = await api(API + '/servers/' + id + '/sites');
-    renderSites(sites || []);
-  } catch (e) {}
+    state.sites = sites || [];
+    renderSites(state.sites);
+  } catch (e) { state.sites = []; }
+  await refreshBackups();
 }
 
 function renderSites(sites) {
   const el = document.getElementById('sitesList');
   if (!sites.length) { el.textContent = 'No sites yet.'; return; }
-  el.innerHTML = '<table><thead><tr><th>Domain</th><th>Type</th><th>PHP</th><th>Status</th></tr></thead><tbody>' +
+  el.innerHTML = '<div class="table-wrap"><table><thead><tr><th>Domain</th><th>Type</th><th>PHP</th><th>Status</th></tr></thead><tbody>' +
     sites.map(s => `<tr><td>${escapeHtml(s.Domain)}</td><td>${escapeHtml(s.AppType)}</td><td>${escapeHtml(s.PHPVersion||'—')}</td><td>${escapeHtml(s.Status)}</td></tr>`).join('') +
-    '</tbody></table>';
+    '</tbody></table></div>';
+}
+
+async function refreshBackups() {
+  try {
+    const backups = await api(API + '/servers/' + state.selectedServerId + '/backups') || [];
+    state.backups = backups;
+    renderBackups(backups);
+  } catch (e) { /* ignore — likely just an empty/new server */ }
+}
+
+function siteLabelForID(siteID) {
+  const site = (state.sites || []).find(s => s.ID === siteID);
+  return site ? site.Domain : (siteID || '—');
+}
+
+function formatBytes(n) {
+  if (!n) return '0 B';
+  const units = ['B','KB','MB','GB','TB'];
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return n.toFixed(i === 0 ? 0 : 1) + ' ' + units[i];
+}
+
+function renderBackups(backups) {
+  const el = document.getElementById('backupsList');
+  if (!backups.length) { el.textContent = 'No backups yet.'; return; }
+  el.innerHTML = '<div class="table-wrap"><table><thead><tr><th>Created</th><th>Scope</th><th>Site</th><th>Size</th><th>SHA-256</th><th></th></tr></thead><tbody>' +
+    backups.map(b => `
+      <tr>
+        <td class="muted">${new Date(b.CreatedAt).toLocaleString()}</td>
+        <td>${escapeHtml(b.Scope)}</td>
+        <td>${escapeHtml(siteLabelForID(b.SiteID))}</td>
+        <td class="muted">${formatBytes(b.SizeBytes)}</td>
+        <td class="muted" title="${escapeHtml(b.SHA256)}">${escapeHtml((b.SHA256||'').slice(0,12))}&hellip;</td>
+        <td><button onclick="restoreBackup('${b.ID}')">Restore&hellip;</button></td>
+      </tr>`).join('') +
+    '</tbody></table></div>';
+}
+
+function openNewBackupModal() {
+  const root = document.getElementById('modalRoot');
+  const siteOptions = (state.sites || []).map(s => `<option value="${s.ID}">${escapeHtml(s.Domain)}</option>`).join('');
+  root.innerHTML = `
+    <div class="modal-backdrop" onclick="if(event.target===this) closeBackupModal()">
+      <div class="modal">
+        <h2>Run a backup</h2>
+        <div class="field">
+          <label>Scope</label>
+          <select id="newBackupScope" onchange="toggleBackupScopeFields()">
+            <option value="files">Site files</option>
+            <option value="db">Database</option>
+            <option value="full">Site files + database</option>
+          </select>
+        </div>
+        <div class="field" id="newBackupSiteField">
+          <label>Site</label>
+          <select id="newBackupSite">${siteOptions || '<option value="">(no sites on this server yet)</option>'}</select>
+        </div>
+        <div class="field hidden" id="newBackupDBField">
+          <label>Database name</label>
+          <input id="newBackupDBName" placeholder="e.g. wp_example">
+        </div>
+        <button class="primary" style="width:100%" onclick="runBackup()">Start backup</button>
+        <div class="error" id="newBackupError"></div>
+        <p class="muted" id="newBackupStatus"></p>
+      </div>
+    </div>`;
+}
+function closeBackupModal() { document.getElementById('modalRoot').innerHTML = ''; }
+
+function toggleBackupScopeFields() {
+  const scope = document.getElementById('newBackupScope').value;
+  document.getElementById('newBackupSiteField').classList.toggle('hidden', scope === 'db');
+  document.getElementById('newBackupDBField').classList.toggle('hidden', scope === 'files');
+}
+
+async function runBackup() {
+  const scope = document.getElementById('newBackupScope').value;
+  const siteId = document.getElementById('newBackupSite') ? document.getElementById('newBackupSite').value : '';
+  const dbName = document.getElementById('newBackupDBName').value.trim();
+  const err = document.getElementById('newBackupError');
+  const status = document.getElementById('newBackupStatus');
+  err.textContent = '';
+  status.textContent = 'Running backup... this can take a while for large sites or databases.';
+  try {
+    await api(API + '/servers/' + state.selectedServerId + '/backups', {
+      method: 'POST', body: JSON.stringify({scope, site_id: siteId, db_name: dbName})
+    });
+    closeBackupModal();
+    await refreshBackups();
+  } catch (e) {
+    status.textContent = '';
+    err.textContent = e.message;
+  }
+}
+
+async function restoreBackup(backupId) {
+  const backup = (state.backups || []).find(b => b.ID === backupId);
+  if (!backup) return;
+  let dbName = '';
+  if (backup.Scope === 'db' || backup.Scope === 'full') {
+    dbName = prompt('Restoring a database backup. Enter the target database name (it must already exist):', '');
+    if (dbName === null) return;
+  }
+  if (!confirm('Restore this ' + backup.Scope + ' backup from ' + new Date(backup.CreatedAt).toLocaleString() +
+      '? A pre-restore checkpoint of the current state will be taken first, but this will overwrite current data.')) {
+    return;
+  }
+  const box = document.getElementById('backupResult');
+  box.className = 'task-result running';
+  box.textContent = 'Restoring backup... this can take a while.';
+  box.classList.remove('hidden');
+  try {
+    const res = await api(API + '/servers/' + state.selectedServerId + '/backups/' + backupId + '/restore', {
+      method: 'POST', body: JSON.stringify({site_id: backup.SiteID, db_name: dbName})
+    });
+    box.className = 'task-result ok';
+    box.textContent = 'Restore complete' + (res.checkpoint_path ? ' (pre-restore checkpoint saved at ' + res.checkpoint_path + ')' : '') + '.';
+  } catch (e) {
+    box.className = 'task-result fail';
+    box.textContent = 'Restore failed: ' + e.message;
+  }
 }
 
 async function renderServerDetail(id) {

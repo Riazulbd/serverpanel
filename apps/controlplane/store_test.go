@@ -245,3 +245,73 @@ func TestCreateAndListSites(t *testing.T) {
 		t.Fatalf("domain = %q, want example.sslip.io", sites[0].Domain)
 	}
 }
+
+func TestGetSiteScopesToServer(t *testing.T) {
+	st := newTestStore(t)
+	id, _, err := st.createServer("web-7", "", nil, time.Hour, "admin@example.com")
+	if err != nil {
+		t.Fatalf("createServer: %v", err)
+	}
+	otherID, _, err := st.createServer("web-8", "", nil, time.Hour, "admin@example.com")
+	if err != nil {
+		t.Fatalf("createServer: %v", err)
+	}
+	site, err := st.createSite(id, "example.sslip.io", "sp_abc123", "/home/sites/sp_abc123/public", "static", "")
+	if err != nil {
+		t.Fatalf("createSite: %v", err)
+	}
+
+	if _, ok := st.getSite(id, site.ID); !ok {
+		t.Fatal("expected getSite to find the site on its own server")
+	}
+	if _, ok := st.getSite(otherID, site.ID); ok {
+		t.Fatal("expected getSite to refuse a site ID that belongs to a different server")
+	}
+	if _, ok := st.getSite(id, "site_doesnotexist"); ok {
+		t.Fatal("expected getSite to refuse an unknown site ID")
+	}
+}
+
+func TestCreateAndListBackups(t *testing.T) {
+	st := newTestStore(t)
+	id, _, err := st.createServer("web-9", "", nil, time.Hour, "admin@example.com")
+	if err != nil {
+		t.Fatalf("createServer: %v", err)
+	}
+	site, err := st.createSite(id, "example.sslip.io", "sp_abc123", "/home/sites/sp_abc123/public", "static", "")
+	if err != nil {
+		t.Fatalf("createSite: %v", err)
+	}
+
+	b, err := st.createBackup(id, site.ID, "files", "/var/backups/serverpanel/sp_abc123-files-x.tar.gz", 1024, "deadbeef", "completed")
+	if err != nil {
+		t.Fatalf("createBackup: %v", err)
+	}
+	if b.ID == "" {
+		t.Fatal("expected createBackup to assign an ID")
+	}
+
+	list := st.listBackups(id)
+	if len(list) != 1 {
+		t.Fatalf("listBackups returned %d backups, want 1", len(list))
+	}
+	if list[0].SHA256 != "deadbeef" {
+		t.Fatalf("sha256 = %q, want deadbeef", list[0].SHA256)
+	}
+
+	got, ok := st.getBackup(id, b.ID)
+	if !ok {
+		t.Fatal("expected getBackup to find the backup on its own server")
+	}
+	if got.Path != b.Path {
+		t.Fatalf("path = %q, want %q", got.Path, b.Path)
+	}
+
+	otherID, _, _ := st.createServer("web-10", "", nil, time.Hour, "admin@example.com")
+	if _, ok := st.getBackup(otherID, b.ID); ok {
+		t.Fatal("expected getBackup to refuse a backup ID that belongs to a different server")
+	}
+	if len(st.listBackups(otherID)) != 0 {
+		t.Fatal("expected listBackups on a different server to return no rows")
+	}
+}

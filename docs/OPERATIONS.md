@@ -40,22 +40,44 @@ dashboard).
 
 ## 3. Backup and restore
 
-**Backup** (implemented): dispatch the `backup.run` capability
+**Backup** (implemented): from the dashboard's server-detail page, "+ Run backup"
+(`POST /api/v1/servers/{id}/backups`), or dispatch `backup.run` directly
 (`POST /api/v1/servers/{id}/tasks` with `{"capability": "backup.run", "params": {...}}`)
-— see `packages/capabilities/backup.go` for its `scope`/`target` params. It writes a
-checksummed local tar.gz on the VPS itself and records the checksum in its
-`TaskEvent.detail`. The control plane's `backups` table schema exists (`db.go`) but
-nothing currently writes a row into it automatically — wiring `backup.run`'s dispatch
-through a persistence step analogous to `handleCreateSite` (dispatch → parse result →
-insert row) is a small, well-scoped next task.
+— see `packages/capabilities/backup.go` for its `scope`/`site_root`/`db_name` params.
+It writes a checksummed local tar.gz on the VPS itself. The dedicated
+`POST /api/v1/servers/{id}/backups` endpoint (`apps/controlplane/backups.go`) dispatches
+it and, only on confirmed success, persists a `backups` row — the same
+dispatch-then-persist pattern `handleCreateSite` uses — so `GET
+/api/v1/servers/{id}/backups` lists every backup actually confirmed to exist on disk.
 
-**Restore** (not implemented): there is no `backup.restore` capability yet. Until one
-exists, restoring from a `backup.run` archive is a fully manual process: SSH to the
-VPS, locate the tar.gz under wherever `backup.run` wrote it, verify its SHA-256 against
-the value in the task's `detail`, and manually extract/restore the DB dump and/or
-files. **Do not represent backup/restore as a complete, tested feature until a real
-`backup.restore` capability exists and has been exercised end-to-end** — see
-`SYSTEM.md` §19 and §21, and `TESTING.md` §5 item 1 for the recommended next step.
+**Restore** (implemented): `backup.restore`
+(`packages/capabilities/backup.go`) extracts a previously created archive and restores
+its database dump and/or files. From the dashboard, click "Restore…" next to a backup
+in the server-detail page's Backups list, or dispatch
+`POST /api/v1/servers/{id}/backups/{backupId}/restore` directly (see `API.md`). Three
+safety properties, all enforced in the capability itself (not just the dashboard):
+
+1. **Checksum verification** — the control plane always passes the backup's recorded
+   SHA-256; a mismatch (corrupted or tampered archive) aborts before anything is
+   touched.
+2. **Pre-restore checkpoint** — for any restore that touches files (`files`/`full`
+   scope), the agent takes a fresh `backup.run` of the *current* state before
+   overwriting anything. If that checkpoint fails, the restore itself aborts rather
+   than risking an unrecoverable overwrite. The checkpoint's path is returned in the
+   restore result (`checkpoint_path`) and shown in the dashboard.
+3. **Path validation** — `backup_path` must resolve (post-symlink-resolution) inside
+   the fixed `backupBaseDir`, the same defense-in-depth pattern the file manager's
+   `resolveScopedPath` uses for site roots.
+
+Restore is currently **same-server only**: the recorded backup path only exists on the
+agent's own local disk (local storage is the only backend Phase 1 ships), so restoring
+onto a *different* server isn't possible yet — that needs a remote (S3-compatible)
+storage backend first (Phase 2, `product-plan.md` §9). `handleRestoreBackup` rejects a
+backup ID that doesn't belong to the target server's own record set. See
+`TESTING.md` for what's covered by the automated `TestBackupRunRestoreFilesRoundTrip`
+(real tar-based round trip: backup → mutate → restore → verify original content came
+back) versus what still needs manual verification (the `db`/`full` scopes' `mysqldump`/
+`mysql` path, which requires a live MariaDB instance this environment doesn't have).
 
 ## 4. Monitoring and alerting
 

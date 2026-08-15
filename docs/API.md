@@ -43,6 +43,9 @@ protected route; there is no route that skips it by omission.
 | `POST` | `/api/v1/servers/{id}/tasks` | Dispatch an arbitrary allow-listed capability (see §3) |
 | `GET` | `/api/v1/servers/{id}/sites` | List sites on a server |
 | `POST` | `/api/v1/servers/{id}/sites` | Dispatch `site.create` and persist the resulting site record |
+| `GET` | `/api/v1/servers/{id}/backups` | List backups recorded for a server |
+| `POST` | `/api/v1/servers/{id}/backups` | Dispatch `backup.run` and persist the resulting backup record |
+| `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a previously recorded backup |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -102,6 +105,40 @@ Dispatches `site.create`, and only on the agent reporting success, persists a `s
 row. → `201 {"site": {...siteRecord}, "temp_domain": "<user>.<ip-with-dashes>.sslip.io"}`.
 A dispatch failure or agent-side failure never leaves an orphan site record — the
 row is written after (and only after) the agent confirms success.
+
+### `POST /api/v1/servers/{id}/backups`
+```json
+{"scope": "db|files|full", "site_id": "<site id, required for files/full>", "db_name": "<db name, required for db/full>"}
+```
+Dispatches `backup.run` (resolving `site_id` to that site's home directory — the
+capability's `site_root` — via the `sites` table), and only on the agent reporting
+success, persists a `backups` row. → `201 {...backupRecord}`. `scope` outside
+`db`/`files`/`full`, or a missing `site_id`/`db_name` for a scope that needs one, → `400`
+before any dispatch is attempted. A disconnected/unknown server → `502`; an agent-side
+failure (e.g. `mysqldump` erroring) → `422`, with no row persisted either way.
+
+### `GET /api/v1/servers/{id}/backups`
+→ `200 [...backupRecord]`, newest first. `backupRecord`: `ID`, `ServerID`, `SiteID`
+(empty for a `db`-scope backup), `Scope`, `Path` (absolute path on the *agent's* local
+disk — see `OPERATIONS.md` "Backup and restore" for why cross-server restore isn't
+possible until a remote storage backend exists), `SizeBytes`, `SHA256`, `Status`,
+`CreatedAt`.
+
+### `POST /api/v1/servers/{id}/backups/{backupId}/restore`
+```json
+{"site_id": "<override the backup's recorded site_id, optional>", "db_name": "<required for db/full>"}
+```
+Looks up the recorded backup (must belong to `{id}` — restoring onto a different server
+than the one that produced the backup isn't supported yet, since the archive only exists
+on the originating agent's local disk), then dispatches `backup.restore` with that
+backup's `path`/`scope`/`sha256` plus the resolved `site_root`/`db_name`. For a
+`files`/`full` backup, `site_id` defaults to the one recorded at backup time if omitted.
+→ `200` with the agent's `backup.restore` result JSON (`scope`, `restored_from`,
+`checkpoint_path` — the pre-restore checkpoint archive path, present whenever files were
+touched — `restored_at`). Unknown backup → `404`; missing required `db_name` → `400`;
+disconnected server → `502`; agent-side failure (bad checksum, missing dump, `mysql`
+import error, ...) → `422` — a failed restore attempt never marks the backup record
+itself as consumed, so the same restore can simply be retried.
 
 ### `POST /agents/register`
 ```json
