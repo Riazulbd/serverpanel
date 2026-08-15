@@ -36,27 +36,29 @@
   .card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; }
   .hidden { display: none !important; }
   .center-screen { min-height: 100vh; display: flex; align-items: center; justify-content: center; }
-  .auth-card { width: 360px; }
+  .auth-card { width: 360px; max-width: 90vw; }
   .auth-card h1 { font-size: 20px; margin: 0 0 4px; }
   .auth-card p.sub { color: var(--muted); margin: 0 0 20px; }
   .error { color: var(--danger); font-size: 13px; margin-top: 8px; min-height: 16px; }
   .row { display: flex; gap: 8px; }
   .row > * { flex: 1; }
   header.topbar {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 12px 24px; background: var(--card); border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap;
+    row-gap: 8px; column-gap: 12px; padding: 12px 16px; background: var(--card); border-bottom: 1px solid var(--border);
   }
   header.topbar .brand { font-weight: 700; font-size: 16px; }
-  nav.tabs { display: flex; gap: 4px; }
+  nav.tabs { display: flex; gap: 4px; flex-wrap: wrap; }
   nav.tabs button { border: none; background: none; padding: 8px 14px; border-radius: 8px; color: var(--muted); }
   nav.tabs button.active { background: var(--gray-bg); color: var(--text); font-weight: 600; }
-  main { max-width: 1100px; margin: 0 auto; padding: 24px; }
+  main { max-width: 1100px; margin: 0 auto; padding: 16px; }
+  @media (min-width: 640px) { main { padding: 24px; } }
   .view { display: none; }
   .view.active { display: block; }
-  .toolbar { display: flex; gap: 10px; margin-bottom: 16px; align-items: center; }
-  .toolbar input[type=search] { max-width: 280px; }
+  .toolbar { display: flex; gap: 10px; margin-bottom: 16px; align-items: center; flex-wrap: wrap; }
+  .toolbar input[type=search] { max-width: 280px; flex: 1 1 200px; }
   .spacer { flex: 1; }
-  table { width: 100%; border-collapse: collapse; }
+  .card { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; min-width: 480px; }
   th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 13px; }
   th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .03em; }
   tr.clickable { cursor: pointer; }
@@ -174,6 +176,12 @@
           <button onclick="openNewSiteModal()">+ New site</button>
         </div>
         <div id="sitesList" class="muted">No sites yet.</div>
+
+        <div class="section-title" style="display:flex;justify-content:space-between;align-items:center">
+          <span>Backups</span>
+          <button onclick="openDbBackupModal()">Back up a database...</button>
+        </div>
+        <div id="backupsList" class="muted">No backups yet.</div>
       </div>
     </div>
 
@@ -211,7 +219,7 @@
 
 <script>
 const API = '/api/v1';
-let state = { me: null, servers: [], selectedServerId: null, pollTimer: null };
+let state = { me: null, servers: [], sites: [], selectedServerId: null, pollTimer: null };
 
 async function api(path, opts) {
   opts = opts || {};
@@ -432,14 +440,121 @@ async function openServerDetail(id) {
     const sites = await api(API + '/servers/' + id + '/sites');
     renderSites(sites || []);
   } catch (e) {}
+  await refreshBackups();
 }
 
 function renderSites(sites) {
+  state.sites = sites;
   const el = document.getElementById('sitesList');
   if (!sites.length) { el.textContent = 'No sites yet.'; return; }
-  el.innerHTML = '<table><thead><tr><th>Domain</th><th>Type</th><th>PHP</th><th>Status</th></tr></thead><tbody>' +
-    sites.map(s => `<tr><td>${escapeHtml(s.Domain)}</td><td>${escapeHtml(s.AppType)}</td><td>${escapeHtml(s.PHPVersion||'—')}</td><td>${escapeHtml(s.Status)}</td></tr>`).join('') +
-    '</tbody></table>';
+  el.innerHTML = '<div style="overflow-x:auto"><table><thead><tr><th>Domain</th><th>Type</th><th>PHP</th><th>Status</th><th></th></tr></thead><tbody>' +
+    sites.map(s => `<tr>
+      <td>${escapeHtml(s.Domain)}</td><td>${escapeHtml(s.AppType)}</td><td>${escapeHtml(s.PHPVersion||'—')}</td><td>${escapeHtml(s.Status)}</td>
+      <td><button onclick="runFilesBackup('${s.ID}','${escapeHtml(s.Domain)}')">Back up files</button></td>
+    </tr>`).join('') +
+    '</tbody></table></div>';
+}
+
+async function runFilesBackup(siteId, domain) {
+  const box = document.getElementById('taskResult');
+  box.className = 'task-result running';
+  box.textContent = 'Backing up files for ' + domain + '...';
+  box.classList.remove('hidden');
+  try {
+    await api(API + '/servers/' + state.selectedServerId + '/backups', {
+      method: 'POST', body: JSON.stringify({site_id: siteId, scope: 'files'})
+    });
+    box.className = 'task-result ok';
+    box.textContent = 'Files backup for ' + domain + ' completed.';
+    await refreshBackups();
+  } catch (e) {
+    box.className = 'task-result fail';
+    box.textContent = 'Files backup for ' + domain + ' failed: ' + e.message;
+  }
+}
+
+function openDbBackupModal() {
+  const root = document.getElementById('modalRoot');
+  root.innerHTML = `
+    <div class="modal-backdrop" onclick="if(event.target===this) closeModal()">
+      <div class="modal">
+        <h2>Back up a database</h2>
+        <div class="field"><label>Database name</label><input id="backupDbName" placeholder="e.g. wp_example"></div>
+        <button class="primary" style="width:100%" onclick="runDbBackup()">Back up now</button>
+        <div class="error" id="backupDbError"></div>
+        <p class="muted" id="backupDbStatus"></p>
+      </div>
+    </div>`;
+}
+
+async function runDbBackup() {
+  const dbName = document.getElementById('backupDbName').value.trim();
+  const err = document.getElementById('backupDbError');
+  const status = document.getElementById('backupDbStatus');
+  err.textContent = '';
+  if (!dbName) { err.textContent = 'Database name is required.'; return; }
+  status.textContent = 'Dumping and compressing the database, this can take a while for a large one...';
+  try {
+    await api(API + '/servers/' + state.selectedServerId + '/backups', {
+      method: 'POST', body: JSON.stringify({scope: 'db', db_name: dbName})
+    });
+    status.textContent = 'Database backup completed.';
+    await refreshBackups();
+  } catch (e) {
+    status.textContent = '';
+    err.textContent = e.message;
+  }
+}
+
+async function refreshBackups() {
+  try {
+    const backups = await api(API + '/servers/' + state.selectedServerId + '/backups') || [];
+    renderBackups(backups);
+  } catch (e) {}
+}
+
+function renderBackups(backups) {
+  const el = document.getElementById('backupsList');
+  if (!backups.length) { el.textContent = 'No backups yet.'; return; }
+  el.innerHTML = '<div style="overflow-x:auto"><table><thead><tr><th>Created</th><th>Scope</th><th>Target</th><th>Size</th><th>Status</th><th></th></tr></thead><tbody>' +
+    backups.map(b => {
+      const site = (state.sites || []).find(s => s.ID === b.SiteID);
+      const target = [b.DBName, site ? site.Domain : ''].filter(Boolean).join(' / ') || '—';
+      return `<tr>
+        <td class="muted">${new Date(b.CreatedAt).toLocaleString()}</td>
+        <td>${escapeHtml(b.Scope)}</td>
+        <td>${escapeHtml(target)}</td>
+        <td class="muted">${formatBytes(b.SizeBytes)}</td>
+        <td>${escapeHtml(b.Status)}</td>
+        <td><button class="danger" onclick="restoreBackup('${b.ID}')">Restore</button></td>
+      </tr>`;
+    }).join('') +
+    '</tbody></table></div>';
+}
+
+function formatBytes(n) {
+  if (!n) return '—';
+  const units = ['B','KB','MB','GB','TB'];
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return n.toFixed(i === 0 ? 0 : 1) + ' ' + units[i];
+}
+
+async function restoreBackup(backupId) {
+  if (!confirm('Restore this backup? A pre-restore checkpoint of the current state will be taken first, but any changes made since this backup and not otherwise saved could still be affected.')) return;
+  const box = document.getElementById('taskResult');
+  box.className = 'task-result running';
+  box.textContent = 'Restoring backup ' + backupId + '... this can take a while.';
+  box.classList.remove('hidden');
+  try {
+    await api(API + '/servers/' + state.selectedServerId + '/backups/' + backupId + '/restore', {method: 'POST'});
+    box.className = 'task-result ok';
+    box.textContent = 'Restore completed.';
+    await refreshBackups();
+  } catch (e) {
+    box.className = 'task-result fail';
+    box.textContent = 'Restore failed: ' + e.message;
+  }
 }
 
 async function renderServerDetail(id) {

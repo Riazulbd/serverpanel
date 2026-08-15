@@ -40,22 +40,38 @@ dashboard).
 
 ## 3. Backup and restore
 
-**Backup** (implemented): dispatch the `backup.run` capability
-(`POST /api/v1/servers/{id}/tasks` with `{"capability": "backup.run", "params": {...}}`)
-— see `packages/capabilities/backup.go` for its `scope`/`target` params. It writes a
-checksummed local tar.gz on the VPS itself and records the checksum in its
-`TaskEvent.detail`. The control plane's `backups` table schema exists (`db.go`) but
-nothing currently writes a row into it automatically — wiring `backup.run`'s dispatch
-through a persistence step analogous to `handleCreateSite` (dispatch → parse result →
-insert row) is a small, well-scoped next task.
+**Backup**: `POST /api/v1/servers/{id}/backups` with
+`{"scope": "db"|"files"|"full", "site_id": "...", "db_name": "..."}` (the site's docroot
+parent becomes `site_root` for `files`/`full`; `db_name` is required for `db`/`full`).
+Dispatches the `backup.run` capability (`packages/capabilities/backup.go`), which writes
+a checksummed local tar.gz on the VPS under `/var/backups/serverpanel`, and — only on
+success — persists a `backups` row (`store.createBackup`). The dashboard's server-detail
+view has a "Back up files" button per site and a "Back up a database..." action.
 
-**Restore** (not implemented): there is no `backup.restore` capability yet. Until one
-exists, restoring from a `backup.run` archive is a fully manual process: SSH to the
-VPS, locate the tar.gz under wherever `backup.run` wrote it, verify its SHA-256 against
-the value in the task's `detail`, and manually extract/restore the DB dump and/or
-files. **Do not represent backup/restore as a complete, tested feature until a real
-`backup.restore` capability exists and has been exercised end-to-end** — see
-`SYSTEM.md` §19 and §21, and `TESTING.md` §5 item 1 for the recommended next step.
+**Restore**: `POST /api/v1/servers/{id}/backups/{backupId}/restore` (no body — every
+parameter comes from the stored backup record, not the caller, so a restore can't be
+redirected to an arbitrary path via the API). Dispatches `backup.restore`, which:
+verifies the archive's SHA-256 against the value recorded at backup time before doing
+anything else; takes a best-effort pre-restore checkpoint (a fresh `backup.run` of
+whatever's currently on disk, itself recorded as a `backups` row so a bad restore can be
+rolled back); imports the database scope via `mysql <db_name> < dump.sql`; and copies the
+files scope back via `cp -a`, **without deleting anything already present that isn't in
+the archive** — a restore merges/overwrites, it never wipes the target first (see
+`backup.go`'s comment on why this codebase never implements unrestricted recursive
+deletion as a capability). Operationally this means: if a restore is meant to fully
+revert a site to a prior state including removing files added since, that's still a
+manual cleanup step after the restore, not something the restore does for you — check
+what's on disk against the restored archive's contents if that matters for your case.
+
+The dashboard's per-backup "Restore" button in the server-detail Backups list confirms
+before dispatching, given the risk of restoring the wrong backup.
+
+**What restoring to a different server looks like today**: the files-scope restore
+locates the archived site directory by its position in the tar tree (`home/sites/*`),
+not by matching the original domain/system-user name, so restoring an archive taken on
+one server onto a *different* server's differently-named site works by design — but this
+has not been exercised end-to-end yet (see `TESTING.md` §3). The database scope has no
+such flexibility concern (it always targets whatever `db_name` you dispatch against).
 
 ## 4. Monitoring and alerting
 
@@ -108,6 +124,8 @@ tested procedure rather than a documented manual fallback).
 | Dashboard shows a server's site list as empty after a successful `site.create` dispatch | Confirm you're calling `POST /api/v1/servers/{id}/sites` (which persists a record), not the generic `POST /api/v1/servers/{id}/tasks` with `capability: "site.create"` (which dispatches but does not persist — see `API.md` §2). |
 | Login succeeds but every subsequent API call returns `403 two-factor verification required` | Expected behavior once 2FA is enabled — call `POST /api/v1/auth/mfa/challenge` with a valid TOTP code before any other route will accept the session. |
 | Any privileged action's effect isn't showing up | Check `GET /api/v1/audit` — every capability dispatch is logged with its `task_id` before being sent, and its terminal outcome is logged as `task.event`; cross-reference the task ID to see whether the agent actually reported success. |
+| `backup.restore` fails with "checksum mismatch" | The archive under `/var/backups/serverpanel` on the agent's disk doesn't match the SHA-256 recorded at backup time — it's been modified, truncated, or replaced since. This is a hard stop by design (§3); there is no override. If the archive is genuinely fine and the recorded checksum is wrong (shouldn't happen — both come from the same `sha256File` call), that's a bug worth reporting, not something to bypass. |
+| Restoring a backup returns `422` "no recorded database name" or "site no longer exists" | The stored `backups` row is missing the association its scope needs — either it was a `db`-scope backup created without a `db_name` (shouldn't be possible through the API, which requires it), or the site it belonged to (`site_id`) has since been deleted from this server. There is no way to restore a files-scope backup without an existing site record to restore it *into* today. |
 
 ## 7. Data/secrets hygiene
 

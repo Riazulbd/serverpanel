@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -29,7 +30,30 @@ func openDB(path string) (*sql.DB, error) {
 		db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
+	if err := applyMigrations(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("apply migrations: %w", err)
+	}
 	return db, nil
+}
+
+// applyMigrations runs additive, idempotent schema changes that can't be
+// expressed as `CREATE TABLE IF NOT EXISTS` (SQLite has no `ADD COLUMN IF
+// NOT EXISTS`). Each statement is safe to re-run: a "duplicate column name"
+// error means an earlier run already applied it, so it's swallowed rather
+// than treated as a failure. This is Phase 1's whole migration story — see
+// docs/OPERATIONS.md §5 — deliberately simple until schema changes get more
+// complex than "add a column with a default".
+func applyMigrations(db *sql.DB) error {
+	migrations := []string{
+		`ALTER TABLE backups ADD COLUMN db_name TEXT NOT NULL DEFAULT ''`,
+	}
+	for _, stmt := range migrations {
+		if _, err := db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+			return fmt.Errorf("%s: %w", stmt, err)
+		}
+	}
+	return nil
 }
 
 const schema = `
@@ -105,6 +129,7 @@ CREATE TABLE IF NOT EXISTS backups (
 	path       TEXT NOT NULL,
 	size_bytes INTEGER NOT NULL DEFAULT 0,
 	sha256     TEXT NOT NULL DEFAULT '',
+	db_name    TEXT NOT NULL DEFAULT '',
 	status     TEXT NOT NULL,
 	created_at TEXT NOT NULL
 );

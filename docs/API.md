@@ -43,6 +43,9 @@ protected route; there is no route that skips it by omission.
 | `POST` | `/api/v1/servers/{id}/tasks` | Dispatch an arbitrary allow-listed capability (see §3) |
 | `GET` | `/api/v1/servers/{id}/sites` | List sites on a server |
 | `POST` | `/api/v1/servers/{id}/sites` | Dispatch `site.create` and persist the resulting site record |
+| `GET` | `/api/v1/servers/{id}/backups` | List backups recorded for a server |
+| `POST` | `/api/v1/servers/{id}/backups` | Dispatch `backup.run` and persist the resulting backup record |
+| `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a recorded backup |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -102,6 +105,35 @@ Dispatches `site.create`, and only on the agent reporting success, persists a `s
 row. → `201 {"site": {...siteRecord}, "temp_domain": "<user>.<ip-with-dashes>.sslip.io"}`.
 A dispatch failure or agent-side failure never leaves an orphan site record — the
 row is written after (and only after) the agent confirms success.
+
+### `POST /api/v1/servers/{id}/backups`
+```json
+{"scope": "files", "site_id": "site_...", "db_name": ""}
+```
+`scope` is one of `db`, `files`, `full`. `db_name` is required for `db`/`full`;
+`site_id` is required for `files`/`full` (its `docroot`'s parent directory becomes
+the dispatched `site_root`). Dispatches `backup.run` (bounded by a 10-minute context,
+longer than the general task-dispatch timeout since a real backup can take a while)
+and, only on success, persists a `backups` row. → `201 {...backupRecord}`. A dispatch
+or agent-side failure never leaves an orphan row, matching `POST .../sites`.
+
+### `GET /api/v1/servers/{id}/backups`
+→ `200 [...backupRecord]`, newest first. Each record: `ID`, `ServerID`, `SiteID`
+(empty for a bare `db`-scope backup not tied to a site), `Scope`, `Path` (the archive's
+absolute path **on the agent's own disk**, not retrievable through this API — there is
+no download-a-backup endpoint), `SizeBytes`, `SHA256`, `DBName`, `Status`, `CreatedAt`.
+
+### `POST /api/v1/servers/{id}/backups/{backupId}/restore`
+No request body — every parameter `backup.restore` needs (`path`, `sha256`, `scope`,
+and `db_name`/`site_root` as applicable) is derived server-side from the stored backup
+record and, for a `files`/`full` restore, the site record it's associated with. This is
+deliberate: the API never accepts a caller-supplied path or site_root for a restore, so
+"restore" can't be turned into an arbitrary-write primitive by a crafted request body.
+Dispatches `backup.restore` (10-minute context) and, on success, persists the
+pre-restore checkpoint `backup.restore` took as its own `backups` row. →
+`200 {"result": {...restoreResult}, "checkpoint": {...backupRecord}|null}`. Backup not
+found → `404`. Backup missing the `db_name`/site association its scope requires (e.g. a
+stale record from a since-deleted site) → `422`.
 
 ### `POST /agents/register`
 ```json

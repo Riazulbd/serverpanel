@@ -116,18 +116,30 @@ webhook push-to-deploy, deploy keys, or rollback exist in this codebase yet.
 ### Backup and restoration
 | Feature | Status |
 |---|---|
-| DB/file/full backups | ✅ `backup.run` — checksummed local tar.gz |
+| DB/file/full backups | ✅ `backup.run` — checksummed local tar.gz; the control plane
+  now persists a `backups` row on every successful run (`POST /api/v1/servers/{id}/backups`),
+  not just the agent's own TaskEvent detail |
 | Scheduling, retention policies | ⬜ not implemented (backups are on-demand only) |
 | Encryption | ⬜ not implemented (local tar.gz is unencrypted; relies on host
   filesystem permissions today) |
-| Backup verification | 🚧 SHA-256 checksum is recorded and returned; the dashboard
-  does not yet re-verify it automatically |
+| Backup verification | ✅ SHA-256 checksum is recorded at backup time and
+  re-verified by `backup.restore` before it touches anything — a restore whose archive
+  doesn't match its recorded checksum is refused, not silently applied |
 | Local storage | ✅ |
 | S3-compatible / Amazon S3 / R2 / B2 / Spaces / Wasabi | ⬜ Phase 2 |
-| Restore (same or another server) | ⬜ **not implemented — there is no restore
-  capability yet, only `backup.run`.** This is the most significant gap relative to
-  the "backup and restore model" the product plan calls for; see `OPERATIONS.md`. |
-| Pre-restore checkpoints, progress tracking, failure recovery | ⬜ depends on restore |
+| Restore (same or another server) | ✅ `backup.restore` capability +
+  `POST /api/v1/servers/{id}/backups/{backupId}/restore`. Restoring to a *different*
+  server/site works for the files scope (it locates the archived site directory by
+  structure, not by name) but is not yet exercised by an automated cross-server test —
+  see `TESTING.md`. |
+| Pre-restore checkpoints, progress tracking, failure recovery | 🚧 `backup.restore`
+  takes a best-effort pre-restore checkpoint (a fresh `backup.run` of current state)
+  before restoring, and that checkpoint is itself recorded as a `backups` row; progress
+  is reported via `Progress` callbacks the same as every other long-running capability.
+  What's still missing: scheduled/automatic retention of checkpoints (they accumulate
+  like any other backup with no cleanup capability — see §21), and restore does not
+  delete files absent from the archive (documented tradeoff, not a bug — see
+  `OPERATIONS.md` §3). |
 
 ### Security and monitoring
 See `SECURITY.md` for the detailed, section-by-section implemented-vs-planned
@@ -144,12 +156,14 @@ white-label, reseller/hosting-packages, billing, public API, plugin architecture
 Phase boundaries and full milestone/estimate tables are in `product-plan.md` §6; this
 is the condensed status:
 
-- **Phase 1 — secure working foundation:** ~90% of the *capability* surface exists and
-  is tested per-capability (see the tables above); the biggest real gaps are backup
-  **restore**, an automated test suite (now added, see `TESTING.md`), SSL auto-renewal,
-  and agent cert auto-rotation. Not "GA-ready" yet, but the architecture and security
-  primitives it depends on (mTLS, allow-listed capabilities, per-app isolation, audit
-  log) are real and proven, not stubs.
+- **Phase 1 — secure working foundation:** the capability surface, an automated test
+  suite, and backup **restore** (closed out this session — see §19) are all in place;
+  the biggest remaining gaps are SSL auto-renewal, agent cert auto-rotation, backup
+  scheduling/retention, and a background job queue for tasks longer than the current
+  synchronous-dispatch model comfortably supports. Not "GA-ready" yet, but the
+  architecture and security primitives it depends on (mTLS, allow-listed capabilities,
+  per-app isolation, audit log, checksum-verified backup/restore) are real and proven,
+  not stubs.
 - **Phase 2 — professional server management:** not started. Git deployment,
   cron/process management, SSH/firewall management UI, remote backups, cross-server
   migration all remain ⬜.
@@ -173,9 +187,10 @@ bundler, no `node_modules`), embedded into the Go binary via `//go:embed`. Plain
 handles the session token directly — `HttpOnly` cookie). This trades "modern SPA
 tooling" for "the entire frontend is one deployable file with zero build step and zero
 frontend dependency surface to patch," a deliberate Phase 1 choice given the security-
-sensitive nature of the product. It is not yet verified mobile-responsive at the
-320–768px breakpoints called out in the original requirements — see `TESTING.md`
-§Known gaps for what a future pass needs to check with real browser automation.
+sensitive nature of the product. Verified mobile-responsive (no horizontal overflow) at
+320/375/390/414/768/1280px with real Playwright browser automation against the core
+flows — see §21 and `TESTING.md` §Mobile responsiveness for what was covered and what
+wasn't (modals and the Security tab weren't screenshotted in this pass).
 
 ## 6. Backend architecture
 
@@ -233,11 +248,18 @@ EXISTS`, applied on every `openDB` call — idempotent, no separate migration to
 | `revoked_certs` | cert serial → server, revoked-at (checked on every gateway handshake) |
 | `audit_log` | append-only: seq, timestamp, server, actor, action, detail |
 | `sites` | id, server, domain, system user, docroot, app type, PHP version, status |
-| `backups` | id, server, site, scope, path, size, sha256, status, created_at |
+| `backups` | id, server, site, scope, path, size, sha256, db_name, status, created_at |
 
 No ORM — every query is a small, explicit SQL statement in `store.go`. All secrets
 (session tokens, bootstrap tokens) are stored only as SHA-256 hashes; passwords use
 bcrypt (cost 12); nothing is stored in plaintext.
+
+`db.go`'s `applyMigrations` is this project's entire migration story so far: additive
+`ALTER TABLE ... ADD COLUMN` statements run after the `CREATE TABLE IF NOT EXISTS`
+block, each one safe to re-run (a "duplicate column name" error means it already
+applied, and is swallowed rather than treated as failure). `backups.db_name` is the
+first column added this way, needed so a restore can recover which database a backup
+came from without the caller having to remember and re-supply it.
 
 ## 9. API endpoints
 
@@ -278,9 +300,8 @@ Current capability list: `system.ping`, `service.control`, `diagnostics.basic`,
 `stack.install`, `site.create`, `site.set_php_version`, `site.set_status`,
 `app.wordpress_install`, `ssl.issue_letsencrypt`, `ssl.install_custom`, `db.create`,
 `db.delete`, `db.list`, `file.list`, `file.read`, `file.write`, `file.delete`,
-`backup.run`, `logs.tail`. Notably absent (by design, until reviewed and added):
-`backup.restore`, `git.deploy`, `cron.upsert`, `ssh.*`, `firewall.*`,
-`agent.self_update`.
+`backup.run`, `backup.restore`, `logs.tail`. Notably absent (by design, until reviewed
+and added): `git.deploy`, `cron.upsert`, `ssh.*`, `firewall.*`, `agent.self_update`.
 
 ## 13. Installation and deployment
 
@@ -343,12 +364,56 @@ defenses on the file manager (`resolveScopedPath`).
 
 ## 19. Backup and restore model
 
-**Backup**: implemented (`backup.run` — local, checksummed tar.gz of DB and/or files).
-**Restore**: **not implemented**. This is the single largest functional gap in the
-Phase 1 feature set relative to what the product plan calls for, and should be the
-next priority after this documentation pass — see `OPERATIONS.md` §Backup and restore
-for the concrete plan (a `backup.restore` capability mirroring `backup.run`'s
-validation approach, plus a pre-restore checkpoint step).
+**Backup**: `backup.run` — local, checksummed tar.gz of DB and/or files, written under
+`/var/backups/serverpanel` on the agent's own disk. The control plane's
+`POST /api/v1/servers/{id}/backups` dispatches it and persists a `backups` row
+(id, server, site, scope, path, size, sha256, db_name, status, created_at) — this
+persistence step didn't exist for the first several sessions of this project (only the
+capability itself did) and was closed out alongside restore.
+
+**Restore**: `backup.restore` — the counterpart capability, dispatched via
+`POST /api/v1/servers/{id}/backups/{backupId}/restore`. It:
+1. Refuses to read anything outside `/var/backups/serverpanel` and, when a checksum is
+   on record (always, for a backup this control plane created), refuses to restore from
+   an archive whose current SHA-256 doesn't match — a corrupted or tampered archive is
+   rejected before extraction, not partway through it.
+2. Takes a **best-effort pre-restore checkpoint**: a fresh `backup.run` of whatever's
+   currently on disk, using the same scope/site/db as the restore, before changing
+   anything. If the checkpoint itself fails (e.g. the database being restored is
+   already gone — the exact disaster-recovery case restore exists for), that failure is
+   reported in the result rather than blocking the restore, and the checkpoint (when it
+   succeeds) is itself persisted as a `backups` row so a bad restore can be rolled back
+   the same way.
+3. Restores the database scope via `mysql <db_name> < dump.sql` (mysqldump's default
+   output includes `DROP TABLE IF EXISTS` before each `CREATE TABLE`, so this correctly
+   replaces existing table contents) and the files scope via `cp -a` from the extracted
+   archive into the target `site_root`.
+4. Does **not** delete anything from the target before restoring. Files restored are
+   overwritten; files present on disk but absent from the archive are left in place.
+   This is a deliberate consequence of the same "never implement unrestricted recursive
+   deletion as a capability" rule `backup.run`'s doc comment already states — see
+   `OPERATIONS.md` §3 for the operational implication.
+
+A real bug was caught while writing the automated round-trip test for this
+(`TestHandleBackupRestoreFilesScopeRoundTrip`, `packages/capabilities/backup_test.go`):
+`backup.run`'s output filename only had second-resolution timestamps, so a pre-restore
+checkpoint created moments after the archive it was restoring from (well within the
+same UTC second) could collide on filename and silently overwrite the original archive
+with the checkpoint's contents — corrupting the very archive being restored from mid-
+restore. Fixed by appending a random hex suffix to every backup filename
+(`packages/capabilities/backup.go`'s `randHex`), which also incidentally makes
+concurrent `backup.run` calls for the same site/db collision-safe.
+
+What's still missing, honestly: scheduled/automatic backups, retention/cleanup of old
+backups and checkpoints (there is still no disk-cleanup capability at all — by design,
+see `backup.go`'s doc comment — so backups accumulate until an operator manually prunes
+`/var/backups/serverpanel`), encryption at rest, and remote/S3-compatible storage
+targets. All ⬜, Phase 2 per `product-plan.md` §9. The `db.create`/`db.delete`
+capabilities also have no persisted database↔site association in the control plane's
+schema (see §8) — a `db`-scope backup's `db_name` is whatever the caller typed at
+backup time, not derived from anything the control plane tracks, so there is currently
+no dashboard UI listing "this site's databases" to back up from; the operator supplies
+the database name directly.
 
 ## 20. Monitoring and alerting
 
@@ -359,22 +424,38 @@ all ⬜, scoped to Phase 2 per `product-plan.md` §9.
 
 ## 21. Known limitations
 
-- No backup **restore** capability (see §19).
+- Backup **restore** does not delete files absent from the archive before restoring
+  (merge/overwrite, never a wipe) — see §19. No scheduled backups, retention/cleanup,
+  encryption at rest, or remote/S3-compatible storage yet.
+- A `backup.restore`'s pre-restore checkpoint is best-effort: if it fails (e.g. the
+  thing being restored is already gone), the restore proceeds anyway rather than
+  blocking on it — see §19.
+- No persisted database↔site association — a database-scope backup's `db_name` is
+  operator-supplied at backup time, not tracked against a site record (see §19, §8).
 - No on-disk agent task journal — a task in flight when the agent process restarts is
   lost, not resumed (see `ARCHITECTURE.md` §4 "As built").
 - No agent certificate auto-renewal before its 30-day expiry (see `SECURITY.md` §2).
 - No agent self-update mechanism (see `SECURITY.md` §3).
-- No background job queue — task dispatch is synchronous and bounded by a 120s HTTP
-  timeout; this will not scale past a moderate number of concurrent long-running tasks
-  (e.g. many simultaneous `stack.install` runs) without becoming a queue.
+- No background job queue — task dispatch is synchronous, bounded by a 120s HTTP
+  timeout for most capabilities (backup run/restore use a longer 10-minute bound — see
+  `API.md`); this will not scale past a moderate number of concurrent long-running
+  tasks (e.g. many simultaneous `stack.install` runs) without becoming a queue.
 - Single-user model: no organizations/teams/RBAC yet.
 - The in-process CA, while functionally correct, is not yet isolated as its own
   tightly-scoped trust boundary (see `SECURITY.md` §2).
-- `systemctl start/stop/restart` and Let's Encrypt issuance have not been verified in
-  *this* environment (no systemd as PID 1, no public DNS) — see `TESTING.md` §What
-  hasn't been verified.
-- Dashboard mobile responsiveness (320–768px) has not been verified with real browser
-  automation in this session — see `TESTING.md` §Known gaps.
+- `systemctl start/stop/restart`, Let's Encrypt issuance, and the `backup.restore`
+  database-scope `mysql` import have not been verified against a real
+  systemd/MariaDB/public-DNS environment in *this* sandbox (no systemd as PID 1, no
+  MariaDB installed, no public DNS) — see `TESTING.md` §What hasn't been verified. The
+  files-scope restore path *has* been verified end-to-end with real `tar`/`cp` in this
+  environment (`TestHandleBackupRestoreFilesScopeRoundTrip`).
+- Dashboard mobile responsiveness has been verified with real Playwright browser
+  automation at 320/375/390/414/768/1280px against the live dashboard (login, server
+  list, server detail incl. the new Backups section, audit log) — no horizontal
+  overflow at any width. One real bug was found and fixed in the process: the topbar
+  didn't wrap and the login card's fixed width exceeded a 320px viewport; see
+  `TESTING.md` §Mobile responsiveness for what was and wasn't covered (e.g. the
+  Security tab and every modal dialog were not screenshotted in this pass).
 - No CI pipeline / automated vulnerability scanning configured yet.
 
 ## 22. Performance decisions

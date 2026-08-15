@@ -88,7 +88,7 @@ func TestDefaultRegistryCoversAllDeclaredCapabilityConstants(t *testing.T) {
 		CapSystemPing, CapServiceControl, CapDiagnosticsBase, CapStackInstall,
 		CapSiteCreate, CapSiteSetPHP, CapSiteSetStatus, CapWordPressInstall,
 		CapSSLIssueLE, CapSSLInstallCustom, CapDBCreate, CapDBDelete, CapDBList,
-		CapFileList, CapFileRead, CapFileWrite, CapFileDelete, CapBackupRun, CapLogsTail,
+		CapFileList, CapFileRead, CapFileWrite, CapFileDelete, CapBackupRun, CapBackupRestore, CapLogsTail,
 	}
 	for _, name := range want {
 		if _, ok := r[name]; !ok {

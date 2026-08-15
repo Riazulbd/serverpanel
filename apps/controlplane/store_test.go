@@ -244,4 +244,60 @@ func TestCreateAndListSites(t *testing.T) {
 	if sites[0].Domain != "example.sslip.io" {
 		t.Fatalf("domain = %q, want example.sslip.io", sites[0].Domain)
 	}
+
+	site, ok := st.getSite(id, sites[0].ID)
+	if !ok {
+		t.Fatal("getSite: expected to find the site just created")
+	}
+	if site.Domain != "example.sslip.io" {
+		t.Fatalf("getSite domain = %q, want example.sslip.io", site.Domain)
+	}
+	if _, ok := st.getSite(id, "site_doesnotexist"); ok {
+		t.Fatal("getSite: expected an unknown site ID to return ok=false")
+	}
+	// A site scoped to a different server must not be reachable through this
+	// server's ID, even if the site ID itself is guessed correctly.
+	otherID, _, err := st.createServer("web-7", "", nil, time.Hour, "admin@example.com")
+	if err != nil {
+		t.Fatalf("createServer: %v", err)
+	}
+	if _, ok := st.getSite(otherID, sites[0].ID); ok {
+		t.Fatal("getSite: expected a site to be unreachable via a different server's ID")
+	}
+}
+
+func TestCreateAndListBackups(t *testing.T) {
+	st := newTestStore(t)
+	id, _, err := st.createServer("web-8", "", nil, time.Hour, "admin@example.com")
+	if err != nil {
+		t.Fatalf("createServer: %v", err)
+	}
+	site, err := st.createSite(id, "example.sslip.io", "sp_abc123", "/home/sites/sp_abc123/public", "wordpress", "8.3")
+	if err != nil {
+		t.Fatalf("createSite: %v", err)
+	}
+
+	rec, err := st.createBackup(id, site.ID, "full", "/var/backups/serverpanel/example-full-x.tar.gz", 1024, "deadbeef", "wp_example", "completed")
+	if err != nil {
+		t.Fatalf("createBackup: %v", err)
+	}
+	if rec.DBName != "wp_example" {
+		t.Fatalf("DBName = %q, want wp_example", rec.DBName)
+	}
+
+	list := st.listBackups(id)
+	if len(list) != 1 {
+		t.Fatalf("listBackups returned %d, want 1", len(list))
+	}
+
+	got, ok := st.getBackup(id, rec.ID)
+	if !ok {
+		t.Fatal("getBackup: expected to find the backup just created")
+	}
+	if got.SHA256 != "deadbeef" || got.SizeBytes != 1024 {
+		t.Fatalf("getBackup returned %+v, want sha256=deadbeef size=1024", got)
+	}
+	if _, ok := st.getBackup(id, "backup_doesnotexist"); ok {
+		t.Fatal("getBackup: expected an unknown backup ID to return ok=false")
+	}
 }

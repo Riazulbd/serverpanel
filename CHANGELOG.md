@@ -2,6 +2,50 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-15 — Backup restore, backup persistence, mobile responsiveness fixes
+
+- **Implemented `backup.restore`**, closing the single largest functional gap flagged in
+  the prior session's documentation pass (`docs/SYSTEM.md` §19/§21). It verifies the
+  target archive's SHA-256 against the value recorded at backup time before touching
+  anything; takes a best-effort pre-restore checkpoint (a fresh `backup.run` of the
+  current state) so a bad restore can itself be rolled back; restores the database scope
+  via `mysql <db_name> < dump.sql` and the files scope via `cp -a` (merge/overwrite,
+  never a wipe — consistent with this codebase's "no unrestricted recursive deletion
+  capability" rule); and never reads an archive outside `/var/backups/serverpanel`.
+- **Wired `backup.run` dispatch through to persistence**: `POST /api/v1/servers/{id}/backups`
+  now records a `backups` row on success (this was previously a known gap — the
+  capability worked but nothing wrote to the table). Added
+  `GET /api/v1/servers/{id}/backups` and `POST /api/v1/servers/{id}/backups/{backupId}/restore`;
+  restore takes no request body — every parameter is derived server-side from the stored
+  backup/site records, not the caller, so it can't be turned into an arbitrary-write
+  primitive. Added a `backups.db_name` column via a small additive-migration mechanism
+  (`applyMigrations` in `db.go`, this project's first schema migration).
+- **Dashboard**: added a Backups section to the server-detail view — "Back up files" per
+  site, a "Back up a database..." action, and a list of recorded backups each with a
+  confirming "Restore" button.
+- **Found and fixed a real bug** while writing the backup.restore round-trip test:
+  `backup.run`'s filename only had second-resolution timestamps, so a pre-restore
+  checkpoint created within the same second as the archive being restored from could
+  collide on filename and silently overwrite it with corrupted contents mid-restore.
+  Fixed with a random hex suffix on every backup filename, which also makes concurrent
+  `backup.run` calls collision-safe in general.
+- **Verified and fixed dashboard mobile responsiveness** with real Playwright browser
+  automation (not a visual guess) at 320/375/390/414/768/1280px against the login
+  screen, server list, server detail, and audit log — checking actual DOM overflow, not
+  eyeballing screenshots. Found and fixed two real bugs: the topbar didn't wrap at
+  narrow widths (email + sign-out ran off-screen, forcing page-level horizontal scroll),
+  and the login card's fixed 360px width exceeded a 320px viewport. Also wrapped the
+  sites/backups tables (nested inside the larger server-detail card) in their own
+  scroll containers so a wide table scrolls internally instead of blowing out the page.
+- Added 10 new automated tests (58 total, up from 48): `backup.restore` validation
+  (path confinement, checksum mismatch, invalid scope, missing archive) plus a real
+  end-to-end files-scope round trip through actual `tar`/`cp`; store-level and HTTP-level
+  coverage for the new backup endpoints and `getSite`.
+- Updated `docs/SYSTEM.md`, `docs/API.md`, `docs/OPERATIONS.md`, and `docs/TESTING.md`
+  to reflect all of the above — restore is no longer documented as a gap, and the mobile
+  fix and its residual coverage limits (Security tab and modals not yet screenshotted)
+  are recorded rather than left implicit.
+
 ## 2026-08-14 — Automated test suite, doc restructuring
 
 - Added `go test` coverage across `apps/controlplane` and `packages/capabilities`
