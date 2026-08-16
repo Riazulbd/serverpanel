@@ -116,18 +116,27 @@ webhook push-to-deploy, deploy keys, or rollback exist in this codebase yet.
 ### Backup and restoration
 | Feature | Status |
 |---|---|
-| DB/file/full backups | ✅ `backup.run` — checksummed local tar.gz |
+| DB/file/full backups | ✅ `backup.run` — checksummed local tar.gz, dispatched and
+  recorded via `POST /api/v1/servers/{id}/backups` |
 | Scheduling, retention policies | ⬜ not implemented (backups are on-demand only) |
 | Encryption | ⬜ not implemented (local tar.gz is unencrypted; relies on host
   filesystem permissions today) |
-| Backup verification | 🚧 SHA-256 checksum is recorded and returned; the dashboard
-  does not yet re-verify it automatically |
+| Backup verification | ✅ SHA-256 recorded at backup time and re-verified by
+  `backup.restore` before any restore step touches live data |
 | Local storage | ✅ |
 | S3-compatible / Amazon S3 / R2 / B2 / Spaces / Wasabi | ⬜ Phase 2 |
-| Restore (same or another server) | ⬜ **not implemented — there is no restore
-  capability yet, only `backup.run`.** This is the most significant gap relative to
-  the "backup and restore model" the product plan calls for; see `OPERATIONS.md`. |
-| Pre-restore checkpoints, progress tracking, failure recovery | ⬜ depends on restore |
+| Restore (same server) | ✅ `backup.restore` — files-scope path has a real
+  filesystem-level end-to-end test; the database-restore path is implemented but
+  unverified against a real MariaDB in this sandbox (see §19, §21) |
+| Restore to a different server | ⬜ not implemented — `archive_path` must live on the
+  same agent's filesystem; cross-server restore needs the archive transferred first |
+| Pre-restore checkpoints | ✅ `backup.restore` always takes one before any
+  destructive step; aborts before touching data if the checkpoint itself fails |
+| Progress tracking | ✅ per-step `Progress` callbacks surfaced through `task.event`
+  audit entries |
+| One-click rollback to a pre-restore checkpoint | ⬜ not implemented — the operator
+  restores from the checkpoint archive manually today (its path is shown in the
+  dashboard and audit log) |
 
 ### Security and monitoring
 See `SECURITY.md` for the detailed, section-by-section implemented-vs-planned
@@ -144,15 +153,16 @@ white-label, reseller/hosting-packages, billing, public API, plugin architecture
 Phase boundaries and full milestone/estimate tables are in `product-plan.md` §6; this
 is the condensed status:
 
-- **Phase 1 — secure working foundation:** ~90% of the *capability* surface exists and
-  is tested per-capability (see the tables above); the biggest real gaps are backup
-  **restore**, an automated test suite (now added, see `TESTING.md`), SSL auto-renewal,
-  and agent cert auto-rotation. Not "GA-ready" yet, but the architecture and security
-  primitives it depends on (mTLS, allow-listed capabilities, per-app isolation, audit
-  log) are real and proven, not stubs.
+- **Phase 1 — secure working foundation:** ~95% of the *capability* surface exists and
+  is tested per-capability (see the tables above); backup **restore** is now
+  implemented and tested end-to-end for the files-scope path (§19). Remaining gaps:
+  the database-restore path is unverified against a real MariaDB in this sandbox, SSL
+  auto-renewal, and agent cert auto-rotation. Not "GA-ready" yet, but the architecture
+  and security primitives it depends on (mTLS, allow-listed capabilities, per-app
+  isolation, audit log) are real and proven, not stubs.
 - **Phase 2 — professional server management:** not started. Git deployment,
-  cron/process management, SSH/firewall management UI, remote backups, cross-server
-  migration all remain ⬜.
+  cron/process management, SSH/firewall management UI, S3-compatible remote backup
+  storage, backup scheduling/retention, cross-server migration/restore all remain ⬜.
 - **Phase 3 — commercial platform:** not started.
 
 ## 4. System architecture
@@ -233,11 +243,17 @@ EXISTS`, applied on every `openDB` call — idempotent, no separate migration to
 | `revoked_certs` | cert serial → server, revoked-at (checked on every gateway handshake) |
 | `audit_log` | append-only: seq, timestamp, server, actor, action, detail |
 | `sites` | id, server, domain, system user, docroot, app type, PHP version, status |
-| `backups` | id, server, site, scope, path, size, sha256, status, created_at |
+| `backups` | id, server, site, scope, path, size, sha256, db_name, status, created_at |
 
 No ORM — every query is a small, explicit SQL statement in `store.go`. All secrets
 (session tokens, bootstrap tokens) are stored only as SHA-256 hashes; passwords use
 bcrypt (cost 12); nothing is stored in plaintext.
+
+`backups.db_name` was added after the table first shipped, via `ensureColumn` in
+`db.go` — an idempotent `PRAGMA table_info` check + `ALTER TABLE ... ADD COLUMN` run
+on every `openDB` call, additive and safe to run against a pre-existing DB. This is
+the pattern for any future schema change too: additive columns via `ensureColumn`,
+never a destructive migration (see §26).
 
 ## 9. API endpoints
 
@@ -278,9 +294,8 @@ Current capability list: `system.ping`, `service.control`, `diagnostics.basic`,
 `stack.install`, `site.create`, `site.set_php_version`, `site.set_status`,
 `app.wordpress_install`, `ssl.issue_letsencrypt`, `ssl.install_custom`, `db.create`,
 `db.delete`, `db.list`, `file.list`, `file.read`, `file.write`, `file.delete`,
-`backup.run`, `logs.tail`. Notably absent (by design, until reviewed and added):
-`backup.restore`, `git.deploy`, `cron.upsert`, `ssh.*`, `firewall.*`,
-`agent.self_update`.
+`backup.run`, `backup.restore`, `logs.tail`. Notably absent (by design, until reviewed
+and added): `git.deploy`, `cron.upsert`, `ssh.*`, `firewall.*`, `agent.self_update`.
 
 ## 13. Installation and deployment
 
@@ -343,12 +358,43 @@ defenses on the file manager (`resolveScopedPath`).
 
 ## 19. Backup and restore model
 
-**Backup**: implemented (`backup.run` — local, checksummed tar.gz of DB and/or files).
-**Restore**: **not implemented**. This is the single largest functional gap in the
-Phase 1 feature set relative to what the product plan calls for, and should be the
-next priority after this documentation pass — see `OPERATIONS.md` §Backup and restore
-for the concrete plan (a `backup.restore` capability mirroring `backup.run`'s
-validation approach, plus a pre-restore checkpoint step).
+**Backup**: implemented (`backup.run` — local, checksummed tar.gz of DB and/or files;
+`packages/capabilities/backup.go`). Every backup dispatched through the control plane
+(`POST /api/v1/servers/{id}/backups`) is persisted as a `backups` row only after the
+agent confirms the archive exists on disk — the same dispatch-then-persist-on-success
+pattern as `site.create`.
+
+**Restore**: implemented (`backup.restore`, same file). Safety properties, in order:
+1. `archive_path` must resolve under `/var/backups/serverpanel` (`backupBaseDir`) —
+   the agent will not restore from an arbitrary path, and the control-plane API never
+   accepts a caller-supplied path at all: `POST .../backups/{backupId}/restore` reads
+   the path from its own stored record.
+2. an optional caller-supplied SHA-256 (the control plane always supplies the one it
+   recorded at backup time) is verified before anything is touched.
+3. a **pre-restore checkpoint** — a fresh `backup.run` of exactly the scope/target
+   about to be overwritten — is taken before any destructive step. If the checkpoint
+   itself fails, the restore aborts before touching live data. The checkpoint's path
+   is returned in the result and audit-logged (`backup.restored` detail), so a bad
+   restore can itself be undone.
+4. file restore only ever *overlays* extracted files onto `site_root` via `cp -a` — it
+   never deletes anything, matching this package's "no unrestricted recursive delete"
+   rule (see §12).
+
+A real bug was caught and fixed by the round-trip test that exercises this end-to-end
+(`TestBackupRunThenRestoreFilesRoundTrip`,
+`packages/capabilities/backup_test.go`): backup archive filenames were built from a
+second-precision timestamp plus `<label>-<scope>`, so a pre-restore checkpoint of the
+same site/scope taken within the same second as the backup being restored from could
+collide on disk and silently overwrite the very archive the restore was about to read
+— corrupting the restore with the (about-to-be-replaced) current state instead of the
+intended one. Fixed by appending a random suffix to every backup filename, making
+collisions impossible regardless of timing (`packages/capabilities/backup.go`,
+`runBackup`).
+
+Database restore (`mysql <db> < dump.sql`) is implemented identically but, like
+`db.go`'s create/delete/list handlers, has not been exercised against a real MariaDB
+instance in this session's sandbox (no MariaDB available) — only the files-scope path
+has a real end-to-end test. See `TESTING.md` §5 for what remains manually-verified-only.
 
 ## 20. Monitoring and alerting
 
@@ -359,7 +405,12 @@ all ⬜, scoped to Phase 2 per `product-plan.md` §9.
 
 ## 21. Known limitations
 
-- No backup **restore** capability (see §19).
+- `backup.restore`'s database-restore path (`mysql <db> < dump.sql`) has not been
+  exercised against a real MariaDB instance in this session (see §19) — only the
+  files-scope restore path has a real filesystem-level end-to-end test.
+- Backup/restore has no scheduling, retention policy, encryption-at-rest, or
+  S3-compatible remote storage yet — local-disk, on-demand only (`product-plan.md`
+  §9, Phase 2/3 scope).
 - No on-disk agent task journal — a task in flight when the agent process restarts is
   lost, not resumed (see `ARCHITECTURE.md` §4 "As built").
 - No agent certificate auto-renewal before its 30-day expiry (see `SECURITY.md` §2).
@@ -455,9 +506,16 @@ sizing, and two persistence bugs where a successful operation wasn't actually sa
   UFW), but "no arbitrary shell exec" is enforced by the fixed `Registry` map and
   argv-only `exec.Command` calls, not by process sandboxing (which remains a
   documented future hardening step — `SECURITY.md` §4).
-- **Backup before restore** — `backup.run` shipped in this codebase before any restore
-  capability; flagged clearly (§19, §21) rather than left as a silent gap, since
-  "backups exist" without "restore works" is a false sense of safety if not documented.
+- **Backup before restore, restore before remote storage** — `backup.run` shipped
+  before `backup.restore` (flagged clearly while the gap existed, §19); `backup.restore`
+  in turn ships local-restore-only, before S3-compatible remote storage or scheduling —
+  each layer only builds on a foundation that's actually been exercised, rather than
+  stacking unverified capability on unverified capability.
+- **Restore always checkpoints first, never deletes** — `backup.restore` takes a fresh
+  backup of the current state before any destructive step (aborting if that fails) and
+  restores files via `cp -a` overlay rather than a delete-then-restore, consistent with
+  this codebase's broader "no unrestricted recursive delete" capability-design rule
+  (§12) and giving a bad restore an undo path by construction, not by convention.
 - **No proprietary Webuzo/ServerAvatar code, branding, or assets** — every protocol,
   UI, and mechanism here is independently designed against open standards (mTLS,
   systemd, ACME/Let's Encrypt, RFC 6238 TOTP).

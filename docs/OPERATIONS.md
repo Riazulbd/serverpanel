@@ -40,22 +40,42 @@ dashboard).
 
 ## 3. Backup and restore
 
-**Backup** (implemented): dispatch the `backup.run` capability
-(`POST /api/v1/servers/{id}/tasks` with `{"capability": "backup.run", "params": {...}}`)
-— see `packages/capabilities/backup.go` for its `scope`/`target` params. It writes a
-checksummed local tar.gz on the VPS itself and records the checksum in its
-`TaskEvent.detail`. The control plane's `backups` table schema exists (`db.go`) but
-nothing currently writes a row into it automatically — wiring `backup.run`'s dispatch
-through a persistence step analogous to `handleCreateSite` (dispatch → parse result →
-insert row) is a small, well-scoped next task.
+**Backup** (implemented): from the dashboard, use a server's "+ New backup" button, or
+call `POST /api/v1/servers/{id}/backups` directly with `{"scope": "files"|"db"|"full",
+"site_id": "...", "db_name": "..."}` — see `API.md` for the full request/response
+shape. This dispatches the `backup.run` capability
+(`packages/capabilities/backup.go`), which writes a checksummed local tar.gz on the
+VPS itself, and — only once the agent confirms success — persists a row in the
+control plane's `backups` table (`store.createBackup`). Backups can also be dispatched
+ad hoc via the generic `POST /api/v1/servers/{id}/tasks` endpoint, but that path does
+not get a `backups` row (it's the same "raw dispatch vs. persisted resource" split as
+`site.create`/`handleDispatchTask` — see `API.md` §2).
 
-**Restore** (not implemented): there is no `backup.restore` capability yet. Until one
-exists, restoring from a `backup.run` archive is a fully manual process: SSH to the
-VPS, locate the tar.gz under wherever `backup.run` wrote it, verify its SHA-256 against
-the value in the task's `detail`, and manually extract/restore the DB dump and/or
-files. **Do not represent backup/restore as a complete, tested feature until a real
-`backup.restore` capability exists and has been exercised end-to-end** — see
-`SYSTEM.md` §19 and §21, and `TESTING.md` §5 item 1 for the recommended next step.
+**Restore** (implemented): from the dashboard, click "Restore" on any backup listed
+under a server's Backups section, or call `POST
+/api/v1/servers/{id}/backups/{backupId}/restore` (no body — the control plane supplies
+the archive path, checksum, scope, and site/db context from its own stored record, so
+a caller picks *which* backup to restore but can never point the agent at an arbitrary
+path). This dispatches `backup.restore`, which:
+1. verifies the archive's SHA-256 against what was recorded at backup time,
+2. takes a **pre-restore checkpoint** (a fresh backup of exactly what's about to be
+   overwritten) before touching anything — if this step fails, the restore aborts with
+   nothing modified,
+3. restores database content via `mysql <db> < dump.sql`, and/or overlays files back
+   onto the site's home directory via `cp -a` (never a delete-then-restore).
+
+The response includes `pre_restore_checkpoint`, the path to the safety backup taken in
+step 2 — keep it until you've confirmed the restore is what you wanted; there is no
+one-click "undo the restore" yet, so rolling back means restoring from that checkpoint
+path manually (see `SYSTEM.md` §19, §21).
+
+**What's still manual / not yet covered**: cross-server restore (the archive must live
+on the same agent's filesystem the restore targets — copy it there first if migrating),
+scheduling, retention policies, encryption-at-rest, and S3-compatible remote storage
+(all Phase 2/3, `product-plan.md` §9). The database-restore path is implemented but has
+not been exercised against a real MariaDB instance in this session's sandbox (no
+MariaDB available here) — see `TESTING.md` §5 for what remains manually-verified-only
+vs. automated.
 
 ## 4. Monitoring and alerting
 

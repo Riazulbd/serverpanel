@@ -2,6 +2,43 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-16 — Backup restore capability, closing the largest Phase 1 gap
+
+- Added `backup.restore` (`packages/capabilities/backup.go`), the capability flagged
+  in the previous entry as "the single largest functional gap" relative to the product
+  plan. It verifies the archive's SHA-256, takes a pre-restore checkpoint (a fresh
+  backup of exactly what's about to be overwritten, aborting before touching data if
+  that step fails), restores the database via `mysql <db> < dump.sql`, and/or overlays
+  files back onto the site directory via `cp -a` — never a delete-then-restore,
+  consistent with this codebase's "no unrestricted recursive delete" rule.
+- Wired backup dispatch through to persistence end to end: `POST
+  /api/v1/servers/{id}/backups` dispatches `backup.run` and, only on agent-confirmed
+  success, writes a `backups` row (the same dispatch-then-persist pattern as
+  `site.create`); `POST /api/v1/servers/{id}/backups/{backupId}/restore` dispatches
+  `backup.restore` using the archive path/checksum from that stored row — the request
+  body can never point the agent at an arbitrary filesystem path. Added a `db_name`
+  column to the `backups` table via an additive, idempotent migration (`ensureColumn`
+  in `db.go`), and a Backups section (list, "+ New backup", "Restore") to the
+  server-detail view in the dashboard.
+- Found and fixed a real bug via the new end-to-end restore test
+  (`TestBackupRunThenRestoreFilesRoundTrip`,
+  `packages/capabilities/backup_test.go`): backup filenames were built from a
+  second-precision timestamp, so a pre-restore checkpoint of the same site/scope taken
+  within the same second as the backup being restored from could collide on disk and
+  silently overwrite the archive the restore was reading from, corrupting it with the
+  current (about-to-be-replaced) state instead. Fixed by appending a random suffix to
+  every backup filename. This is exactly the class of bug a mocked/validation-only
+  test suite would not have caught — it only surfaced because the test drove real
+  `tar`/`cp` calls against real files with real timestamps.
+- Added 10 new capability-level tests (validation, path-traversal/outside-basedir
+  rejection, checksum-mismatch rejection, missing-DB-dump rejection, and the full
+  files-scope round trip) and 3 new store-level tests (`getSite` and backup
+  create/list/get, all scoped-to-server). Database-scope restore
+  (`mysql <db> < dump.sql`) is implemented but not exercised against a real MariaDB in
+  this session's sandbox — see `TESTING.md` §5 for what remains to verify.
+- Updated `SYSTEM.md`, `API.md`, `OPERATIONS.md`, `TESTING.md`, and `ARCHITECTURE.md`
+  to reflect all of the above and remove now-stale "not implemented" language.
+
 ## 2026-08-14 — Automated test suite, doc restructuring
 
 - Added `go test` coverage across `apps/controlplane` and `packages/capabilities`

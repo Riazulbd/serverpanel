@@ -43,6 +43,9 @@ protected route; there is no route that skips it by omission.
 | `POST` | `/api/v1/servers/{id}/tasks` | Dispatch an arbitrary allow-listed capability (see §3) |
 | `GET` | `/api/v1/servers/{id}/sites` | List sites on a server |
 | `POST` | `/api/v1/servers/{id}/sites` | Dispatch `site.create` and persist the resulting site record |
+| `GET` | `/api/v1/servers/{id}/backups` | List backups recorded for a server |
+| `POST` | `/api/v1/servers/{id}/backups` | Dispatch `backup.run` and persist the resulting backup record |
+| `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a recorded backup |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -102,6 +105,30 @@ Dispatches `site.create`, and only on the agent reporting success, persists a `s
 row. → `201 {"site": {...siteRecord}, "temp_domain": "<user>.<ip-with-dashes>.sslip.io"}`.
 A dispatch failure or agent-side failure never leaves an orphan site record — the
 row is written after (and only after) the agent confirms success.
+
+### `POST /api/v1/servers/{id}/backups`
+```json
+{"scope": "files", "site_id": "site_...", "db_name": ""}
+```
+`scope` is `db`, `files`, or `full`. For `files`/`full`, pass `site_id` (the control
+plane resolves it to that site's home directory — `filepath.Dir(docroot)`, i.e. the
+whole site, not just its webroot); for `db`/`full`, pass `db_name` directly (the
+control plane has no notion of which databases exist — see `SYSTEM.md` §8). Dispatches
+`backup.run` and, only on the agent reporting success, persists a `backups` row
+(dispatch-then-persist-on-success, same shape as site creation). → `201` with the
+`backupRecord` (`id`, `scope`, `path`, `size_bytes`, `sha256`, `db_name`,
+`status`, `created_at`).
+
+### `POST /api/v1/servers/{id}/backups/{backupId}/restore`
+No request body. The archive path, checksum, scope, and (if applicable) `site_id`/
+`db_name` are read from the control plane's own `backups` row — a caller can choose
+*which* recorded backup to restore, never point the agent at an arbitrary filesystem
+path. Dispatches `backup.restore`, which itself takes a pre-restore checkpoint of the
+current state before touching anything (see `SYSTEM.md` §19). → `200
+{"status": "restored", "pre_restore_checkpoint": "<path to the safety backup taken
+right before this restore>"}`. A failed restore (agent-side error, checksum mismatch,
+archive missing the expected content) returns `422`/`502` and leaves the target
+untouched beyond, at most, that checkpoint step.
 
 ### `POST /agents/register`
 ```json

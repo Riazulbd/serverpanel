@@ -245,3 +245,61 @@ func TestCreateAndListSites(t *testing.T) {
 		t.Fatalf("domain = %q, want example.sslip.io", sites[0].Domain)
 	}
 }
+
+func TestGetSiteIsScopedToServer(t *testing.T) {
+	st := newTestStore(t)
+	id1, _, _ := st.createServer("web-7", "", nil, time.Hour, "admin@example.com")
+	id2, _, _ := st.createServer("web-8", "", nil, time.Hour, "admin@example.com")
+	site, err := st.createSite(id1, "example.sslip.io", "sp_abc123", "/home/sites/sp_abc123/public", "static", "")
+	if err != nil {
+		t.Fatalf("createSite: %v", err)
+	}
+
+	if _, ok := st.getSite(id1, site.ID); !ok {
+		t.Fatal("getSite should find the site under its own server")
+	}
+	if _, ok := st.getSite(id2, site.ID); ok {
+		t.Fatal("getSite should not find another server's site by ID")
+	}
+}
+
+func TestCreateAndListBackups(t *testing.T) {
+	st := newTestStore(t)
+	id, _, err := st.createServer("web-9", "", nil, time.Hour, "admin@example.com")
+	if err != nil {
+		t.Fatalf("createServer: %v", err)
+	}
+	site, err := st.createSite(id, "example.sslip.io", "sp_abc123", "/home/sites/sp_abc123/public", "static", "")
+	if err != nil {
+		t.Fatalf("createSite: %v", err)
+	}
+
+	rec, err := st.createBackup(id, site.ID, "files", "/var/backups/serverpanel/sp_abc123-files-x.tar.gz", 4096, "deadbeef", "", "completed")
+	if err != nil {
+		t.Fatalf("createBackup: %v", err)
+	}
+	if rec.ID == "" {
+		t.Fatal("createBackup returned a record with no ID")
+	}
+
+	backups := st.listBackups(id)
+	if len(backups) != 1 {
+		t.Fatalf("listBackups returned %d, want 1", len(backups))
+	}
+	if backups[0].SHA256 != "deadbeef" || backups[0].SizeBytes != 4096 {
+		t.Fatalf("listBackups returned unexpected record: %+v", backups[0])
+	}
+
+	got, ok := st.getBackup(id, rec.ID)
+	if !ok {
+		t.Fatal("getBackup should find the backup just created")
+	}
+	if got.Path != rec.Path {
+		t.Fatalf("getBackup path = %q, want %q", got.Path, rec.Path)
+	}
+
+	otherServerID, _, _ := st.createServer("web-10", "", nil, time.Hour, "admin@example.com")
+	if _, ok := st.getBackup(otherServerID, rec.ID); ok {
+		t.Fatal("getBackup should not find another server's backup by ID")
+	}
+}

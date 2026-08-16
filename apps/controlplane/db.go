@@ -29,7 +29,45 @@ func openDB(path string) (*sql.DB, error) {
 		db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
+	// db_name was added after the initial backups table shipped; ensureColumn
+	// makes this an additive, idempotent migration (safe against an existing
+	// DB that predates it) rather than a destructive one, matching this
+	// project's "no destructive migrations" rule.
+	if err := ensureColumn(db, "backups", "db_name", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate backups.db_name: %w", err)
+	}
 	return db, nil
+}
+
+// ensureColumn adds column to table if it isn't already present, using
+// PRAGMA table_info to check first — table and column are always
+// call-site-fixed constants, never derived from request input, so the
+// string-built ALTER TABLE/PRAGMA statements below are safe.
+func ensureColumn(db *sql.DB, table, column, decl string) error {
+	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, ctype string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return err
+		}
+		if name == column {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	_, err = db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, decl))
+	return err
 }
 
 const schema = `
