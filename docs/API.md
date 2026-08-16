@@ -43,6 +43,9 @@ protected route; there is no route that skips it by omission.
 | `POST` | `/api/v1/servers/{id}/tasks` | Dispatch an arbitrary allow-listed capability (see §3) |
 | `GET` | `/api/v1/servers/{id}/sites` | List sites on a server |
 | `POST` | `/api/v1/servers/{id}/sites` | Dispatch `site.create` and persist the resulting site record |
+| `GET` | `/api/v1/servers/{id}/backups` | List backups recorded for a server |
+| `POST` | `/api/v1/servers/{id}/backups` | Dispatch `backup.run` and persist the resulting backup record |
+| `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a previously recorded backup |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -102,6 +105,32 @@ Dispatches `site.create`, and only on the agent reporting success, persists a `s
 row. → `201 {"site": {...siteRecord}, "temp_domain": "<user>.<ip-with-dashes>.sslip.io"}`.
 A dispatch failure or agent-side failure never leaves an orphan site record — the
 row is written after (and only after) the agent confirms success.
+
+### `POST /api/v1/servers/{id}/backups`
+```json
+{"scope": "files", "site_id": "site_...", "db_name": ""}
+```
+`scope` is one of `db`/`files`/`full`. `site_id` is required for `files`/`full`
+(resolved to the site's home directory server-side — see `resolveSiteRoot`);
+`db_name` is required for `db`/`full`. Dispatches `backup.run`, and only on the agent
+reporting success, persists a `backups` row. → `201 {...backupRecord}` (`ID`,
+`ServerID`, `SiteID`, `DBName`, `Scope`, `Path`, `SizeBytes`, `SHA256`, `Status`,
+`CreatedAt`). Missing/invalid `scope`, a `files`/`full` request missing `site_id`, a
+`db`/`full` request missing `db_name`, or an unknown `site_id` all return `400`/`404`
+before any dispatch is attempted.
+
+### `GET /api/v1/servers/{id}/backups`
+→ `200 [...backupRecord]`, newest first.
+
+### `POST /api/v1/servers/{id}/backups/{backupId}/restore`
+No request body — every input (`archive_path`, `expected_sha256`, `scope`, `db_name`,
+and the site's current home directory for `files`/`full`) is read from the stored
+backup record and the site it references, never from the request, so only a backup
+this control plane itself recorded can be restored. Dispatches `backup.restore`,
+which takes an automatic pre-restore checkpoint before changing anything (see
+`SYSTEM.md` §19). → `200` with the `TaskEvent` JSON on any terminal outcome (same
+status semantics as `/tasks` above). Unknown `backupId` (or one belonging to a
+different server) → `404`.
 
 ### `POST /agents/register`
 ```json

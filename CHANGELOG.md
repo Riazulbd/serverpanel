@@ -2,6 +2,51 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-16 — Backup restore capability, closing Phase 1's largest gap
+
+- Added the `backup.restore` agent capability (`packages/capabilities/backup.go`):
+  restores a `backup.run` archive's database and/or files. Safety properties: the
+  archive path is confined to `backupBaseDir` (symlink-resolved before the
+  containment check); an optional expected SHA-256 is verified before anything is
+  touched; a same-scope **pre-restore checkpoint** backup is always taken first, and
+  the restore aborts with nothing changed if that checkpoint itself fails; every
+  subsequent error names the checkpoint path so a failed restore is recoverable.
+- Refactored `backup.run`'s archive layout to be stable and restorable: a database
+  dump is now always written to `db.sql` and a files backup to a `files/` directory,
+  both at the archive root, instead of tar-ing the caller's original absolute paths
+  (which put the DB dump under a random per-run temp-directory name a later restore
+  had no way to rediscover). Safe to change now, before any restore capability existed
+  to depend on the old layout and before any real backup had been taken against it.
+- Control plane: `backups` table gained a `db_name` column; new store methods
+  (`createBackup`, `listBackups`, `getBackup`, `getSite`); new endpoints
+  `POST /api/v1/servers/{id}/backups` (dispatch `backup.run`, persist only on real
+  success — same "dispatch then persist" shape as `handleCreateSite`),
+  `GET /api/v1/servers/{id}/backups`, and
+  `POST /api/v1/servers/{id}/backups/{backupId}/restore` (dispatches
+  `backup.restore` using the archive path/checksum/scope from the *stored* record
+  only, never from request input).
+- Dashboard: a Backups section on the server-detail page — create a backup (scope +
+  site/db picker), list recorded backups with size and target, and a one-click
+  Restore button (with a confirmation dialog explaining the automatic checkpoint).
+- Tests: `packages/capabilities/backup_test.go` — a real end-to-end `backup.run` →
+  mutate → `backup.restore` round trip for the "files" scope (tar/cp against a real
+  filesystem, no mocks) plus validation coverage (bad scope/db_name/site_root,
+  checksum mismatch, archive path traversal/outside `backupBaseDir`, missing
+  archive). `apps/controlplane/store_test.go` and `http_test.go` cover the new store
+  methods and every endpoint validation path short of an actual agent dispatch (no
+  live agent in this test environment). 9 new test functions; suite total 48 → 57,
+  all passing under `go test ./... -race`, `go vet` clean, `gofmt -l` clean.
+- Known gap this doesn't close: the `db`/`full` restore path (`mysql <db> < db.sql`)
+  has not yet been run against a live MariaDB instance (this sandbox has neither
+  `mysql` nor `mysqldump` installed) — flagged in `TESTING.md` §5 as the next
+  verification priority, same as `backup.run`'s DB scope already was. Restoring a
+  backup onto a *different* server than the one it was taken on remains unimplemented
+  (Phase 2).
+- Docs updated: `docs/SYSTEM.md` (§2 feature table, §3 phase status, §12 allow-list,
+  §19 backup/restore model, §21 known limitations, §28 assumptions), `docs/API.md`
+  (new endpoints), `docs/ARCHITECTURE.md` (capability table), `docs/OPERATIONS.md`
+  (§3 rewritten), `docs/TESTING.md` (coverage tables, known gaps).
+
 ## 2026-08-14 — Automated test suite, doc restructuring
 
 - Added `go test` coverage across `apps/controlplane` and `packages/capabilities`

@@ -101,6 +101,7 @@ CREATE TABLE IF NOT EXISTS backups (
 	id         TEXT PRIMARY KEY,
 	server_id  TEXT NOT NULL REFERENCES servers(id),
 	site_id    TEXT NOT NULL DEFAULT '',
+	db_name    TEXT NOT NULL DEFAULT '',
 	scope      TEXT NOT NULL,
 	path       TEXT NOT NULL,
 	size_bytes INTEGER NOT NULL DEFAULT 0,

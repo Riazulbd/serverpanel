@@ -209,3 +209,60 @@ func TestRegisterEndpointRejectsBadToken(t *testing.T) {
 		t.Fatalf("register with bad token status = %d, want 401", rec.Code)
 	}
 }
+
+// TestBackupEndpointsValidateBeforeDispatch covers every rejection path
+// handleCreateBackup/handleRestoreBackup can take without ever reaching the
+// agent gateway (no agent is connected in this test, so a dispatch that
+// got past validation would hang/fail for an unrelated reason — these
+// cases are deliberately ones the handlers must reject before that point).
+func TestBackupEndpointsValidateBeforeDispatch(t *testing.T) {
+	secureCookies = false
+	defer func() { secureCookies = true }()
+
+	a := newTestAPIServer(t)
+	h := a.routes()
+
+	doJSON(t, h, "POST", "/api/v1/auth/signup", map[string]string{
+		"Email": "backups@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	rec := doJSON(t, h, "POST", "/api/v1/auth/login", map[string]string{
+		"Email": "backups@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	cookie := sessionCookie(rec)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers", map[string]any{"Name": "web-8"}, cookie)
+	var created struct {
+		ServerID string `json:"server_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+
+	rec = doJSON(t, h, "GET", "/api/v1/servers/"+created.ServerID+"/backups", nil, cookie)
+	if rec.Code != http.StatusOK || rec.Body.String() != "null\n" {
+		t.Fatalf("list backups on a fresh server = %d, %q, want 200 empty list", rec.Code, rec.Body.String())
+	}
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/backups", map[string]any{}, cookie)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("create backup with no scope = %d, want 400", rec.Code)
+	}
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/backups", map[string]any{"scope": "files"}, cookie)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("create files backup with no site_id = %d, want 400", rec.Code)
+	}
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/backups", map[string]any{"scope": "db"}, cookie)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("create db backup with no db_name = %d, want 400", rec.Code)
+	}
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/backups", map[string]any{"scope": "files", "site_id": "site_doesnotexist"}, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("create files backup for an unknown site = %d, want 404", rec.Code)
+	}
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/backups/backup_doesnotexist/restore", nil, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("restore an unknown backup = %d, want 404", rec.Code)
+	}
+}
