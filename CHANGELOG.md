@@ -2,6 +2,58 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-16 — Backup restore, backups persistence + dashboard UI, mobile-responsiveness fix
+
+- **Added the `backup.restore` agent capability**
+  (`packages/capabilities/backup.go`), closing the single largest functional gap
+  called out repeatedly in the prior session's documentation pass (`SYSTEM.md` §19/
+  §21, `OPERATIONS.md` §3): until now `backup.run` existed with no way to restore from
+  it. `backup.restore` verifies the archive's SHA-256 against an expected checksum
+  before touching anything, confirms the archive's actual contents match the claimed
+  scope, takes a fresh pre-restore checkpoint backup of the current state (aborting
+  before any change if that checkpoint itself fails), then extracts and re-imports the
+  DB dump (`mysql` client) and/or copies files back into place.
+- **Found and fixed a real backup-filename-collision bug** while writing the first
+  real (non-mocked) round-trip test for the new capability: `backup.run`'s output
+  filename only had second-resolution timestamp granularity, so a restore's own
+  pre-restore checkpoint could silently overwrite the very archive being restored
+  from if both happened within the same second — corrupting the restore instead of
+  fixing it. Fixed by adding a random filename suffix, which closes the whole
+  "two backups of the same thing, same second" collision class.
+- **Wired up the previously-unused `backups` database table**: added
+  `store.createBackup`/`listBackups`/`getBackup`/`getSite` (`apps/controlplane/
+  store.go`) and three new endpoints (`apps/controlplane/backups.go`) —
+  `POST`/`GET /api/v1/servers/{id}/backups` and
+  `POST /api/v1/servers/{id}/backups/{backupId}/restore` — following the same
+  "dispatch → parse the agent's result → persist a row only on success" pattern
+  `handleCreateSite` already used for sites. A restore always uses the archive
+  path/checksum recorded in the `backups` table, never a value an API caller could
+  supply directly, and its pre-restore checkpoint is itself persisted as a new row
+  (`status: "checkpoint"`) so undoing a bad restore is just another restore.
+- **Added a Backups section to the dashboard** (`apps/controlplane/web/index.html`):
+  list backups per server (creation time, linked site, scope, size, status), a
+  "+ New backup" modal, and a Restore action per row with a confirmation dialog.
+- **Verified dashboard mobile responsiveness with real browser automation**
+  (Playwright/Chromium) at 320/375/390/414/768/1280px across every view — something
+  the prior session's docs explicitly flagged as unverified. Found and fixed one real
+  bug in the process: the top navigation bar had no `flex-wrap`, so on narrow
+  viewports the session info overflowed the page instead of wrapping to a second
+  line. Also added a shared `.table-scroll` container around every table (server
+  list, sites, backups, audit log) so wide tables scroll within their own card
+  instead of the page scrolling horizontally.
+- Added 10 new automated tests (`packages/capabilities/backup_test.go`,
+  `apps/controlplane/store_test.go`, `apps/controlplane/http_test.go`) — validation
+  coverage for `backup.restore` (bad scope, archive-path confinement including a
+  `..`-traversal attempt, missing/mismatched checksum, unmanaged site root, scope/
+  content mismatch) plus a real, non-mocked `backup.run` → mutate → `backup.restore`
+  round trip for the `files` scope that also verifies the pre-restore checkpoint
+  archive is itself valid. `go test ./...` and `go test ./... -race` both pass
+  (58 test functions total, up from 48); `go vet`/`gofmt -l` clean.
+- Updated `docs/SYSTEM.md`, `docs/API.md`, `docs/OPERATIONS.md`, `docs/SECURITY.md`,
+  and `docs/TESTING.md` to reflect all of the above — backup/restore is no longer
+  documented as the biggest gap, and mobile responsiveness is no longer documented as
+  unverified.
+
 ## 2026-08-14 — Automated test suite, doc restructuring
 
 - Added `go test` coverage across `apps/controlplane` and `packages/capabilities`

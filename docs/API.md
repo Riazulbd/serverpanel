@@ -43,6 +43,9 @@ protected route; there is no route that skips it by omission.
 | `POST` | `/api/v1/servers/{id}/tasks` | Dispatch an arbitrary allow-listed capability (see §3) |
 | `GET` | `/api/v1/servers/{id}/sites` | List sites on a server |
 | `POST` | `/api/v1/servers/{id}/sites` | Dispatch `site.create` and persist the resulting site record |
+| `GET` | `/api/v1/servers/{id}/backups` | List backups (and pre-restore checkpoints) recorded for a server |
+| `POST` | `/api/v1/servers/{id}/backups` | Dispatch `backup.run` and persist the resulting backup record |
+| `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a recorded backup |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -102,6 +105,37 @@ Dispatches `site.create`, and only on the agent reporting success, persists a `s
 row. → `201 {"site": {...siteRecord}, "temp_domain": "<user>.<ip-with-dashes>.sslip.io"}`.
 A dispatch failure or agent-side failure never leaves an orphan site record — the
 row is written after (and only after) the agent confirms success.
+
+### `POST /api/v1/servers/{id}/backups`
+```json
+{"scope": "files", "site_id": "site_...", "db_name": ""}
+```
+`scope` is one of `db`/`files`/`full`. `site_id` is optional — when given, the site's
+home directory (the parent of its `docroot`) is used as `site_root` automatically;
+omit it (and optionally pass an explicit `site_root` instead — not currently exposed
+in the dashboard UI, but accepted by this endpoint) for a full-server or ad-hoc backup
+not tied to a tracked site. `db_name` is required for `db`/`full` scope regardless of
+`site_id`, since sites don't (yet) track a linked database name — see `SYSTEM.md` §21.
+Dispatches `backup.run`, and only on success persists a `backups` row recording the
+archive's real path and SHA-256 checksum. → `201` with the persisted record
+(`ID, ServerID, SiteID, Scope, Path, SizeBytes, SHA256, Status, CreatedAt`).
+
+### `POST /api/v1/servers/{id}/backups/{backupId}/restore`
+```json
+{"site_root": "", "db_name": "", "owner_user": ""}
+```
+Looks up the `backups` row for `backupId` (never accepts a caller-supplied archive
+path or checksum) and dispatches `backup.restore` with that archive's real path and
+recorded SHA-256 as `expected_sha256` — the agent refuses to restore if the archive on
+disk no longer matches. If the backup is linked to a site (`site_id` set), `site_root`
+and `owner_user` are resolved from that site record automatically and the request body
+fields are ignored for those two; otherwise they (and `db_name`, always required
+for `db`/`full` scope) must be supplied in the body. Before touching anything, the
+agent takes a fresh "pre-restore checkpoint" backup of the current state; on success
+that checkpoint is itself persisted as a new `backups` row (`status: "checkpoint"`) so
+a bad restore can be undone the same way. → `200
+{"restored_from": {...backupRecord}, "checkpoint": {...backupRecord}|null}`. Restoring
+an unknown `backupId` → `404` without dispatching anything to the agent.
 
 ### `POST /agents/register`
 ```json

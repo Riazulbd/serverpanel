@@ -244,4 +244,66 @@ func TestCreateAndListSites(t *testing.T) {
 	if sites[0].Domain != "example.sslip.io" {
 		t.Fatalf("domain = %q, want example.sslip.io", sites[0].Domain)
 	}
+
+	site, ok := st.getSite(id, sites[0].ID)
+	if !ok {
+		t.Fatal("getSite: expected the just-created site to be found")
+	}
+	if site.SystemUser != "sp_abc123" {
+		t.Fatalf("getSite SystemUser = %q, want sp_abc123", site.SystemUser)
+	}
+	if _, ok := st.getSite(id, "site_nonexistent"); ok {
+		t.Fatal("getSite: expected an unknown site ID to not be found")
+	}
+}
+
+func TestCreateAndListBackups(t *testing.T) {
+	st := newTestStore(t)
+	id, _, err := st.createServer("web-7", "", nil, time.Hour, "admin@example.com")
+	if err != nil {
+		t.Fatalf("createServer: %v", err)
+	}
+	site, err := st.createSite(id, "example.sslip.io", "sp_abc123", "/home/sites/sp_abc123/public", "static", "")
+	if err != nil {
+		t.Fatalf("createSite: %v", err)
+	}
+
+	backup, err := st.createBackup(id, site.ID, "files", "/var/backups/serverpanel/sp_abc123-files-x.tar.gz", 4096, strings.Repeat("a", 64), "completed")
+	if err != nil {
+		t.Fatalf("createBackup: %v", err)
+	}
+	if backup.ID == "" {
+		t.Fatal("expected createBackup to assign an ID")
+	}
+
+	backups := st.listBackups(id)
+	if len(backups) != 1 {
+		t.Fatalf("listBackups returned %d backups, want 1", len(backups))
+	}
+	if backups[0].SiteID != site.ID || backups[0].Scope != "files" || backups[0].Status != "completed" {
+		t.Fatalf("listBackups[0] = %+v, unexpected fields", backups[0])
+	}
+
+	got, ok := st.getBackup(id, backup.ID)
+	if !ok {
+		t.Fatal("getBackup: expected the just-created backup to be found")
+	}
+	if got.Path != backup.Path || got.SHA256 != backup.SHA256 {
+		t.Fatalf("getBackup = %+v, want it to match createBackup's result", got)
+	}
+
+	if _, ok := st.getBackup(id, "backup_nonexistent"); ok {
+		t.Fatal("getBackup: expected an unknown backup ID to not be found")
+	}
+
+	// A backup scoped to one server must not be reachable through another
+	// server's ID, even with the correct backup ID — the same isolation
+	// getSite already enforces.
+	otherID, _, err := st.createServer("web-8", "", nil, time.Hour, "admin@example.com")
+	if err != nil {
+		t.Fatalf("createServer: %v", err)
+	}
+	if _, ok := st.getBackup(otherID, backup.ID); ok {
+		t.Fatal("getBackup: expected a backup to not be reachable via a different server ID")
+	}
 }

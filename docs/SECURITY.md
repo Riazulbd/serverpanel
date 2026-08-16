@@ -120,6 +120,15 @@ Properties this guarantees:
   capabilities split yet. "No general shell exec" already holds (the capability
   allow-list is the enforcement point, not process privilege), but full defense in
   depth per this section's original intent is still open.
+- `backup.restore` never trusts a caller-supplied archive path or checksum: the
+  control plane looks up the archive path and SHA-256 from its own `backups` table
+  (never accepts them directly from an API request body — see `API.md`
+  `POST .../backups/{backupId}/restore`), and the agent independently re-confines
+  `archive_path` under its own backup directory (`filepath.Clean` + prefix check,
+  the same pattern `resolveScopedPath` uses for the file manager) and refuses to
+  proceed if the archive's actual SHA-256 doesn't match what was recorded — so neither
+  a compromised control-plane client nor a modified/corrupt archive on disk can cause
+  a silent restore from the wrong data.
 
 ## 5. Safe SSH / firewall changes ("commit-confirm") — **not yet implemented (Phase 2)**
 

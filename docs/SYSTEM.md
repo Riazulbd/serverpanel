@@ -120,14 +120,26 @@ webhook push-to-deploy, deploy keys, or rollback exist in this codebase yet.
 | Scheduling, retention policies | ⬜ not implemented (backups are on-demand only) |
 | Encryption | ⬜ not implemented (local tar.gz is unencrypted; relies on host
   filesystem permissions today) |
-| Backup verification | 🚧 SHA-256 checksum is recorded and returned; the dashboard
-  does not yet re-verify it automatically |
+| Backup verification | ✅ `backup.restore` verifies the archive's SHA-256 against the
+  checksum recorded at backup time before touching anything; the dashboard does not
+  yet offer an on-demand "re-verify without restoring" action, only verify-at-restore |
 | Local storage | ✅ |
 | S3-compatible / Amazon S3 / R2 / B2 / Spaces / Wasabi | ⬜ Phase 2 |
-| Restore (same or another server) | ⬜ **not implemented — there is no restore
-  capability yet, only `backup.run`.** This is the most significant gap relative to
-  the "backup and restore model" the product plan calls for; see `OPERATIONS.md`. |
-| Pre-restore checkpoints, progress tracking, failure recovery | ⬜ depends on restore |
+| Restore (same server) | ✅ `backup.restore` — checksum-verified, extracts the
+  archive and re-imports the DB dump (`mysql` client) and/or copies files back into
+  place. Restoring to a **different** server than the one that produced the backup is
+  not yet wired up in the dashboard (the archive only exists on the originating
+  agent's disk) — see `OPERATIONS.md` §3 |
+| Pre-restore checkpoints | ✅ `backup.restore` takes a fresh backup of the current
+  state (same scope) before making any change, and aborts before touching anything if
+  that checkpoint itself fails; the checkpoint is persisted as its own `backups` row
+  (`status: "checkpoint"`) |
+| Progress tracking | 🚧 `backup.run`/`backup.restore` report step-by-step `Progress`
+  messages over the wire; the dashboard shows only the terminal result today, not the
+  intermediate progress messages |
+| Failure recovery | ✅ a failed restore never leaves partial state silently: checksum
+  verification and the pre-restore checkpoint both happen before any destructive step,
+  and the checkpoint backup is restorable the same way as any other backup |
 
 ### Security and monitoring
 See `SECURITY.md` for the detailed, section-by-section implemented-vs-planned
@@ -145,11 +157,15 @@ Phase boundaries and full milestone/estimate tables are in `product-plan.md` §6
 is the condensed status:
 
 - **Phase 1 — secure working foundation:** ~90% of the *capability* surface exists and
-  is tested per-capability (see the tables above); the biggest real gaps are backup
-  **restore**, an automated test suite (now added, see `TESTING.md`), SSL auto-renewal,
-  and agent cert auto-rotation. Not "GA-ready" yet, but the architecture and security
-  primitives it depends on (mTLS, allow-listed capabilities, per-app isolation, audit
-  log) are real and proven, not stubs.
+  is tested per-capability (see the tables above); backup **restore** is now
+  implemented (checksum-verified, pre-restore-checkpointed, tested end-to-end for the
+  `files` scope — see `TESTING.md`) and mobile responsiveness (320–768px, every view)
+  has been verified with real browser automation, closing the two gaps this section
+  previously called out as unresolved. The remaining real gaps are cross-server
+  restore, backup scheduling/retention/encryption, SSL auto-renewal, and agent cert
+  auto-rotation. Not "GA-ready" yet, but the architecture and security primitives it
+  depends on (mTLS, allow-listed capabilities, per-app isolation, audit log) are real
+  and proven, not stubs.
 - **Phase 2 — professional server management:** not started. Git deployment,
   cron/process management, SSH/firewall management UI, remote backups, cross-server
   migration all remain ⬜.
@@ -173,9 +189,15 @@ bundler, no `node_modules`), embedded into the Go binary via `//go:embed`. Plain
 handles the session token directly — `HttpOnly` cookie). This trades "modern SPA
 tooling" for "the entire frontend is one deployable file with zero build step and zero
 frontend dependency surface to patch," a deliberate Phase 1 choice given the security-
-sensitive nature of the product. It is not yet verified mobile-responsive at the
-320–768px breakpoints called out in the original requirements — see `TESTING.md`
-§Known gaps for what a future pass needs to check with real browser automation.
+sensitive nature of the product. Verified mobile-responsive with real headless-browser
+automation (Playwright/Chromium) at 320/375/390/414/768/1280px across every view
+(servers list, server detail, audit log, security, and both the new-site and
+new-backup modals): zero horizontal overflow at any width — see `TESTING.md` §Browser
+and mobile testing. The topbar (`header.topbar`) wraps instead of overflowing on
+narrow viewports, and every table (server list, sites, backups, audit log) scrolls
+inside its own `.table-scroll` container rather than the page itself scrolling
+horizontally — this was a real bug (header overflow) caught and fixed during that
+verification pass, not a pre-existing guarantee.
 
 ## 6. Backend architecture
 
@@ -278,8 +300,13 @@ Current capability list: `system.ping`, `service.control`, `diagnostics.basic`,
 `stack.install`, `site.create`, `site.set_php_version`, `site.set_status`,
 `app.wordpress_install`, `ssl.issue_letsencrypt`, `ssl.install_custom`, `db.create`,
 `db.delete`, `db.list`, `file.list`, `file.read`, `file.write`, `file.delete`,
-`backup.run`, `logs.tail`. Notably absent (by design, until reviewed and added):
-`backup.restore`, `git.deploy`, `cron.upsert`, `ssh.*`, `firewall.*`,
+`backup.run`, `backup.restore`, `logs.tail`. `backup.restore` never trusts a
+caller-supplied archive path or checksum blindly: `archive_path` must resolve
+(after `filepath.Clean`) under the agent's own `backupBaseDir`, and `expected_sha256`
+must match the archive on disk before any extraction happens — the same
+path-confinement and verify-before-act pattern the file manager's `resolveScopedPath`
+and `ssl.install_custom` already use elsewhere in this registry. Notably absent (by
+design, until reviewed and added): `git.deploy`, `cron.upsert`, `ssh.*`, `firewall.*`,
 `agent.self_update`.
 
 ## 13. Installation and deployment
@@ -343,12 +370,36 @@ defenses on the file manager (`resolveScopedPath`).
 
 ## 19. Backup and restore model
 
-**Backup**: implemented (`backup.run` — local, checksummed tar.gz of DB and/or files).
-**Restore**: **not implemented**. This is the single largest functional gap in the
-Phase 1 feature set relative to what the product plan calls for, and should be the
-next priority after this documentation pass — see `OPERATIONS.md` §Backup and restore
-for the concrete plan (a `backup.restore` capability mirroring `backup.run`'s
-validation approach, plus a pre-restore checkpoint step).
+**Backup**: `backup.run` — local, checksummed (SHA-256) tar.gz of DB (`mysqldump
+--single-transaction --routines --events`) and/or files (`tar`). Filenames include a
+random 4-byte hex suffix in addition to the second-resolution timestamp, specifically
+so two backups of the same site/database can never collide and silently overwrite
+each other — including a restore's own pre-restore checkpoint racing the backup it's
+restoring from, a real bug caught by `TestHandleBackupRunThenRestoreFilesRoundTrip`
+during development (see `TESTING.md`).
+
+**Restore**: `backup.restore` — implemented. Flow: (1) validate `scope` and confine
+`archive_path` to the agent's own backup directory; (2) verify the archive's SHA-256
+against `expected_sha256` (normally the checksum the control plane recorded when the
+backup was made) and refuse to proceed on any mismatch; (3) list the archive's
+contents and confirm it actually contains what the requested scope expects (a
+`files`-only archive can't be restored as `db`, or vice versa); (4) take a fresh
+**pre-restore checkpoint** — a same-scope `backup.run` of the *current* state — and
+abort before touching anything if that checkpoint itself fails; (5) extract, re-import
+the DB dump via the `mysql` client (target database created with `CREATE DATABASE IF
+NOT EXISTS` if it doesn't already exist; the owning user/grants from `db.create` are
+left untouched) and/or copy files back into place with `cp -a` + `chown`.
+`apps/controlplane/backups.go` never lets a caller supply the archive path/checksum
+directly — it looks up the `backups` row by ID and passes the recorded values through,
+so a restore is always verified against what was actually produced, not against a
+value a client could get wrong (or forge).
+
+**Known gaps**: restoring to a **different** server than the one that produced the
+backup isn't wired up yet (the archive only exists on the originating agent's local
+disk — no remote/object storage backend exists to move it through, see §2 "S3-
+compatible..." ⬜); no scheduling/retention policy (backups are on-demand only); no
+at-rest encryption of the local tar.gz. See `OPERATIONS.md` §3 for the operational
+walkthrough and these gaps' recommended next steps.
 
 ## 20. Monitoring and alerting
 
@@ -359,7 +410,8 @@ all ⬜, scoped to Phase 2 per `product-plan.md` §9.
 
 ## 21. Known limitations
 
-- No backup **restore** capability (see §19).
+- Backup **restore** exists but is single-server only — restoring an archive onto a
+  *different* server than the one that produced it isn't wired up yet (see §19).
 - No on-disk agent task journal — a task in flight when the agent process restarts is
   lost, not resumed (see `ARCHITECTURE.md` §4 "As built").
 - No agent certificate auto-renewal before its 30-day expiry (see `SECURITY.md` §2).
@@ -373,8 +425,6 @@ all ⬜, scoped to Phase 2 per `product-plan.md` §9.
 - `systemctl start/stop/restart` and Let's Encrypt issuance have not been verified in
   *this* environment (no systemd as PID 1, no public DNS) — see `TESTING.md` §What
   hasn't been verified.
-- Dashboard mobile responsiveness (320–768px) has not been verified with real browser
-  automation in this session — see `TESTING.md` §Known gaps.
 - No CI pipeline / automated vulnerability scanning configured yet.
 
 ## 22. Performance decisions

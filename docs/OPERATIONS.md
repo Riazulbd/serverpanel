@@ -40,22 +40,45 @@ dashboard).
 
 ## 3. Backup and restore
 
-**Backup** (implemented): dispatch the `backup.run` capability
-(`POST /api/v1/servers/{id}/tasks` with `{"capability": "backup.run", "params": {...}}`)
-— see `packages/capabilities/backup.go` for its `scope`/`target` params. It writes a
-checksummed local tar.gz on the VPS itself and records the checksum in its
-`TaskEvent.detail`. The control plane's `backups` table schema exists (`db.go`) but
-nothing currently writes a row into it automatically — wiring `backup.run`'s dispatch
-through a persistence step analogous to `handleCreateSite` (dispatch → parse result →
-insert row) is a small, well-scoped next task.
+**Backup**: `POST /api/v1/servers/{id}/backups` with `{"scope": "db"|"files"|"full",
+"site_id": "...", "db_name": "..."}` (`site_id` optional — resolves `site_root`
+automatically from the site's home directory; `db_name` required for `db`/`full`
+regardless, since sites don't track a linked database name yet). Dispatches
+`backup.run` (`packages/capabilities/backup.go`) and, only on success, persists a row
+in the `backups` table with the archive's real path and SHA-256 checksum —
+`GET /api/v1/servers/{id}/backups` lists everything recorded for a server. The
+dashboard's server-detail view has a "Backups" section (list + "+ New backup") next to
+Sites for this.
 
-**Restore** (not implemented): there is no `backup.restore` capability yet. Until one
-exists, restoring from a `backup.run` archive is a fully manual process: SSH to the
-VPS, locate the tar.gz under wherever `backup.run` wrote it, verify its SHA-256 against
-the value in the task's `detail`, and manually extract/restore the DB dump and/or
-files. **Do not represent backup/restore as a complete, tested feature until a real
-`backup.restore` capability exists and has been exercised end-to-end** — see
-`SYSTEM.md` §19 and §21, and `TESTING.md` §5 item 1 for the recommended next step.
+**Restore**: `POST /api/v1/servers/{id}/backups/{backupId}/restore`. This dispatches
+`backup.restore`, which:
+1. Confines `archive_path` to the agent's own backup directory and verifies its
+   SHA-256 against the checksum recorded when the backup was made — refuses to
+   proceed on any mismatch (a modified, corrupted, or wrong archive is never restored
+   silently).
+2. Confirms the archive's actual contents match the claimed scope (a `files`-only
+   archive can't be restored as `db`).
+3. Takes a fresh **pre-restore checkpoint** (a same-scope `backup.run` of the current
+   state) and aborts before making any change if that checkpoint itself fails.
+4. Extracts, re-imports the DB dump via the `mysql` client and/or copies files back
+   into place.
+
+The checkpoint from step 3 is itself persisted as a new `backups` row
+(`status: "checkpoint"`), so undoing a bad restore is just another restore — no manual
+recovery procedure is needed. **Known gap**: restoring onto a *different* server than
+the one that produced the backup is not wired up — the archive only exists on the
+originating agent's local disk (no remote/object storage backend exists yet to move it
+through). See `SYSTEM.md` §19 for the full design writeup and `TESTING.md` §1/§5 for
+what's automated-tested (`files` scope, real round trip) vs. still needing a live
+MariaDB (`db`/`full` scope's import step).
+
+If you ever need to restore manually without going through the API (e.g. the control
+plane's `backups` table was lost but the archive on the VPS wasn't): SSH to the VPS,
+locate the tar.gz under `/var/backups/serverpanel`, verify its SHA-256 yourself
+(`sha256sum`), then either re-register the archive by calling `backup.restore` via
+`POST /api/v1/servers/{id}/tasks` directly with `archive_path`/`expected_sha256` set
+by hand, or extract it yourself with `tar -tzf`/`tar -xzf` and restore the DB dump/
+files manually.
 
 ## 4. Monitoring and alerting
 

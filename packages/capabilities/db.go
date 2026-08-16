@@ -78,6 +78,24 @@ func handleDBCreate(ctx context.Context, params map[string]any, progress Progres
 	return fmt.Sprintf("database %q created, owned by user %q with grants scoped to that database only", name, owner), nil
 }
 
+// ensureDatabaseExists is the restore path's counterpart to handleDBCreate's
+// "CREATE DATABASE IF NOT EXISTS" step, without also creating/granting an
+// owner user — backup.restore only needs somewhere to import the dump into;
+// the owning user and its grants are expected to already exist (created by
+// db.create when the site was first provisioned) and are left untouched.
+func ensureDatabaseExists(ctx context.Context, name string) error {
+	if !identifierRe.MatchString(name) {
+		return fmt.Errorf("invalid database name %q", name)
+	}
+	db, err := mariaDBConn()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	_, err = db.ExecContext(ctx, fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci", name))
+	return err
+}
+
 func handleDBDelete(ctx context.Context, params map[string]any, progress Progress) (string, error) {
 	name, _ := params["name"].(string)
 	owner, _ := params["owner_user"].(string)

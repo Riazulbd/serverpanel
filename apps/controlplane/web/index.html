@@ -43,14 +43,25 @@
   .row { display: flex; gap: 8px; }
   .row > * { flex: 1; }
   header.topbar {
-    display: flex; align-items: center; justify-content: space-between;
+    display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; row-gap: 8px;
     padding: 12px 24px; background: var(--card); border-bottom: 1px solid var(--border);
   }
   header.topbar .brand { font-weight: 700; font-size: 16px; }
-  nav.tabs { display: flex; gap: 4px; }
-  nav.tabs button { border: none; background: none; padding: 8px 14px; border-radius: 8px; color: var(--muted); }
+  header.topbar .session { display: flex; align-items: center; gap: 8px; max-width: 100%; }
+  header.topbar .session #meEmail {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 0 1 auto;
+  }
+  nav.tabs { display: flex; gap: 4px; overflow-x: auto; max-width: 100%; }
+  nav.tabs button { border: none; background: none; padding: 8px 14px; border-radius: 8px; color: var(--muted); white-space: nowrap; }
   nav.tabs button.active { background: var(--gray-bg); color: var(--text); font-weight: 600; }
   main { max-width: 1100px; margin: 0 auto; padding: 24px; }
+  .table-scroll { overflow-x: auto; }
+  @media (max-width: 480px) {
+    header.topbar { padding: 10px 14px; }
+    main { padding: 14px; }
+    .card { padding: 14px; }
+    .modal { padding: 16px; }
+  }
   .view { display: none; }
   .view.active { display: block; }
   .toolbar { display: flex; gap: 10px; margin-bottom: 16px; align-items: center; }
@@ -132,7 +143,7 @@
       <button id="tabAudit" onclick="showTab('audit')">Audit Log</button>
       <button id="tabSecurity" onclick="showTab('security')">Security</button>
     </nav>
-    <div><span class="muted" id="meEmail"></span> &nbsp; <button onclick="doLogout()">Sign out</button></div>
+    <div class="session"><span class="muted" id="meEmail"></span><button onclick="doLogout()">Sign out</button></div>
   </header>
 
   <main>
@@ -142,7 +153,7 @@
         <div class="spacer"></div>
         <button class="primary" onclick="openNewServerModal()">+ New server</button>
       </div>
-      <div class="card" style="padding:0">
+      <div class="card table-scroll" style="padding:0">
         <table>
           <thead><tr><th>Name</th><th>Status</th><th>Group</th><th>Tags</th><th>Agent version</th><th>Last seen</th></tr></thead>
           <tbody id="serverTableBody"></tbody>
@@ -174,11 +185,17 @@
           <button onclick="openNewSiteModal()">+ New site</button>
         </div>
         <div id="sitesList" class="muted">No sites yet.</div>
+
+        <div class="section-title" style="display:flex;justify-content:space-between;align-items:center">
+          <span>Backups</span>
+          <button onclick="openNewBackupModal()">+ New backup</button>
+        </div>
+        <div id="backupsList" class="muted">No backups yet.</div>
       </div>
     </div>
 
     <div id="view-audit" class="view">
-      <div class="card" style="padding:0">
+      <div class="card table-scroll" style="padding:0">
         <table>
           <thead><tr><th>Time</th><th>Server</th><th>Actor</th><th>Action</th><th>Detail</th></tr></thead>
           <tbody id="auditTableBody"></tbody>
@@ -430,16 +447,128 @@ async function openServerDetail(id) {
   await renderServerDetail(id);
   try {
     const sites = await api(API + '/servers/' + id + '/sites');
-    renderSites(sites || []);
+    state.sites = sites || [];
+    renderSites(state.sites);
+  } catch (e) {}
+  try {
+    const backups = await api(API + '/servers/' + id + '/backups');
+    renderBackups(backups || []);
   } catch (e) {}
 }
 
 function renderSites(sites) {
   const el = document.getElementById('sitesList');
   if (!sites.length) { el.textContent = 'No sites yet.'; return; }
-  el.innerHTML = '<table><thead><tr><th>Domain</th><th>Type</th><th>PHP</th><th>Status</th></tr></thead><tbody>' +
+  el.innerHTML = '<div class="table-scroll"><table><thead><tr><th>Domain</th><th>Type</th><th>PHP</th><th>Status</th></tr></thead><tbody>' +
     sites.map(s => `<tr><td>${escapeHtml(s.Domain)}</td><td>${escapeHtml(s.AppType)}</td><td>${escapeHtml(s.PHPVersion||'—')}</td><td>${escapeHtml(s.Status)}</td></tr>`).join('') +
-    '</tbody></table>';
+    '</tbody></table></div>';
+}
+
+function siteLabel(siteId) {
+  const site = (state.sites || []).find(s => s.ID === siteId);
+  return site ? site.Domain : (siteId ? siteId : 'whole server');
+}
+
+function formatBytes(n) {
+  if (!n) return '0 B';
+  const units = ['B','KB','MB','GB','TB'];
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return n.toFixed(i === 0 ? 0 : 1) + ' ' + units[i];
+}
+
+function renderBackups(backups) {
+  const el = document.getElementById('backupsList');
+  if (!backups.length) { el.textContent = 'No backups yet.'; return; }
+  el.innerHTML = '<div class="table-scroll"><table><thead><tr><th>Created</th><th>Site</th><th>Scope</th><th>Size</th><th>Status</th><th></th></tr></thead><tbody>' +
+    backups.map(b => `<tr>
+        <td class="muted">${new Date(b.CreatedAt).toLocaleString()}</td>
+        <td>${escapeHtml(siteLabel(b.SiteID))}</td>
+        <td>${escapeHtml(b.Scope)}</td>
+        <td class="muted">${formatBytes(b.SizeBytes)}</td>
+        <td>${escapeHtml(b.Status)}</td>
+        <td><button onclick="restoreBackup('${b.ID}','${b.Scope}','${b.SiteID||''}')">Restore</button></td>
+      </tr>`).join('') +
+    '</tbody></table></div>';
+}
+
+function openNewBackupModal() {
+  const root = document.getElementById('modalRoot');
+  const siteOptions = (state.sites || []).map(s => `<option value="${s.ID}">${escapeHtml(s.Domain)}</option>`).join('');
+  root.innerHTML = `
+    <div class="modal-backdrop" onclick="if(event.target===this) closeModal()">
+      <div class="modal">
+        <h2>New backup</h2>
+        <div class="field">
+          <label>Site (leave as "whole server" for a full-server files backup outside any tracked site)</label>
+          <select id="newBackupSite"><option value="">— whole server —</option>${siteOptions}</select>
+        </div>
+        <div class="field">
+          <label>Scope</label>
+          <select id="newBackupScope">
+            <option value="files">Files</option>
+            <option value="db">Database</option>
+            <option value="full">Full (files + database)</option>
+          </select>
+        </div>
+        <div class="field"><label>Database name (required for Database/Full scope)</label><input id="newBackupDBName" placeholder="e.g. wp_example"></div>
+        <button class="primary" onclick="createBackup()">Create backup</button>
+        <div class="error" id="newBackupError"></div>
+        <p class="muted" id="newBackupStatus"></p>
+      </div>
+    </div>`;
+}
+
+async function createBackup() {
+  const siteId = document.getElementById('newBackupSite').value;
+  const scope = document.getElementById('newBackupScope').value;
+  const dbName = document.getElementById('newBackupDBName').value.trim();
+  const err = document.getElementById('newBackupError');
+  const status = document.getElementById('newBackupStatus');
+  err.textContent = '';
+  status.textContent = 'Backing up... this can take a while for large databases or file trees.';
+  try {
+    await api(API + '/servers/' + state.selectedServerId + '/backups', {
+      method: 'POST', body: JSON.stringify({scope, site_id: siteId, db_name: dbName})
+    });
+    status.textContent = 'Backup created.';
+    const backups = await api(API + '/servers/' + state.selectedServerId + '/backups');
+    renderBackups(backups || []);
+  } catch (e) {
+    status.textContent = '';
+    err.textContent = e.message;
+  }
+}
+
+async function restoreBackup(id, scope, siteId) {
+  if (!confirm('Restore this backup? A checkpoint of the current state will be taken first, but this will overwrite ' +
+    (siteId ? 'the site\'s ' : '') + (scope === 'db' ? 'database' : (scope === 'files' ? 'files' : 'files and database')) + ' with the backed-up version.')) return;
+
+  const body = {};
+  if (!siteId) {
+    // No linked site to resolve site_root/owner_user/db_name from —
+    // ask for whatever this scope needs before dispatching the restore.
+    if (scope === 'db' || scope === 'full') {
+      body.db_name = prompt('Database name to restore into:') || '';
+      if (!body.db_name) return;
+    }
+    if (scope === 'files' || scope === 'full') {
+      body.site_root = prompt('Absolute site root to restore files into (e.g. /home/sites/site_example):') || '';
+      body.owner_user = prompt('System user that owns that site root:') || '';
+      if (!body.site_root || !body.owner_user) return;
+    }
+  }
+
+  try {
+    await api(API + '/servers/' + state.selectedServerId + '/backups/' + id + '/restore', {
+      method: 'POST', body: JSON.stringify(body)
+    });
+    alert('Restore complete. A pre-restore checkpoint backup was created automatically.');
+    const backups = await api(API + '/servers/' + state.selectedServerId + '/backups');
+    renderBackups(backups || []);
+  } catch (e) {
+    alert('Restore failed: ' + e.message);
+  }
 }
 
 async function renderServerDetail(id) {

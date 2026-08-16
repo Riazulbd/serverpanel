@@ -2,7 +2,7 @@
 
 ## 1. Current automated coverage
 
-`go test ./...` — 48 test functions across two packages, all passing, no `-race`
+`go test ./...` — 58 test functions across two packages, all passing, no `-race`
 failures, `go vet` clean, `gofmt -l` clean:
 
 ```
@@ -15,8 +15,8 @@ go test ./... -race
 
 | Package | Tests | What they cover |
 |---|---|---|
-| `apps/controlplane` | 23 | Auth/session lifecycle (create, MFA-verify, expiry, delete), bcrypt password rules, email normalization/uniqueness, TOTP round-trip/skew/rejection, bootstrap-token single-use/expiry/unknown-token, server create/list/get, revocation (cert-serial blocking + status transitions, including that a stray disconnect can't resurrect a revoked server), heartbeat recording, audit-log append, site create/list, and 4 full HTTP integration tests through `routes()` with `httptest` covering signup→login→protected-route, the full 2FA enroll→logout→login→MFA-challenge→access flow, server create/list/revoke, and agent registration with a bad token |
-| `packages/capabilities` | 25 | Capability dispatch (unknown name rejected, `system.ping` works, nil `Progress` doesn't panic, the registry has a handler for every declared `Cap*` constant), `service.control`'s allow-list boundary (unit, action, and an explicit shell-metacharacter-injection attempt, all rejected before `systemctl` is ever invoked), the file manager's path-traversal and symlink-escape defenses (`resolveScopedPath`), oversized-read/write rejection, refusal to delete the site root itself, a real list+write round trip against a real filesystem, log redaction (token/password query params, `Authorization: Bearer`/`Basic`), `logs.tail`'s input validation, domain-name validation (including injection-shaped inputs), `systemUserForDomain`'s bounding/sanitization, and the deterministic php-fpm-pool/socket/vhost path builders |
+| `apps/controlplane` | 25 | Auth/session lifecycle (create, MFA-verify, expiry, delete), bcrypt password rules, email normalization/uniqueness, TOTP round-trip/skew/rejection, bootstrap-token single-use/expiry/unknown-token, server create/list/get, revocation (cert-serial blocking + status transitions, including that a stray disconnect can't resurrect a revoked server), heartbeat recording, audit-log append, site create/list/get (including cross-server-ID isolation), backup create/list/get (including cross-server-ID isolation), and 5 full HTTP integration tests through `routes()` with `httptest` covering signup→login→protected-route, the full 2FA enroll→logout→login→MFA-challenge→access flow, server create/list/revoke, agent registration with a bad token, and the backup endpoints against a server with no connected agent (list-empty, create fails 502 without persisting a row, restore-unknown-ID 404s without dispatching) |
+| `packages/capabilities` | 33 | Capability dispatch (unknown name rejected, `system.ping` works, nil `Progress` doesn't panic, the registry has a handler for every declared `Cap*` constant), `service.control`'s allow-list boundary (unit, action, and an explicit shell-metacharacter-injection attempt, all rejected before `systemctl` is ever invoked), the file manager's path-traversal and symlink-escape defenses (`resolveScopedPath`), oversized-read/write rejection, refusal to delete the site root itself, a real list+write round trip against a real filesystem, log redaction (token/password query params, `Authorization: Bearer`/`Basic`), `logs.tail`'s input validation, domain-name validation (including injection-shaped inputs), `systemUserForDomain`'s bounding/sanitization, the deterministic php-fpm-pool/socket/vhost path builders, and `backup.restore`'s validation (bad scope, archive path confinement including a `..`-traversal attempt, missing/mismatched checksum, unmanaged site root, an archive whose contents don't match the claimed scope) plus a real, non-mocked `backup.run` → mutate → `backup.restore` round trip for the `files` scope that also verifies the pre-restore checkpoint archive is itself valid and independently checksums correctly |
 
 None of this is mocked where a cheap real implementation was possible: sessions/users/
 servers/audit run against a real temp-file SQLite database with the real schema (not
@@ -32,9 +32,11 @@ Capabilities that require real system services this environment can't safely or
 meaningfully fake are **not** exercised by the automated suite:
 `stack.install` (apt/systemd), `app.wordpress_install` (real `wp-cli` + a running
 MariaDB), `ssl.issue_letsencrypt` (real ACME/public DNS), `db.create/delete/list`
-(a running MariaDB), `backup.run` (real file/db dump), `service.control`'s actual
-`systemctl` invocation, and the agent's registration/connect/reconnect loop against a
-live gateway.
+(a running MariaDB), the **`db`/`full`-scope paths of `backup.run`/`backup.restore`**
+(real `mysqldump`/`mysql` client against a running MariaDB — the `files`-scope path of
+both **is** covered by a real, non-mocked round-trip test, see §1), `service.control`'s
+actual `systemctl` invocation, and the agent's registration/connect/reconnect loop
+against a live gateway.
 
 These were **manually verified against a real Ubuntu 24.04 host in a prior session**
 (see `SYSTEM.md` §27 / the bug list below) — real `apt-get` installs, a manually
@@ -55,12 +57,12 @@ next testing investment worth making, tracked below.
   been built/tested in.
 - Agent behavior across a real network disconnect/reconnect cycle, a real VPS reboot,
   or a real control-plane restart while agents are live.
-- Dashboard mobile responsiveness at 320/375/390/414/768px — no browser-automation
-  screenshot pass has been run against the dashboard in this session. The dashboard is
-  plain HTML/CSS with no fixed-width layout assumptions spotted on inspection, but
-  "should be responsive" is not the same claim as "verified responsive," and this
-  should not be reported as done until it's actually been checked with real viewport
-  screenshots.
+- The `db`/`full`-scope path of `backup.restore` (real `mysql`-client dump import)
+  against a live MariaDB — validated by code review and the `files`-scope round trip
+  sharing the same code path up to the database-specific step, but not run end-to-end
+  against a real database in any environment this project has been built in.
+- Restoring a backup onto a **different** server than the one that produced it — not
+  implemented yet (§19 in `SYSTEM.md`), so not testable.
 - Load/performance testing (dashboard CPU/memory under load, agent CPU/memory at idle
   and under task load, backup/restore throughput) — no measurements have been taken.
 - Cross-server workflows (migration/cloning) — not applicable yet, since the feature
@@ -91,30 +93,72 @@ From the prior session's manual integration pass:
 - Heartbeats only ever populated uptime; load/memory/disk were implemented via
   `/proc/loadavg`, `/proc/meminfo`, and `syscall.Statfs`.
 
-This session's automated-test pass (see §1) found **no new defects** — every test
-passed on the first correctly-written attempt, which is consistent with (not
-independent proof beyond) the prior manual pass having been genuine.
+From this session's `backup.restore` implementation pass:
+- `backup.run`'s output filename had only second-resolution granularity
+  (`20060102T150405Z`), so two backups of the same site/database within the same
+  second silently overwrote each other on disk. This surfaced as a real, reproducible
+  failure in `TestHandleBackupRunThenRestoreFilesRoundTrip`: the pre-restore checkpoint
+  (itself a `backup.run` call) collided with the very archive `backup.restore` was
+  about to read, overwriting it with the *corrupted* current state before extraction —
+  so the "restore" silently restored the corruption instead of the original backup.
+  Fixed by adding a random 4-byte hex suffix to every backup filename, which closes
+  the general "two backups of the same thing in the same second" collision class, not
+  just the checkpoint-vs-original case that happened to be exercised by the test.
+
+This session's automated-test pass otherwise found **no new defects** in the
+pre-existing code — every other test passed on the first correctly-written attempt,
+which is consistent with (not independent proof beyond) the prior manual pass having
+been genuine.
 
 ## 5. Known gaps / recommended next testing investment, in priority order
 
-1. **Backup restore has no capability to test yet** — write `backup.restore` first
-   (see `OPERATIONS.md` §Backup and restore), then test it for real, including a
-   pre-restore checkpoint and a restore-to-a-different-server scenario.
+1. **`backup.restore`'s `db`/`full`-scope path against a real MariaDB instance** — the
+   `files`-scope path is now covered by a real round-trip test (§1); the
+   database-import step (`mysql` client + `ensureDatabaseExists`) still needs the same
+   treatment against a live MariaDB, plus a restore-to-a-different-server scenario once
+   that feature exists (§19 in `SYSTEM.md`).
 2. **Scripted real-VPS/container integration tests** — turn the manual pass in §2 into
    a repeatable script (a disposable Ubuntu 24.04 Docker container or cloud-init VM),
    runnable in CI, covering the installation-test checklist in the project brief
    (agent install → register → stack install → site create → WordPress deploy →
-   DB create → SSL issue → file ops → backup → agent restart → network
+   DB create → SSL issue → file ops → backup → restore → agent restart → network
    disconnect/reconnect → failed-install recovery → upgrade → rollback → revoke).
-3. **Browser/mobile end-to-end tests** — Playwright driving the dashboard at each of
-   the 320/375/390/414/768/desktop breakpoints, checking for horizontal overflow,
-   clipped content, and usable touch targets, screenshotted for review.
-4. **Load/failure testing of agent reconnect** under real network partition
+3. **Load/failure testing of agent reconnect** under real network partition
    conditions (not just the backoff-loop code review already done).
-5. **`govulncheck`/dependency vulnerability scanning** wired into a CI pipeline (none
+4. **`govulncheck`/dependency vulnerability scanning** wired into a CI pipeline (none
    exists yet).
 
-## 6. Running the suite
+## 6. Browser and mobile testing
+
+Run manually (not yet wired into `go test`, since it needs a running binary + a
+headless browser — see "next testing investment" §5 for scripting this into CI):
+
+1. Build and run the control plane against a scratch SQLite DB/CA dir:
+   `go build -o /tmp/serverpanel-cp ./apps/controlplane && /tmp/serverpanel-cp -db
+   /tmp/sp-test/test.db -ca-dir /tmp/sp-test/ca -api-addr 127.0.0.1:8081 -gateway-addr
+   127.0.0.1:8082 -insecure-cookies`.
+2. Drive it with Playwright (Chromium) through signup → login → create server → open
+   server detail → every tab (Servers/Audit Log/Security) → the new-site and
+   new-backup modals, at each of 320/375/390/414/768/1280px, checking
+   `document.documentElement.scrollWidth - document.documentElement.clientWidth <= 1`
+   (i.e. no horizontal overflow) after each navigation.
+
+Last run (this session): all six widths × six views (servers list, server detail,
+audit log, security, new-site modal, new-backup modal) — zero horizontal overflow.
+Found and fixed one real bug in the process: `header.topbar` had no `flex-wrap`, so on
+narrow viewports the session info (email + sign-out button) overflowed the page
+instead of wrapping to a second line — confirmed with `getBoundingClientRect()` on the
+widest offending element, not just visual inspection. Fixed with `flex-wrap: wrap` on
+the topbar and `min-width: 0` + `text-overflow: ellipsis` on the email span (a flex
+item needs an explicit `min-width: 0` to actually shrink/truncate below its content
+width — the parent alone isn't enough). Also added a shared `.table-scroll` class
+(`overflow-x: auto`) around every table (server list, sites, backups, audit log) so
+a wide table scrolls within its own card rather than the page scrolling horizontally,
+per the project's mobile-responsiveness requirement. Touch-target sizing, screen-reader
+labeling, and keyboard navigation were not part of this pass — still open, see
+`SYSTEM.md` §21.
+
+## 7. Running the suite
 
 ```
 go build ./...          # both binaries

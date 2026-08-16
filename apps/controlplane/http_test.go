@@ -201,6 +201,57 @@ func TestServerCreateListRevokeFlow(t *testing.T) {
 	}
 }
 
+func TestBackupEndpointsWithoutConnectedAgent(t *testing.T) {
+	secureCookies = false
+	defer func() { secureCookies = true }()
+
+	a := newTestAPIServer(t)
+	h := a.routes()
+
+	doJSON(t, h, "POST", "/api/v1/auth/signup", map[string]string{
+		"Email": "backups@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	rec := doJSON(t, h, "POST", "/api/v1/auth/login", map[string]string{
+		"Email": "backups@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	cookie := sessionCookie(rec)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers", map[string]any{"Name": "backup-host"}, cookie)
+	var created struct {
+		ServerID string `json:"server_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+
+	// No session at all: rejected before the handler ever runs.
+	rec = doJSON(t, h, "GET", "/api/v1/servers/"+created.ServerID+"/backups", nil, nil)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated list backups status = %d, want 401", rec.Code)
+	}
+
+	// A fresh server has no backups yet.
+	rec = doJSON(t, h, "GET", "/api/v1/servers/"+created.ServerID+"/backups", nil, cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list backups status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// The agent for this server was never connected: creating a backup must
+	// fail with a clear "not connected" error, not persist a bogus record.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/backups", map[string]string{"scope": "files"}, cookie)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("create backup on disconnected server status = %d, body = %s, want 502", rec.Code, rec.Body.String())
+	}
+	backups := a.store.listBackups(created.ServerID)
+	if len(backups) != 0 {
+		t.Fatalf("expected no backup rows to be persisted after a failed dispatch, got %d", len(backups))
+	}
+
+	// Restoring an unknown backup ID must 404 rather than dispatch anything.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/backups/backup_nonexistent/restore", nil, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("restore unknown backup status = %d, want 404", rec.Code)
+	}
+}
+
 func TestRegisterEndpointRejectsBadToken(t *testing.T) {
 	a := newTestAPIServer(t)
 	h := a.routes()
