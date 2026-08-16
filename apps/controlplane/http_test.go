@@ -201,6 +201,65 @@ func TestServerCreateListRevokeFlow(t *testing.T) {
 	}
 }
 
+func TestBackupEndpointsValidateBeforeDispatch(t *testing.T) {
+	secureCookies = false
+	defer func() { secureCookies = true }()
+
+	a := newTestAPIServer(t)
+	h := a.routes()
+
+	doJSON(t, h, "POST", "/api/v1/auth/signup", map[string]string{
+		"Email": "backups@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	rec := doJSON(t, h, "POST", "/api/v1/auth/login", map[string]string{
+		"Email": "backups@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	cookie := sessionCookie(rec)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers", map[string]any{"Name": "web-9"}, cookie)
+	var created struct {
+		ServerID string `json:"server_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+
+	// Invalid scope is rejected before any agent dispatch is attempted (no
+	// agent is connected in this test, so a dispatch attempt would 502).
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/backups", map[string]any{"scope": "everything"}, cookie)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("bad scope status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// scope=files with no site_id is rejected the same way.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/backups", map[string]any{"scope": "files"}, cookie)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("files without site_id status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// scope=db with no db_name is rejected the same way.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/backups", map[string]any{"scope": "db"}, cookie)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("db without db_name status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// An unknown site_id on an otherwise-valid request is rejected.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/backups", map[string]any{"scope": "files", "site_id": "site_bogus"}, cookie)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unknown site_id status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// No backups recorded yet: list must return an empty (not error) response.
+	rec = doJSON(t, h, "GET", "/api/v1/servers/"+created.ServerID+"/backups", nil, cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list backups status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// Restoring an unknown backup ID is a 404, not a dispatch attempt.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/backups/bkp_bogus/restore", nil, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("restore unknown backup status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestRegisterEndpointRejectsBadToken(t *testing.T) {
 	a := newTestAPIServer(t)
 	h := a.routes()

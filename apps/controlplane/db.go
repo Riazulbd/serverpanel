@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -29,7 +30,31 @@ func openDB(path string) (*sql.DB, error) {
 		db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
+	if err := applyMigrations(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("apply migrations: %w", err)
+	}
 	return db, nil
+}
+
+// applyMigrations runs small, additive, idempotent schema changes that
+// postdate the original CREATE TABLE IF NOT EXISTS statements below. There
+// is no separate migration tool yet (see docs/OPERATIONS.md); each entry
+// here is a best-effort ALTER TABLE that ignores a "duplicate column"
+// failure, which is safe because SQLite's ALTER TABLE ADD COLUMN is
+// otherwise unconditional. New columns must always be nullable or have a
+// DEFAULT so this never fails against data written before the column
+// existed.
+func applyMigrations(db *sql.DB) error {
+	stmts := []string{
+		`ALTER TABLE backups ADD COLUMN db_name TEXT NOT NULL DEFAULT ''`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+			return fmt.Errorf("%s: %w", stmt, err)
+		}
+	}
+	return nil
 }
 
 const schema = `
@@ -105,6 +130,7 @@ CREATE TABLE IF NOT EXISTS backups (
 	path       TEXT NOT NULL,
 	size_bytes INTEGER NOT NULL DEFAULT 0,
 	sha256     TEXT NOT NULL DEFAULT '',
+	db_name    TEXT NOT NULL DEFAULT '',
 	status     TEXT NOT NULL,
 	created_at TEXT NOT NULL
 );

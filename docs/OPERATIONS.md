@@ -40,22 +40,38 @@ dashboard).
 
 ## 3. Backup and restore
 
-**Backup** (implemented): dispatch the `backup.run` capability
-(`POST /api/v1/servers/{id}/tasks` with `{"capability": "backup.run", "params": {...}}`)
-— see `packages/capabilities/backup.go` for its `scope`/`target` params. It writes a
-checksummed local tar.gz on the VPS itself and records the checksum in its
-`TaskEvent.detail`. The control plane's `backups` table schema exists (`db.go`) but
-nothing currently writes a row into it automatically — wiring `backup.run`'s dispatch
-through a persistence step analogous to `handleCreateSite` (dispatch → parse result →
-insert row) is a small, well-scoped next task.
+**Backup** (implemented): from the dashboard, open a server's detail page and use the
+"Backups" panel, or call `POST /api/v1/servers/{id}/backups` directly with
+`{"scope": "files"|"db"|"full", "site_id": "...", "db_name": "..."}` (see `API.md`).
+This dispatches the `backup.run` capability (`packages/capabilities/backup.go`), which
+writes a checksummed local tar.gz on the VPS itself under `/var/backups/serverpanel`,
+and — only once the agent confirms success — persists a row in the `backups` table
+(`apps/controlplane/backups.go` `handleCreateBackup`).
 
-**Restore** (not implemented): there is no `backup.restore` capability yet. Until one
-exists, restoring from a `backup.run` archive is a fully manual process: SSH to the
-VPS, locate the tar.gz under wherever `backup.run` wrote it, verify its SHA-256 against
-the value in the task's `detail`, and manually extract/restore the DB dump and/or
-files. **Do not represent backup/restore as a complete, tested feature until a real
-`backup.restore` capability exists and has been exercised end-to-end** — see
-`SYSTEM.md` §19 and §21, and `TESTING.md` §5 item 1 for the recommended next step.
+**Restore** (implemented, same server only): from the same "Backups" panel, click
+"Restore" next to a backup, or call
+`POST /api/v1/servers/{id}/backups/{backupId}/restore` directly (no body — it always
+uses the exact site/database/checksum recorded for that backup). This dispatches the
+`backup.restore` capability, which:
+
+1. refuses to touch anything outside `/var/backups/serverpanel`;
+2. refuses to restore if the archive's current SHA-256 doesn't match what was recorded
+   at backup time (catches a truncated/corrupted/tampered archive before it's used);
+3. takes a fresh checkpoint backup of the current state first (so a restore that turns
+   out to be wrong is itself recoverable — the checkpoint's path/checksum are returned
+   in the response `detail`);
+4. for files, stages the restored content and swaps it into place, moving the previous
+   directory aside rather than deleting it, with a best-effort rollback if the final
+   swap itself fails;
+5. for a database, pipes the extracted `.sql` dump into `mysql <db_name>`.
+
+**What restore does not do yet**: restore to a *different* server than the one the
+backup was taken on — the archive currently only ever exists on the originating VPS's
+local disk. This needs either transferring the archive between agents or, once remote
+(S3-compatible) backup storage exists, restoring from that shared location instead.
+See `SYSTEM.md` §19 for the full picture and `TESTING.md` §5 for what's still
+untested (the `db`/`full` restore path needs a real MariaDB to exercise, which this
+project's sandbox doesn't have).
 
 ## 4. Monitoring and alerting
 

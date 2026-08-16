@@ -116,18 +116,34 @@ webhook push-to-deploy, deploy keys, or rollback exist in this codebase yet.
 ### Backup and restoration
 | Feature | Status |
 |---|---|
-| DB/file/full backups | ✅ `backup.run` — checksummed local tar.gz |
+| DB/file/full backups | ✅ `backup.run` — checksummed local tar.gz, dispatched from
+  the dashboard's per-server "Backups" panel and persisted as a `backups` row |
 | Scheduling, retention policies | ⬜ not implemented (backups are on-demand only) |
 | Encryption | ⬜ not implemented (local tar.gz is unencrypted; relies on host
   filesystem permissions today) |
-| Backup verification | 🚧 SHA-256 checksum is recorded and returned; the dashboard
-  does not yet re-verify it automatically |
+| Backup verification | ✅ SHA-256 checksum is recorded at backup time and enforced at
+  restore time — `backup.restore` refuses to restore an archive whose current on-disk
+  checksum doesn't match, rather than only recording the checksum for later
+  inspection |
 | Local storage | ✅ |
 | S3-compatible / Amazon S3 / R2 / B2 / Spaces / Wasabi | ⬜ Phase 2 |
-| Restore (same or another server) | ⬜ **not implemented — there is no restore
-  capability yet, only `backup.run`.** This is the most significant gap relative to
-  the "backup and restore model" the product plan calls for; see `OPERATIONS.md`. |
-| Pre-restore checkpoints, progress tracking, failure recovery | ⬜ depends on restore |
+| Restore (same server) | ✅ `backup.restore` — always restores using the exact
+  site/database/checksum recorded for that backup (never a caller-supplied override),
+  files are staged and swapped into place rather than overwritten in place |
+| Restore to a **different** server | ⬜ not implemented — `backup.restore` currently
+  only runs on the same agent connection the backup was made through; cross-server
+  restore would need the archive (or its storage backend, once remote storage exists)
+  to be fetchable from a different server |
+| Pre-restore checkpoints | ✅ `backup.restore` takes a fresh checkpoint backup of the
+  current file state before overwriting anything, unless explicitly skipped |
+| Progress tracking | 🚧 the agent reports incremental `progress()` messages
+  (checksum verification, checkpoint, extract, restore, swap) as intermediate
+  `TaskEvent`s today, but the dashboard only surfaces the terminal result, not a live
+  progress stream |
+| Failure recovery | ✅ `atomicSwapDir` (`packages/capabilities/backup.go`) stages the
+  restored content beside the target and moves the previous content aside rather than
+  deleting it; if the final swap itself fails, it attempts to roll the original back
+  into place rather than leaving the site directory missing |
 
 ### Security and monitoring
 See `SECURITY.md` for the detailed, section-by-section implemented-vs-planned
@@ -145,11 +161,11 @@ Phase boundaries and full milestone/estimate tables are in `product-plan.md` §6
 is the condensed status:
 
 - **Phase 1 — secure working foundation:** ~90% of the *capability* surface exists and
-  is tested per-capability (see the tables above); the biggest real gaps are backup
-  **restore**, an automated test suite (now added, see `TESTING.md`), SSL auto-renewal,
-  and agent cert auto-rotation. Not "GA-ready" yet, but the architecture and security
-  primitives it depends on (mTLS, allow-listed capabilities, per-app isolation, audit
-  log) are real and proven, not stubs.
+  is tested per-capability (see the tables above); backup **restore** (§19) is now
+  implemented and tested, same-server only. Remaining real gaps are cross-server
+  restore, SSL auto-renewal, and agent cert auto-rotation. Not "GA-ready" yet, but the
+  architecture and security primitives it depends on (mTLS, allow-listed capabilities,
+  per-app isolation, audit log) are real and proven, not stubs.
 - **Phase 2 — professional server management:** not started. Git deployment,
   cron/process management, SSH/firewall management UI, remote backups, cross-server
   migration all remain ⬜.
@@ -233,11 +249,18 @@ EXISTS`, applied on every `openDB` call — idempotent, no separate migration to
 | `revoked_certs` | cert serial → server, revoked-at (checked on every gateway handshake) |
 | `audit_log` | append-only: seq, timestamp, server, actor, action, detail |
 | `sites` | id, server, domain, system user, docroot, app type, PHP version, status |
-| `backups` | id, server, site, scope, path, size, sha256, status, created_at |
+| `backups` | id, server, site, scope, path, size, sha256, db_name, status, created_at |
 
 No ORM — every query is a small, explicit SQL statement in `store.go`. All secrets
 (session tokens, bootstrap tokens) are stored only as SHA-256 hashes; passwords use
 bcrypt (cost 12); nothing is stored in plaintext.
+
+`db_name` on `backups` was added after the table's initial `CREATE TABLE IF NOT
+EXISTS` definition — since there's no migration tool yet (see §17's dependency
+philosophy and `OPERATIONS.md`), `openDB` also runs a short, idempotent list of
+best-effort `ALTER TABLE ... ADD COLUMN` statements (`applyMigrations` in `db.go`)
+that ignore a "duplicate column" failure. Any future additive column follows the same
+pattern until a real migration tool is adopted.
 
 ## 9. API endpoints
 
@@ -278,9 +301,8 @@ Current capability list: `system.ping`, `service.control`, `diagnostics.basic`,
 `stack.install`, `site.create`, `site.set_php_version`, `site.set_status`,
 `app.wordpress_install`, `ssl.issue_letsencrypt`, `ssl.install_custom`, `db.create`,
 `db.delete`, `db.list`, `file.list`, `file.read`, `file.write`, `file.delete`,
-`backup.run`, `logs.tail`. Notably absent (by design, until reviewed and added):
-`backup.restore`, `git.deploy`, `cron.upsert`, `ssh.*`, `firewall.*`,
-`agent.self_update`.
+`backup.run`, `backup.restore`, `logs.tail`. Notably absent (by design, until reviewed
+and added): `git.deploy`, `cron.upsert`, `ssh.*`, `firewall.*`, `agent.self_update`.
 
 ## 13. Installation and deployment
 
@@ -343,12 +365,42 @@ defenses on the file manager (`resolveScopedPath`).
 
 ## 19. Backup and restore model
 
-**Backup**: implemented (`backup.run` — local, checksummed tar.gz of DB and/or files).
-**Restore**: **not implemented**. This is the single largest functional gap in the
-Phase 1 feature set relative to what the product plan calls for, and should be the
-next priority after this documentation pass — see `OPERATIONS.md` §Backup and restore
-for the concrete plan (a `backup.restore` capability mirroring `backup.run`'s
-validation approach, plus a pre-restore checkpoint step).
+**Backup**: implemented (`backup.run` — local, checksummed tar.gz of DB and/or files),
+reachable from the dashboard's per-server "Backups" panel
+(`POST /api/v1/servers/{id}/backups`), which persists a `backups` row only after the
+agent confirms success (`apps/controlplane/backups.go`).
+
+**Restore**: implemented (`backup.restore`, `packages/capabilities/backup.go`), same
+server only. Given a `backups` row, `POST /api/v1/servers/{id}/backups/{backupId}/restore`
+dispatches `backup.restore` with the exact `site_id`/`db_name`/`sha256` recorded at
+backup time — never a value the caller can override, so a restore can't be pointed at
+the wrong database or a tampered archive. On the agent side, `backup.restore`:
+
+1. confines `backup_path` to `backupBaseDir` (`/var/backups/serverpanel`) — it will
+   never restore from an arbitrary filesystem path;
+2. verifies the archive's current SHA-256 against the checksum recorded at backup
+   time, refusing to proceed on a mismatch;
+3. takes a fresh checkpoint backup of the current file state before touching anything
+   (unless explicitly skipped), so a restore that turns out to be wrong is itself
+   recoverable;
+4. for a `files`/`full` restore, extracts into a temp directory, stages it beside the
+   live site directory with `cp -a` (works across filesystems, unlike `os.Rename`),
+   then swaps it into place with same-directory renames — the previous directory is
+   moved aside, not deleted, and a failed final swap attempts to move it back rather
+   than leaving the site missing;
+5. for a `db`/`full` restore, locates the `.sql` dump inside the extracted archive and
+   pipes it into `mysql <db_name>` (a validated identifier) on stdin.
+
+Covered by `packages/capabilities/backup_test.go`, including a real end-to-end
+files-scope round trip (back up → mutate → restore → verify original content came
+back, and that the pre-restore checkpoint captured the mutated state) — see
+`TESTING.md`.
+
+**What's still missing**: restore to a **different** server than the one backed up
+(needs either shipping the archive between agents or, once implemented, a shared
+remote storage backend — see the Backup and restoration feature table above),
+scheduled/retention-managed backups, encryption at rest, and remote (S3-compatible)
+storage. All ⬜, Phase 2 per `product-plan.md` §9.
 
 ## 20. Monitoring and alerting
 
@@ -359,7 +411,11 @@ all ⬜, scoped to Phase 2 per `product-plan.md` §9.
 
 ## 21. Known limitations
 
-- No backup **restore** capability (see §19).
+- Backup restore only works on the same server a backup was taken on — no
+  cross-server restore yet (see §19).
+- No backup scheduling/retention policy, encryption at rest, or remote
+  (S3-compatible) storage backend yet — backups are on-demand, unencrypted, local
+  tar.gz files only (see §19).
 - No on-disk agent task journal — a task in flight when the agent process restarts is
   lost, not resumed (see `ARCHITECTURE.md` §4 "As built").
 - No agent certificate auto-renewal before its 30-day expiry (see `SECURITY.md` §2).

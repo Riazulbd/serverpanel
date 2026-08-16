@@ -244,4 +244,63 @@ func TestCreateAndListSites(t *testing.T) {
 	if sites[0].Domain != "example.sslip.io" {
 		t.Fatalf("domain = %q, want example.sslip.io", sites[0].Domain)
 	}
+
+	got, ok := st.getSite(sites[0].ID)
+	if !ok {
+		t.Fatal("getSite: expected to find the just-created site")
+	}
+	if got.Docroot != "/home/sites/sp_abc123/public" {
+		t.Fatalf("getSite docroot = %q, want /home/sites/sp_abc123/public", got.Docroot)
+	}
+	if _, ok := st.getSite("site_does-not-exist"); ok {
+		t.Fatal("getSite: expected an unknown site ID to report not-found")
+	}
+}
+
+func TestCreateAndListBackups(t *testing.T) {
+	st := newTestStore(t)
+	id, _, err := st.createServer("web-7", "", nil, time.Hour, "admin@example.com")
+	if err != nil {
+		t.Fatalf("createServer: %v", err)
+	}
+	site, err := st.createSite(id, "example.sslip.io", "sp_abc123", "/home/sites/sp_abc123/public", "static", "")
+	if err != nil {
+		t.Fatalf("createSite: %v", err)
+	}
+
+	rec, err := st.createBackup(id, site.ID, "full", "/var/backups/serverpanel/x-full-20260101T000000Z.tar.gz", 1024, "deadbeef", "site_db", "completed")
+	if err != nil {
+		t.Fatalf("createBackup: %v", err)
+	}
+	if rec.ID == "" {
+		t.Fatal("createBackup: expected a generated ID")
+	}
+
+	backups := st.listBackups(id)
+	if len(backups) != 1 {
+		t.Fatalf("listBackups returned %d backups, want 1", len(backups))
+	}
+	if backups[0].DBName != "site_db" || backups[0].SHA256 != "deadbeef" {
+		t.Fatalf("listBackups[0] = %+v, missing expected fields", backups[0])
+	}
+
+	got, ok := st.getBackup(rec.ID)
+	if !ok {
+		t.Fatal("getBackup: expected to find the just-created backup")
+	}
+	if got.SiteID != site.ID || got.ServerID != id {
+		t.Fatalf("getBackup returned %+v, want site_id=%s server_id=%s", got, site.ID, id)
+	}
+	if _, ok := st.getBackup("bkp_does-not-exist"); ok {
+		t.Fatal("getBackup: expected an unknown backup ID to report not-found")
+	}
+
+	// listBackups must be scoped to the server it's asked about.
+	otherID, _, err := st.createServer("web-8", "", nil, time.Hour, "admin@example.com")
+	if err != nil {
+		t.Fatalf("createServer: %v", err)
+	}
+	if got := st.listBackups(otherID); len(got) != 0 {
+		t.Fatalf("listBackups for unrelated server returned %d backups, want 0", len(got))
+	}
 }

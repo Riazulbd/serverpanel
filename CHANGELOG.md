@@ -2,6 +2,52 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-16 — Backup restore capability, wired end-to-end
+
+Closes the single largest functional gap flagged in the prior entry below: there was
+no way to restore a backup, only create one.
+
+- **Agent**: added the `backup.restore` capability
+  (`packages/capabilities/backup.go`). It confines `backup_path` to the agent's own
+  backup directory, verifies the archive's SHA-256 against the checksum recorded at
+  backup time before touching anything, takes a fresh pre-restore checkpoint backup of
+  the current state by default, then restores files (staged via `cp -a` and swapped
+  into place with same-directory renames — the previous directory is moved aside, not
+  deleted, with a best-effort rollback if the final swap fails) and/or a database
+  (extracted `.sql` dump piped into `mysql <db_name>` on stdin). Refactored the shared
+  dump/tar/checksum logic out of `handleBackupRun` into `createBackupArchive` so both
+  the regular backup path and the restore path's checkpoint step use the same,
+  already-tested code.
+- **Control plane**: added `POST /api/v1/servers/{id}/backups` (dispatches
+  `backup.run`, persists a `backups` row only on success — same pattern as
+  `handleCreateSite`), `GET /api/v1/servers/{id}/backups`, and
+  `POST /api/v1/servers/{id}/backups/{backupId}/restore` (dispatches `backup.restore`
+  using the exact site/database/checksum recorded for that backup — never a
+  caller-supplied override, so a restore can't be pointed at the wrong database or a
+  tampered archive). Added a `db_name` column to the `backups` table via a new
+  best-effort `applyMigrations` step in `db.go` (no migration tool exists yet — see
+  `docs/SYSTEM.md` §8), since the column postdates the table's original
+  `CREATE TABLE IF NOT EXISTS`.
+- **Dashboard**: added a "Backups" panel to the server-detail view — start a
+  files/db/full backup against a site, see recorded backups with size and checksum,
+  and restore one with a confirmation prompt.
+- **Tests**: 8 new test functions, all against real filesystem/SQLite operations, no
+  mocks — including a full end-to-end round trip in
+  `packages/capabilities/backup_test.go` that backs up a real site directory, mutates
+  it (simulating a bad deploy), restores it, and confirms both that the original
+  content came back *and* that the pre-restore checkpoint captured the mutated state,
+  not the restored one. `go test ./...` is now 56 test functions (was 48), all
+  passing; `go build ./...`, `go vet ./...`, and `gofmt -l .` all clean.
+- **Known limitation this doesn't close**: restore only works on the same server a
+  backup was taken on — cross-server restore needs either transferring the archive
+  between agents or remote (S3-compatible) storage, neither of which exist yet. The
+  `db`/`full` scope of both `backup.run` and `backup.restore` also still has no
+  automated test coverage, since this environment has no MariaDB installed to restore
+  into — see `docs/TESTING.md` §5 for the recommended next step (a scripted real-VPS/
+  container integration pass).
+- Updated `docs/SYSTEM.md`, `docs/API.md`, `docs/OPERATIONS.md`,
+  `docs/ARCHITECTURE.md`, and `docs/TESTING.md` to reflect all of the above.
+
 ## 2026-08-14 — Automated test suite, doc restructuring
 
 - Added `go test` coverage across `apps/controlplane` and `packages/capabilities`
