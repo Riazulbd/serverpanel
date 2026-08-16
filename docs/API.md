@@ -43,6 +43,9 @@ protected route; there is no route that skips it by omission.
 | `POST` | `/api/v1/servers/{id}/tasks` | Dispatch an arbitrary allow-listed capability (see §3) |
 | `GET` | `/api/v1/servers/{id}/sites` | List sites on a server |
 | `POST` | `/api/v1/servers/{id}/sites` | Dispatch `site.create` and persist the resulting site record |
+| `GET` | `/api/v1/servers/{id}/backups` | List backups recorded for a server |
+| `POST` | `/api/v1/servers/{id}/backups` | Dispatch `backup.run` and persist the resulting backup record |
+| `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` against a recorded backup |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -102,6 +105,34 @@ Dispatches `site.create`, and only on the agent reporting success, persists a `s
 row. → `201 {"site": {...siteRecord}, "temp_domain": "<user>.<ip-with-dashes>.sslip.io"}`.
 A dispatch failure or agent-side failure never leaves an orphan site record — the
 row is written after (and only after) the agent confirms success.
+
+### `POST /api/v1/servers/{id}/backups`
+```json
+{"scope": "full", "site_root": "/home/sites/site_example", "db_name": "example_wp"}
+```
+Dispatches `backup.run`, and only on the agent reporting success, persists a `backups`
+row (path, size, SHA-256). → `201 {...backupRecord}`. `scope` is one of `db`, `files`,
+`full`; `site_root` is required for `files`/`full`, `db_name` for `db`/`full`. As with
+`site.create`, a dispatch or agent-side failure never leaves an orphan backup record.
+
+### `GET /api/v1/servers/{id}/backups`
+→ `200 [...backupRecord]`, newest first.
+
+### `POST /api/v1/servers/{id}/backups/{backupId}/restore`
+```json
+{"restore_site_root": "/home/sites/site_example", "restore_system_user": "site_example",
+ "restore_db_name": "example_wp", "skip_checkpoint": false}
+```
+Looks up `backupId` (must belong to server `{id}` — a 404 if not, before any dispatch
+happens), then dispatches `backup.restore` using the *recorded* archive path and
+SHA-256 (never a path taken from the request body). The restore target
+(`restore_site_root`/`restore_system_user`/`restore_db_name`) can point at the same
+site/server the backup came from, or a different one (cross-server/cross-site
+restore). Unless `skip_checkpoint` is `true`, the agent snapshots whatever currently
+occupies the restore target before overwriting it. → `200` with the agent's JSON
+restore result (`scope`, `archive_path`, `checksum_verified`, `checkpoint_path`,
+`restored_db_name`/`restored_site_root`, `restored_at`). Backup not found → `404`;
+agent-side failure (including a checksum mismatch) → `422`.
 
 ### `POST /agents/register`
 ```json

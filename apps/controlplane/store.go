@@ -389,3 +389,78 @@ func randID(prefix string) string {
 	n, _ := rand.Int(rand.Reader, big.NewInt(1<<62))
 	return fmt.Sprintf("%s_%x", prefix, n)
 }
+
+// backupRecord mirrors the "backups" table (db.go) — the durable record of
+// a backup.run archive that a later backup.restore task references by ID
+// rather than by a caller-supplied path, so a restore always targets a
+// backup this control plane actually knows about and has a recorded
+// checksum for.
+type backupRecord struct {
+	ID        string
+	ServerID  string
+	SiteID    string
+	Scope     string
+	Path      string
+	SizeBytes int64
+	SHA256    string
+	Status    string
+	CreatedAt time.Time
+}
+
+func (s *store) createBackup(serverID, siteID, scope, path string, sizeBytes int64, sha256sum, status string) (*backupRecord, error) {
+	rec := &backupRecord{
+		ID: randID("backup"), ServerID: serverID, SiteID: siteID, Scope: scope, Path: path,
+		SizeBytes: sizeBytes, SHA256: sha256sum, Status: status, CreatedAt: time.Now().UTC(),
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO backups (id, server_id, site_id, scope, path, size_bytes, sha256, status, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		rec.ID, rec.ServerID, rec.SiteID, rec.Scope, rec.Path, rec.SizeBytes, rec.SHA256, rec.Status,
+		rec.CreatedAt.Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return nil, err
+	}
+	return rec, nil
+}
+
+func (s *store) listBackups(serverID string) []*backupRecord {
+	rows, err := s.db.Query(
+		`SELECT id, server_id, site_id, scope, path, size_bytes, sha256, status, created_at
+		 FROM backups WHERE server_id = ? ORDER BY created_at DESC`, serverID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var out []*backupRecord
+	for rows.Next() {
+		var rec backupRecord
+		var createdAt string
+		if err := rows.Scan(&rec.ID, &rec.ServerID, &rec.SiteID, &rec.Scope, &rec.Path,
+			&rec.SizeBytes, &rec.SHA256, &rec.Status, &createdAt); err != nil {
+			continue
+		}
+		rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+		out = append(out, &rec)
+	}
+	return out
+}
+
+// getBackup looks up one backup scoped to serverID, so a restore request
+// for backupID can never be redirected at a backup belonging to a server
+// the caller didn't ask for.
+func (s *store) getBackup(serverID, backupID string) (*backupRecord, bool) {
+	var rec backupRecord
+	var createdAt string
+	err := s.db.QueryRow(
+		`SELECT id, server_id, site_id, scope, path, size_bytes, sha256, status, created_at
+		 FROM backups WHERE server_id = ? AND id = ?`, serverID, backupID,
+	).Scan(&rec.ID, &rec.ServerID, &rec.SiteID, &rec.Scope, &rec.Path,
+		&rec.SizeBytes, &rec.SHA256, &rec.Status, &createdAt)
+	if err != nil {
+		return nil, false
+	}
+	rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+	return &rec, true
+}

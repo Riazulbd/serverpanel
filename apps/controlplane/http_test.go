@@ -201,6 +201,51 @@ func TestServerCreateListRevokeFlow(t *testing.T) {
 	}
 }
 
+// TestBackupsListAndRestoreNotFound covers the parts of the backups API
+// that don't require a live connected agent (full backup.run/backup.restore
+// dispatch is exercised in packages/capabilities/backup_test.go against the
+// real capability handlers instead): listing backups for a server that has
+// none, and that restoring a backup ID unknown to this server returns 404
+// rather than ever reaching gateway.dispatch.
+func TestBackupsListAndRestoreNotFound(t *testing.T) {
+	secureCookies = false
+	defer func() { secureCookies = true }()
+
+	a := newTestAPIServer(t)
+	h := a.routes()
+
+	doJSON(t, h, "POST", "/api/v1/auth/signup", map[string]string{
+		"Email": "ops@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	rec := doJSON(t, h, "POST", "/api/v1/auth/login", map[string]string{
+		"Email": "ops@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	cookie := sessionCookie(rec)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers", map[string]any{"Name": "web-9", "Group": ""}, cookie)
+	var created struct {
+		ServerID string `json:"server_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+
+	rec = doJSON(t, h, "GET", "/api/v1/servers/"+created.ServerID+"/backups", nil, cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list backups status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var backups []backupRecord
+	json.Unmarshal(rec.Body.Bytes(), &backups)
+	if len(backups) != 0 {
+		t.Fatalf("expected 0 backups for a fresh server, got %d", len(backups))
+	}
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/backups/backup_nope/restore", map[string]any{
+		"restore_site_root": "/home/sites/site_x", "restore_system_user": "site_x",
+	}, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("restore of an unknown backup status = %d, want 404, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestRegisterEndpointRejectsBadToken(t *testing.T) {
 	a := newTestAPIServer(t)
 	h := a.routes()

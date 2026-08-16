@@ -245,3 +245,46 @@ func TestCreateAndListSites(t *testing.T) {
 		t.Fatalf("domain = %q, want example.sslip.io", sites[0].Domain)
 	}
 }
+
+func TestCreateListAndGetBackups(t *testing.T) {
+	st := newTestStore(t)
+	id, _, err := st.createServer("web-7", "", nil, time.Hour, "admin@example.com")
+	if err != nil {
+		t.Fatalf("createServer: %v", err)
+	}
+	rec, err := st.createBackup(id, "site_abc", "files", "/var/backups/serverpanel/x.tar.gz", 1024, "deadbeef", "completed")
+	if err != nil {
+		t.Fatalf("createBackup: %v", err)
+	}
+
+	backups := st.listBackups(id)
+	if len(backups) != 1 {
+		t.Fatalf("listBackups returned %d backups, want 1", len(backups))
+	}
+	if backups[0].SHA256 != "deadbeef" {
+		t.Fatalf("sha256 = %q, want deadbeef", backups[0].SHA256)
+	}
+
+	got, ok := st.getBackup(id, rec.ID)
+	if !ok {
+		t.Fatal("getBackup: expected to find the backup just created")
+	}
+	if got.Path != "/var/backups/serverpanel/x.tar.gz" {
+		t.Fatalf("path = %q, want the recorded archive path", got.Path)
+	}
+
+	if _, ok := st.getBackup(id, "backup_does_not_exist"); ok {
+		t.Fatal("getBackup: expected an unknown backup ID to be rejected")
+	}
+
+	otherServerID, _, err := st.createServer("web-8", "", nil, time.Hour, "admin@example.com")
+	if err != nil {
+		t.Fatalf("createServer: %v", err)
+	}
+	// A backup must not be fetchable through a different server's ID — this
+	// is the boundary that keeps a restore request from reaching a backup
+	// it doesn't belong to.
+	if _, ok := st.getBackup(otherServerID, rec.ID); ok {
+		t.Fatal("getBackup: expected a backup to be scoped to its own server_id")
+	}
+}
