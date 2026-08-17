@@ -2,6 +2,58 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-17 — Agent certificate auto-renewal
+
+- **Implemented agent certificate auto-renewal**, closing the top item in
+  `SYSTEM.md`'s known-limitations list: agent client certificates were issued with a
+  fixed 30-day TTL and had no renewal path, so every agent required manual
+  re-registration with a fresh bootstrap token roughly once a month — an operational
+  reliability gap on top of the security exposure of that habit becoming routine.
+  Added a three-message renewal protocol to the existing gateway wire protocol
+  (`packages/proto/proto.go`: `MsgRenewRequest`/`MsgRenewResponse`/`MsgRenewConfirm`):
+  the agent (`apps/agent/renewal.go`, checked on connect and every 6h thereafter,
+  triggered within 10 days of expiry) sends a fresh CSR over its already-authenticated
+  mTLS session — no bootstrap token needed; the gateway
+  (`apps/controlplane/gateway.go` `handleRenewRequest`) signs a new certificate bound
+  to the *session's own verified identity*, never to whatever CommonName the CSR
+  itself claims (guards against a compromised/buggy agent renewing into a different
+  server's identity); the agent atomically persists the new cert/key (temp file +
+  rename) and only then sends `MsgRenewConfirm`, at which point the gateway
+  (`handleRenewConfirm`) revokes the certificate that was replaced. This ordering is
+  the load-bearing safety property: if the response or confirm is ever lost, the old
+  certificate simply keeps working until its own natural expiry and the agent retries
+  on its next check — there's no message-loss window that can strand an agent
+  certificate-less. See `SECURITY.md` §2 for the full protocol writeup.
+- Fixed a latent bug found while testing the above: `gateway.serve`'s accept loop
+  treated every `Accept` error the same (`log` + `continue`), including a permanently
+  closed listener — which would busy-loop indefinitely, pegging a CPU core and
+  flooding logs, instead of returning. Now distinguishes a closed listener
+  (`errors.Is(err, net.ErrClosed)`, returns) from a transient error (logs, sleeps
+  100ms, retries).
+- Fixed a pre-existing (latent, never previously triggered in practice) data race:
+  `heartbeatLoop` and per-task `handleTask` both wrote to the agent's shared
+  `*json.Encoder` from separate goroutines with no synchronization; adding a third
+  concurrent writer (the new renewal loop) made this worth fixing properly rather than
+  compounding it. All three now go through a single mutex-guarded `safeEncoder`
+  (`apps/agent/connect.go`).
+- Split `gateway.listenAndServe(addr)` into listener creation + a new `gateway.serve(ln
+  net.Listener)`, so tests can bind an ephemeral port and read back the real address
+  instead of guessing one — used by the new tests below to drive a real mTLS session
+  end to end rather than only exercising `handleConn`'s internals.
+- Added 3 new tests in `apps/controlplane/gateway_test.go`, all driving a real TLS
+  client cert handshake against a real in-process CA and gateway (not mocked):
+  `TestCertificateRenewalFlow` (full renew→confirm round trip, including the
+  CSR-subject-spoofing guard and the "not revoked until confirmed" property),
+  `TestRenewConfirmWithoutPendingRenewalIsNoop` (a stray confirm can't revoke a live
+  certificate), and `TestServeReturnsOnClosedListener` (regression test for the
+  accept-loop fix above). Full suite: `go build ./...`, `go vet ./...`,
+  `go test ./...`, and `go test ./... -race` all pass clean (64 test functions, up
+  from 61).
+- Updated `SECURITY.md` §2 (marked cert auto-rotation **implemented**, replacing the
+  prior "not yet implemented" note with the actual protocol), `SYSTEM.md` (§7, §21,
+  §3), `API.md` §3 (new wire-protocol messages), `TESTING.md` §1/§2, and
+  `SERVERAVATAR_PARITY.md` (SRV-001).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

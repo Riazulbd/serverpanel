@@ -52,8 +52,8 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | User/organization management | 🚧 single-user model only; no orgs/teams yet |
 | Multiple-server management | ✅ create/list/get/revoke, search/filter in UI |
 | Secure agent install/registration | ✅ bootstrap token → mTLS cert exchange |
-| Agent identity, cert rotation, revocation | 🚧 issuance + revocation done; no
-  auto-renewal before expiry yet (see `SECURITY.md` §2) |
+| Agent identity, cert rotation, revocation | ✅ issuance, revocation, and auto-renewal
+  before expiry are all implemented (see `SECURITY.md` §2) |
 | Server health monitoring | ✅ heartbeat: uptime, load, mem%, disk% |
 | Server groups/tags/metadata | ✅ `group`, `tags[]` on server records |
 | Background job queue | ⬜ task dispatch is synchronous request/response today,
@@ -164,9 +164,10 @@ Phase boundaries and full milestone/estimate tables are in `product-plan.md` §6
 is the condensed status:
 
 - **Phase 1 — secure working foundation:** ~90% of the *capability* surface exists and
-  is tested per-capability (see the tables above); the biggest real gaps are backup
-  **restore**, an automated test suite (now added, see `TESTING.md`), SSL auto-renewal,
-  and agent cert auto-rotation. Not "GA-ready" yet, but the architecture and security
+  is tested per-capability (see the tables above); backup **restore**, an automated
+  test suite, and agent certificate auto-rotation have since closed — the remaining
+  real gap is SSL auto-renewal (certbot's own renewal timer isn't wired up by
+  `stack.install` yet). Not "GA-ready" yet, but the architecture and security
   primitives it depends on (mTLS, allow-listed capabilities, per-app isolation, audit
   log) are real and proven, not stubs.
 - **Phase 2 — professional server management:** not started. Git deployment,
@@ -235,6 +236,17 @@ Unix-socket MySQL driver (no cgo, no external runtime deps). Lifecycle:
    `TaskEvent`s.
 3. **Reconnect**: on any connection loss, `main.go`'s loop retries with exponential
    backoff (1s → 30s cap) until the process is signaled to stop (`SIGTERM`/`SIGINT`).
+4. **Certificate renewal**: `renewal.go`'s `renewalLoop` runs alongside the connection
+   for as long as it's up, checking the current cert's expiry on connect and every 6h
+   thereafter; within 10 days of expiry it requests, receives, and durably persists a
+   replacement over the live session — see `SECURITY.md` §2 for the full protocol and
+   its fail-safe ordering.
+
+All writes to the shared connection (`heartbeatLoop`, per-task `handleTask`,
+`renewalLoop`) go through a single mutex-guarded `safeEncoder`, since they run as
+concurrent goroutines over one `net.Conn` and unsynchronized concurrent
+`json.Encoder.Encode` calls could otherwise interleave partial writes and corrupt the
+newline-delimited JSON stream (`connect.go`).
 
 The agent has **no shell-exec entry point in its protocol or code** — see §8.
 
@@ -384,7 +396,6 @@ all ⬜, scoped to Phase 2 per `product-plan.md` §9.
 - No backup scheduling/retention policy — backups are on-demand only.
 - No on-disk agent task journal — a task in flight when the agent process restarts is
   lost, not resumed (see `ARCHITECTURE.md` §4 "As built").
-- No agent certificate auto-renewal before its 30-day expiry (see `SECURITY.md` §2).
 - No agent self-update mechanism (see `SECURITY.md` §3).
 - No background job queue — task dispatch is synchronous and bounded by a 120s HTTP
   timeout; this will not scale past a moderate number of concurrent long-running tasks

@@ -172,6 +172,35 @@ func (s *store) markIssuedCert(serverID, serial string) {
 	s.log(serverID, "", "agent.registered", fmt.Sprintf("cert_serial=%s", serial))
 }
 
+// renewCert records the serial of a certificate issued to replace an
+// agent's about-to-expire one (see gateway.go handleRenewRequest). Unlike
+// markIssuedCert this never touches status — a renewal happens over an
+// already-connected session, so the server's connected/offline state is
+// unaffected by it. The old serial is intentionally left out of
+// revoked_certs (see handleRenewRequest's doc comment) so it keeps working
+// until it naturally expires.
+func (s *store) renewCert(serverID, serial string) {
+	s.db.Exec(`UPDATE servers SET cert_serial = ? WHERE id = ?`, serial, serverID)
+	s.log(serverID, "", "agent.cert_renewed", fmt.Sprintf("cert_serial=%s", serial))
+}
+
+// revokeCertSerial adds a single certificate serial to the revocation list
+// without touching the server's connected/offline status or its current
+// cert_serial pointer — used when a renewed-away-from certificate is
+// confirmed no longer needed (see gateway.go handleRenewConfirm), as
+// opposed to revokeServer which represents an operator actively cutting off
+// an agent's access entirely.
+func (s *store) revokeCertSerial(serverID, serial string) {
+	if serial == "" {
+		return
+	}
+	s.db.Exec(
+		`INSERT OR REPLACE INTO revoked_certs (serial, server_id, revoked_at) VALUES (?, ?, ?)`,
+		serial, serverID, time.Now().UTC().Format(time.RFC3339Nano),
+	)
+	s.log(serverID, "", "agent.cert_renewal_confirmed", fmt.Sprintf("revoked_serial=%s", serial))
+}
+
 func (s *store) isRevoked(serial string) bool {
 	var n int
 	s.db.QueryRow(`SELECT COUNT(1) FROM revoked_certs WHERE serial = ?`, serial).Scan(&n)

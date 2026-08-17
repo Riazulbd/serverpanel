@@ -12,6 +12,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/riazulbd/serverpanel/packages/capabilities"
@@ -20,13 +21,30 @@ import (
 
 const agentVersion = "0.1.0-dev"
 
+// safeEncoder serializes writes to the connection's JSON encoder. Multiple
+// goroutines send Envelopes concurrently over the same connection —
+// heartbeatLoop, one handleTask per in-flight task, and renewalLoop — and
+// without a shared lock, concurrent Encode calls could interleave partial
+// writes to the underlying net.Conn and corrupt the newline-delimited JSON
+// stream the gateway is decoding on the other end.
+type safeEncoder struct {
+	mu  sync.Mutex
+	enc *json.Encoder
+}
+
+func (s *safeEncoder) Encode(v any) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.enc.Encode(v)
+}
+
 // runConnection maintains one mTLS session to the gateway: sends Hello,
 // then loops sending periodic heartbeats and executing any Task the
 // gateway sends, replying with TaskEvents. The hosted services the agent
 // manages (nginx, php-fpm, mariadb, ...) run under systemd independent of
 // this connection — see docs/architecture.md §2 — so a dropped connection
 // here degrades orchestration/observability only, never site serving.
-func runConnection(ctx context.Context, id *identity, reg capabilities.Registry) error {
+func runConnection(ctx context.Context, id *identity, dataDir string, reg capabilities.Registry) error {
 	cert, err := tls.X509KeyPair(id.CertPEM, id.KeyPEM)
 	if err != nil {
 		return err
@@ -49,7 +67,7 @@ func runConnection(ctx context.Context, id *identity, reg capabilities.Registry)
 	}
 	defer conn.Close()
 
-	enc := json.NewEncoder(conn)
+	enc := &safeEncoder{enc: json.NewEncoder(conn)}
 	dec := json.NewDecoder(bufio.NewReader(conn))
 
 	if err := enc.Encode(proto.Envelope{Type: proto.MsgHello, Hello: &proto.Hello{ServerID: id.ServerID, AgentVersion: agentVersion}}); err != nil {
@@ -72,19 +90,35 @@ func runConnection(ctx context.Context, id *identity, reg capabilities.Registry)
 
 	go heartbeatLoop(ctx, enc)
 
+	renewCh := make(chan proto.RenewResponse, 1)
+	go renewalLoop(ctx, enc, renewCh, id, dataDir)
+
 	for {
 		var env proto.Envelope
 		if err := dec.Decode(&env); err != nil {
 			return err
 		}
-		if env.Type != proto.MsgTask || env.Task == nil {
-			continue
+		switch env.Type {
+		case proto.MsgTask:
+			if env.Task != nil {
+				go handleTask(ctx, enc, reg, *env.Task)
+			}
+		case proto.MsgRenewResponse:
+			if env.RenewResponse != nil {
+				select {
+				case renewCh <- *env.RenewResponse:
+				default:
+					// A response arrived with no renewal in flight (e.g. a
+					// duplicate, or the wait in maybeRenewCertificate
+					// already timed out) — drop it rather than block the
+					// read loop.
+				}
+			}
 		}
-		go handleTask(ctx, enc, reg, *env.Task)
 	}
 }
 
-func handleTask(ctx context.Context, enc *json.Encoder, reg capabilities.Registry, task proto.Task) {
+func handleTask(ctx context.Context, enc *safeEncoder, reg capabilities.Registry, task proto.Task) {
 	send := func(ev proto.TaskEvent) {
 		ev.TaskID = task.ID
 		ev.At = time.Now().UTC()
@@ -111,7 +145,7 @@ func handleTask(ctx context.Context, enc *json.Encoder, reg capabilities.Registr
 	send(proto.TaskEvent{Status: proto.TaskSucceeded, Message: "ok", Detail: detail})
 }
 
-func heartbeatLoop(ctx context.Context, enc *json.Encoder) {
+func heartbeatLoop(ctx context.Context, enc *safeEncoder) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for {
