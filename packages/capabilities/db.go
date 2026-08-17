@@ -3,18 +3,22 @@ package capabilities
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"regexp"
 
 	_ "github.com/go-sql-driver/mysql"
 )
 
-// identifierRe is the allow-list for database/user names. MySQL has no
+// IdentifierRe is the allow-list for database/user names. MySQL has no
 // placeholder syntax for identifiers (only for values), so the standard
 // safe approach — used here — is to validate against a strict charset
 // before backtick-quoting and interpolating, never to accept an arbitrary
-// string into a CREATE DATABASE/USER statement.
-var identifierRe = regexp.MustCompile(`^[a-z][a-z0-9_]{0,30}$`)
+// string into a CREATE DATABASE/USER statement. Exported so the control
+// plane can apply the identical rule before dispatch, for a fast 400
+// instead of round-tripping to the agent to learn a name is invalid (see
+// apps/controlplane/databases.go).
+var IdentifierRe = regexp.MustCompile(`^[a-z][a-z0-9_]{0,30}$`)
 
 func mariaDBConn() (*sql.DB, error) {
 	// Connects as root over the local Unix socket, matching MariaDB's
@@ -34,16 +38,27 @@ func mariaDBConn() (*sql.DB, error) {
 	return sql.Open("mysql", "root@unix(/var/run/mysqld/mysqld.sock)/?interpolateParams=true")
 }
 
+// dbResult is the structured detail handleDBCreate/handleDBDelete report,
+// mirroring backup.go's backupResult — the control plane parses this JSON
+// rather than a caller having to scrape a human-readable message, and it
+// deliberately never includes the password (the caller already has it; it
+// is never echoed back through a task result that might land in logs).
+type dbResult struct {
+	Name  string `json:"name"`
+	Owner string `json:"owner_user"`
+	Host  string `json:"host"`
+}
+
 func handleDBCreate(ctx context.Context, params map[string]any, progress Progress) (string, error) {
 	name, _ := params["name"].(string)
 	owner, _ := params["owner_user"].(string)
 	password, _ := params["owner_password"].(string)
 
-	if !identifierRe.MatchString(name) {
-		return "", fmt.Errorf("invalid database name %q (must match %s)", name, identifierRe.String())
+	if !IdentifierRe.MatchString(name) {
+		return "", fmt.Errorf("invalid database name %q (must match %s)", name, IdentifierRe.String())
 	}
-	if !identifierRe.MatchString(owner) {
-		return "", fmt.Errorf("invalid owner_user %q (must match %s)", owner, identifierRe.String())
+	if !IdentifierRe.MatchString(owner) {
+		return "", fmt.Errorf("invalid owner_user %q (must match %s)", owner, IdentifierRe.String())
 	}
 	if len(password) < 16 {
 		return "", fmt.Errorf("owner_password must be at least 16 characters")
@@ -75,13 +90,17 @@ func handleDBCreate(ctx context.Context, params map[string]any, progress Progres
 		return "", fmt.Errorf("flush privileges: %w", err)
 	}
 
-	return fmt.Sprintf("database %q created, owned by user %q with grants scoped to that database only", name, owner), nil
+	detail, err := json.Marshal(dbResult{Name: name, Owner: owner, Host: "localhost"})
+	if err != nil {
+		return "", err
+	}
+	return string(detail), nil
 }
 
 func handleDBDelete(ctx context.Context, params map[string]any, progress Progress) (string, error) {
 	name, _ := params["name"].(string)
 	owner, _ := params["owner_user"].(string)
-	if !identifierRe.MatchString(name) {
+	if !IdentifierRe.MatchString(name) {
 		return "", fmt.Errorf("invalid database name %q", name)
 	}
 
@@ -95,12 +114,17 @@ func handleDBDelete(ctx context.Context, params map[string]any, progress Progres
 		return "", fmt.Errorf("drop database: %w", err)
 	}
 	if owner != "" {
-		if !identifierRe.MatchString(owner) {
+		if !IdentifierRe.MatchString(owner) {
 			return "", fmt.Errorf("invalid owner_user %q", owner)
 		}
 		db.ExecContext(ctx, fmt.Sprintf("DROP USER IF EXISTS `%s`@'localhost'", owner))
 	}
-	return fmt.Sprintf("database %q deleted", name), nil
+
+	detail, err := json.Marshal(dbResult{Name: name, Owner: owner, Host: "localhost"})
+	if err != nil {
+		return "", err
+	}
+	return string(detail), nil
 }
 
 func handleDBList(ctx context.Context, params map[string]any, progress Progress) (string, error) {

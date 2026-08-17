@@ -2,6 +2,51 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-17 — Database management: control-plane persistence and dashboard UI
+
+- **Closed the DB-001 gap flagged as the recommended next iteration** in the previous
+  entry: `db.create`/`db.delete` existed only as agent capabilities reachable through
+  generic task dispatch, with no control-plane record and no dedicated UI — the same
+  gap `backups` had before the restore work above closed it. Applied the identical
+  dispatch-then-persist-on-success pattern.
+- Added a `databases` table (`server_id`, `name`, `owner_user`, `host`, `created_at`,
+  unique on `server_id`+`name`) and `createDatabase`/`listDatabases`/`getDatabase`/
+  `deleteDatabase` store methods, each scoped by server ID the same way `getSite`/
+  `getBackup` are.
+- Added three endpoints: `POST`/`GET /api/v1/servers/{id}/databases` and
+  `DELETE /api/v1/servers/{id}/databases/{dbId}`. `handleCreateDatabase` generates the
+  owner user's password server-side (`crypto/rand`, 192 bits) — never accepted from the
+  client — dispatches `db.create`, and persists the record only once the agent confirms
+  success; the password is returned exactly once in the response and is never written
+  to the `databases` table or the audit log. `handleDeleteDatabase` reads the recorded
+  `name`/`owner_user` (never free-form client input) and only removes the row once
+  `db.delete` confirms success.
+- Changed `handleDBCreate`/`handleDBDelete` (`packages/capabilities/db.go`) to return
+  structured JSON (`dbResult`: `name`, `owner_user`, `host` — deliberately no password
+  field) instead of a human-readable string, so the control plane can parse the result
+  instead of scraping text; exported the identifier allow-list as `capabilities.IdentifierRe`
+  so the control plane can apply the identical rule before dispatch (a bad name now gets
+  an immediate `400` instead of a round trip to the agent).
+- Added a "Databases" panel to the server-detail dashboard view: a table, a "+ New
+  database" modal (name only — owner user and password are generated automatically,
+  with the password shown exactly once in a copy-now dialog), and a "Delete" button
+  with a destructive-action confirmation.
+- Added 7 new capability-layer tests (`db_test.go`: invalid name/owner/short-password
+  rejection for both create and delete, `IdentifierRe` accept/reject boundary, and the
+  `dbResult` JSON shape including a check that it never contains a password field) and
+  3 new control-plane tests (database CRUD round trip and cross-server scoping,
+  per-server name uniqueness, and an HTTP boundary/validation test mirroring the
+  backup-request one — bad name → `400`, well-formed request with no agent connected →
+  `502` proving validation happens before dispatch, empty list, delete-of-unrecorded
+  database → `404`). Full suite: 71 test functions, `go vet`/`gofmt` clean.
+- Updated `SYSTEM.md`, `API.md`, `TESTING.md`, and `SERVERAVATAR_PARITY.md` (DB-001)
+  to reflect the new persistence/UI layer. Real MariaDB SQL execution inside
+  `db.create`/`db.delete` remains `BLOCKED_EXTERNAL` in this environment (no MariaDB
+  installed here), same as before this change — not a regression, and DB-001 stays
+  `PARTIAL` rather than `COMPLETE` because MongoDB, multi-user-per-database, and
+  owner-password reset are still not implemented (see the parity entry's Known
+  differences).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

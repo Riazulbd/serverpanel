@@ -253,6 +253,7 @@ EXISTS`, applied on every `openDB` call — idempotent, no separate migration to
 | `audit_log` | append-only: seq, timestamp, server, actor, action, detail |
 | `sites` | id, server, domain, system user, docroot, app type, PHP version, status |
 | `backups` | id, server, site, scope, path, size, sha256, status, created_at |
+| `databases` | id, server, name, owner_user, host, created_at (unique on server+name; no password column — see §12) |
 
 No ORM — every query is a small, explicit SQL statement in `store.go`. All secrets
 (session tokens, bootstrap tokens) are stored only as SHA-256 hashes; passwords use
@@ -262,8 +263,9 @@ bcrypt (cost 12); nothing is stored in plaintext.
 
 Full list with request/response shapes in `API.md`. Summary: `/api/v1/auth/*`
 (signup/login/logout/TOTP enroll+verify/MFA challenge/me), `/api/v1/servers*` (CRUD,
-revoke, task dispatch, sites, audit), `/agents/register` (the one unauthenticated
-agent-facing endpoint, secured by the bootstrap token itself), `/healthz`.
+revoke, task dispatch, sites, backups, databases, audit), `/agents/register` (the one
+unauthenticated agent-facing endpoint, secured by the bootstrap token itself),
+`/healthz`.
 
 ## 10. Background jobs
 
@@ -299,6 +301,15 @@ Current capability list: `system.ping`, `service.control`, `diagnostics.basic`,
 `db.delete`, `db.list`, `file.list`, `file.read`, `file.write`, `file.delete`,
 `backup.run`, `backup.restore`, `logs.tail`. Notably absent (by design, until reviewed
 and added): `git.deploy`, `cron.upsert`, `ssh.*`, `firewall.*`, `agent.self_update`.
+
+`db.create`'s owner password is generated control-plane-side
+(`apps/controlplane/databases.go generateDBPassword`, `crypto/rand`, 192 bits) and
+returned to the caller exactly once in the create response — it is never written to the
+`databases` table, a log line, or the audit log. This is a deliberate trade-off over
+storing it (encrypted or not): there is no "view saved password" feature, so a lost
+password requires a follow-up capability to reset it (not built yet — see
+`SERVERAVATAR_PARITY.md` DB-001), but it also means there is no database-credentials
+secret to protect at rest in the control plane in the first place.
 
 ## 13. Installation and deployment
 
@@ -398,6 +409,11 @@ all ⬜, scoped to Phase 2 per `product-plan.md` §9.
 - Dashboard mobile responsiveness (320–768px) has not been verified with real browser
   automation in this session — see `TESTING.md` §Known gaps.
 - No CI pipeline / automated vulnerability scanning configured yet.
+- Database management covers MySQL/MariaDB only (no MongoDB); each database gets
+  exactly one owner user created atomically with it (no adding/removing additional
+  users on an existing database yet); there is no owner-password-reset capability, so a
+  lost password requires deleting and recreating the database — see
+  `SERVERAVATAR_PARITY.md` DB-001.
 
 ## 22. Performance decisions
 
