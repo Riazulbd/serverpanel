@@ -201,6 +201,64 @@ func TestServerCreateListRevokeFlow(t *testing.T) {
 	}
 }
 
+func TestBackupEndpointsRequireAConnectedAgentAndValidateInput(t *testing.T) {
+	secureCookies = false
+	defer func() { secureCookies = true }()
+
+	a := newTestAPIServer(t)
+	h := a.routes()
+
+	doJSON(t, h, "POST", "/api/v1/auth/signup", map[string]string{
+		"Email": "backups@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	rec := doJSON(t, h, "POST", "/api/v1/auth/login", map[string]string{
+		"Email": "backups@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	cookie := sessionCookie(rec)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers", map[string]any{"Name": "web-1"}, cookie)
+	var created struct {
+		ServerID string `json:"server_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+
+	// Listing backups for a server with none yet must return an empty list,
+	// not an error.
+	rec = doJSON(t, h, "GET", "/api/v1/servers/"+created.ServerID+"/backups", nil, cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list backups status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// Missing scope must be rejected before any dispatch is attempted.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/backups", map[string]any{}, cookie)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("create backup with no scope status = %d, want 400, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// A validated request against a server with no connected agent must
+	// fail with a clear "not connected" error, not silently record a
+	// backup that was never actually taken.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/backups", map[string]any{
+		"scope": "files", "site_root": "/home/sites/sp_x",
+	}, cookie)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("create backup with no connected agent status = %d, want 502, body = %s", rec.Code, rec.Body.String())
+	}
+
+	rec = doJSON(t, h, "GET", "/api/v1/servers/"+created.ServerID+"/backups", nil, cookie)
+	var backups []backupRecord
+	json.Unmarshal(rec.Body.Bytes(), &backups)
+	if len(backups) != 0 {
+		t.Fatalf("expected no backup record to have been persisted after a failed dispatch, got %d", len(backups))
+	}
+
+	// Restoring an unknown backup ID must 404, never attempt a dispatch.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/backups/bkp_nonexistent/restore", nil, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("restore unknown backup status = %d, want 404, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestRegisterEndpointRejectsBadToken(t *testing.T) {
 	a := newTestAPIServer(t)
 	h := a.routes()

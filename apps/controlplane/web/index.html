@@ -174,6 +174,12 @@
           <button onclick="openNewSiteModal()">+ New site</button>
         </div>
         <div id="sitesList" class="muted">No sites yet.</div>
+
+        <div class="section-title" style="display:flex;justify-content:space-between;align-items:center">
+          <span>Backups</span>
+          <button onclick="openNewBackupModal()">+ New backup</button>
+        </div>
+        <div id="backupsList" class="muted">No backups yet.</div>
       </div>
     </div>
 
@@ -388,6 +394,101 @@ function openNewSiteModal() {
     </div>`;
 }
 
+function openNewBackupModal() {
+  const root = document.getElementById('modalRoot');
+  root.innerHTML = `
+    <div class="modal-backdrop" onclick="if(event.target===this) closeModal()">
+      <div class="modal">
+        <h2>New backup</h2>
+        <div class="field">
+          <label>Scope</label>
+          <select id="newBackupScope" onchange="updateNewBackupFields()">
+            <option value="files">Files only</option>
+            <option value="db">Database only</option>
+            <option value="full">Files + database</option>
+          </select>
+        </div>
+        <div class="field" id="newBackupSiteRootField">
+          <label>Site root</label>
+          <input id="newBackupSiteRoot" placeholder="/home/sites/site_example_com/public">
+        </div>
+        <div class="field hidden" id="newBackupDBField">
+          <label>Database name</label>
+          <input id="newBackupDBName" placeholder="e.g. app_db">
+        </div>
+        <button class="primary" style="width:100%" onclick="createBackup()">Create backup</button>
+        <div class="error" id="newBackupError"></div>
+        <p class="muted" id="newBackupStatus"></p>
+      </div>
+    </div>`;
+  updateNewBackupFields();
+}
+
+function updateNewBackupFields() {
+  const scope = document.getElementById('newBackupScope').value;
+  document.getElementById('newBackupSiteRootField').classList.toggle('hidden', scope === 'db');
+  document.getElementById('newBackupDBField').classList.toggle('hidden', scope === 'files');
+}
+
+async function createBackup() {
+  const scope = document.getElementById('newBackupScope').value;
+  const siteRoot = document.getElementById('newBackupSiteRoot').value.trim();
+  const dbName = document.getElementById('newBackupDBName').value.trim();
+  const err = document.getElementById('newBackupError');
+  const status = document.getElementById('newBackupStatus');
+  err.textContent = '';
+  status.textContent = 'Creating checksummed backup archive...';
+  try {
+    await api(API + '/servers/' + state.selectedServerId + '/backups', {
+      method: 'POST', body: JSON.stringify({scope, site_root: siteRoot, db_name: dbName})
+    });
+    status.textContent = 'Backup created.';
+    const backups = await api(API + '/servers/' + state.selectedServerId + '/backups');
+    renderBackups(backups || []);
+  } catch (e) {
+    status.textContent = '';
+    err.textContent = e.message;
+  }
+}
+
+function renderBackups(backups) {
+  const el = document.getElementById('backupsList');
+  if (!backups.length) { el.textContent = 'No backups yet.'; return; }
+  el.innerHTML = '<table><thead><tr><th>Created</th><th>Scope</th><th>Size</th><th>SHA-256</th><th>Status</th><th></th></tr></thead><tbody>' +
+    backups.map(b => `<tr>
+      <td class="muted">${new Date(b.CreatedAt).toLocaleString()}</td>
+      <td>${escapeHtml(b.Scope)}</td>
+      <td class="muted">${formatBytes(b.SizeBytes)}</td>
+      <td class="muted" title="${escapeHtml(b.SHA256)}">${escapeHtml((b.SHA256||'').slice(0,12))}&hellip;</td>
+      <td>${escapeHtml(b.Status)}</td>
+      <td><button onclick="restoreBackup('${b.ID}')">Restore</button></td>
+    </tr>`).join('') + '</tbody></table>';
+}
+
+function formatBytes(n) {
+  if (!n) return '0 B';
+  const units = ['B','KB','MB','GB','TB'];
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return n.toFixed(i === 0 ? 0 : 1) + ' ' + units[i];
+}
+
+async function restoreBackup(backupId) {
+  if (!confirm('Restore this backup? A fresh checkpoint of the current state is taken automatically before anything is overwritten, but this will replace live data with the backed-up version.')) return;
+  const box = document.getElementById('taskResult');
+  box.className = 'task-result running';
+  box.textContent = 'Restoring backup...';
+  box.classList.remove('hidden');
+  try {
+    await api(API + '/servers/' + state.selectedServerId + '/backups/' + backupId + '/restore', {method:'POST'});
+    box.className = 'task-result ok';
+    box.textContent = 'Backup restored successfully.';
+  } catch (e) {
+    box.className = 'task-result fail';
+    box.textContent = 'Restore failed: ' + e.message;
+  }
+}
+
 async function createSite() {
   const domain = document.getElementById('newSiteDomain').value.trim();
   const appType = document.getElementById('newSiteAppType').value;
@@ -431,6 +532,10 @@ async function openServerDetail(id) {
   try {
     const sites = await api(API + '/servers/' + id + '/sites');
     renderSites(sites || []);
+  } catch (e) {}
+  try {
+    const backups = await api(API + '/servers/' + id + '/backups');
+    renderBackups(backups || []);
   } catch (e) {}
 }
 

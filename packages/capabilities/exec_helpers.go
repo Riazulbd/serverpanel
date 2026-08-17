@@ -2,8 +2,10 @@ package capabilities
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -31,6 +33,25 @@ func run(ctx context.Context, name string, args ...string) (string, error) {
 	)
 	out, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(out)), err
+}
+
+// runWithStdin is run's counterpart for the one case that needs input piped
+// into a fixed-argv command (restoring a SQL dump into `mysql <db>`) rather
+// than just reading its output — still no shell, still a literal argv, the
+// untrusted content only ever flows through stdin, never through argv or a
+// shell string.
+func runWithStdin(ctx context.Context, stdin io.Reader, name string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Env = append(os.Environ(),
+		"DEBIAN_FRONTEND=noninteractive",
+		"COMPOSER_ALLOW_SUPERUSER=1",
+	)
+	cmd.Stdin = stdin
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	err := cmd.Run()
+	return strings.TrimSpace(out.String()), err
 }
 
 // isPackageInstalled reports whether an apt package is already installed,

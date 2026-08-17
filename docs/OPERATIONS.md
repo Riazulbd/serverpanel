@@ -40,22 +40,40 @@ dashboard).
 
 ## 3. Backup and restore
 
-**Backup** (implemented): dispatch the `backup.run` capability
-(`POST /api/v1/servers/{id}/tasks` with `{"capability": "backup.run", "params": {...}}`)
-— see `packages/capabilities/backup.go` for its `scope`/`target` params. It writes a
-checksummed local tar.gz on the VPS itself and records the checksum in its
-`TaskEvent.detail`. The control plane's `backups` table schema exists (`db.go`) but
-nothing currently writes a row into it automatically — wiring `backup.run`'s dispatch
-through a persistence step analogous to `handleCreateSite` (dispatch → parse result →
-insert row) is a small, well-scoped next task.
+**Backup** (implemented): from the dashboard, "+ New backup" on a server's detail page,
+or directly via `POST /api/v1/servers/{id}/backups` (`{"scope": "files|db|full",
+"site_root": "...", "db_name": "..."}`, see `API.md`). This dispatches `backup.run` and,
+only on success, records a `backups` row (server, site, `site_root`/`db_name` used,
+scope, path, size, SHA-256) — the dispatch → parse result → insert-row pattern already
+used by `handleCreateSite`. The archive itself is a checksummed local tar.gz written
+under `/var/backups/serverpanel` on the VPS.
 
-**Restore** (not implemented): there is no `backup.restore` capability yet. Until one
-exists, restoring from a `backup.run` archive is a fully manual process: SSH to the
-VPS, locate the tar.gz under wherever `backup.run` wrote it, verify its SHA-256 against
-the value in the task's `detail`, and manually extract/restore the DB dump and/or
-files. **Do not represent backup/restore as a complete, tested feature until a real
-`backup.restore` capability exists and has been exercised end-to-end** — see
-`SYSTEM.md` §19 and §21, and `TESTING.md` §5 item 1 for the recommended next step.
+**Restore** (implemented): from the dashboard, "Restore" next to a backup in the
+server's Backups list, or directly via
+`POST /api/v1/servers/{id}/backups/{backupId}/restore` (no body — every parameter is
+read from the recorded backup row, never from the caller, so a restore can't be pointed
+at a different site's data than the archive actually came from). This dispatches
+`backup.restore`, which:
+
+1. Validates `backup_path` is under the agent's own managed backup directory (never an
+   arbitrary filesystem path) and re-verifies the archive's SHA-256 against the value
+   recorded at backup time, refusing to proceed on a mismatch.
+2. Takes a **pre-restore checkpoint** — a fresh `backup.run` of whatever is live right
+   now — before touching anything. If the checkpoint itself fails, the whole restore
+   aborts; this is what makes a bad restore recoverable rather than a one-way door.
+3. Extracts the archive and, for `db`/`full` scope, pipes the dump into `mysql <db>`;
+   for `files`/`full` scope, clears the live site directory's contents and copies the
+   extracted tree back in place.
+
+Covered by a real backup → mutate → restore round trip against the actual filesystem
+and `tar`/`cp` binaries (not mocked), plus input-validation unit tests — see
+`TESTING.md`. **Restoring to a *different* server** is not yet a one-click flow: the
+capability and archive format support it (nothing ties an archive to the server it was
+created on), but today it requires manually copying the tar.gz to the target agent's
+`/var/backups/serverpanel` and recording a `backups` row there (e.g. via
+`POST /api/v1/servers/{other_id}/backups` is not directly usable for this since that
+endpoint always runs a fresh `backup.run`; a dedicated "import an existing archive"
+endpoint is the well-scoped next step if cross-server restore needs to be one-click).
 
 ## 4. Monitoring and alerting
 

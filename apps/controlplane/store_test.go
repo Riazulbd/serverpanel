@@ -245,3 +245,44 @@ func TestCreateAndListSites(t *testing.T) {
 		t.Fatalf("domain = %q, want example.sslip.io", sites[0].Domain)
 	}
 }
+
+func TestCreateAndListBackups(t *testing.T) {
+	st := newTestStore(t)
+	id, _, err := st.createServer("web-7", "", nil, time.Hour, "admin@example.com")
+	if err != nil {
+		t.Fatalf("createServer: %v", err)
+	}
+	site, err := st.createSite(id, "example.sslip.io", "sp_abc123", "/home/sites/sp_abc123/public", "static", "")
+	if err != nil {
+		t.Fatalf("createSite: %v", err)
+	}
+
+	backup, err := st.createBackup(id, site.ID, "/home/sites/sp_abc123/public", "", "files",
+		"/var/backups/serverpanel/sp_abc123-files-20260101T000000Z-abcd.tar.gz", 4096, "deadbeef")
+	if err != nil {
+		t.Fatalf("createBackup: %v", err)
+	}
+	if backup.Status != "completed" {
+		t.Fatalf("status = %q, want completed", backup.Status)
+	}
+
+	backups := st.listBackups(id)
+	if len(backups) != 1 {
+		t.Fatalf("listBackups returned %d backups, want 1", len(backups))
+	}
+	if backups[0].SHA256 != "deadbeef" || backups[0].SiteRoot != "/home/sites/sp_abc123/public" {
+		t.Fatalf("unexpected backup record: %+v", backups[0])
+	}
+
+	got, ok := st.getBackup(id, backup.ID)
+	if !ok {
+		t.Fatal("getBackup: expected the just-created backup to be found")
+	}
+	if got.Path != backup.Path {
+		t.Fatalf("getBackup path = %q, want %q", got.Path, backup.Path)
+	}
+
+	if _, ok := st.getBackup(id, "bkp_nonexistent"); ok {
+		t.Fatal("getBackup: expected an unknown backup ID to be not-found")
+	}
+}

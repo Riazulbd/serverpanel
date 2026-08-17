@@ -2,7 +2,7 @@
 
 ## 1. Current automated coverage
 
-`go test ./...` — 48 test functions across two packages, all passing, no `-race`
+`go test ./...` — 61 test functions across two packages, all passing, no `-race`
 failures, `go vet` clean, `gofmt -l` clean:
 
 ```
@@ -15,26 +15,30 @@ go test ./... -race
 
 | Package | Tests | What they cover |
 |---|---|---|
-| `apps/controlplane` | 23 | Auth/session lifecycle (create, MFA-verify, expiry, delete), bcrypt password rules, email normalization/uniqueness, TOTP round-trip/skew/rejection, bootstrap-token single-use/expiry/unknown-token, server create/list/get, revocation (cert-serial blocking + status transitions, including that a stray disconnect can't resurrect a revoked server), heartbeat recording, audit-log append, site create/list, and 4 full HTTP integration tests through `routes()` with `httptest` covering signup→login→protected-route, the full 2FA enroll→logout→login→MFA-challenge→access flow, server create/list/revoke, and agent registration with a bad token |
-| `packages/capabilities` | 25 | Capability dispatch (unknown name rejected, `system.ping` works, nil `Progress` doesn't panic, the registry has a handler for every declared `Cap*` constant), `service.control`'s allow-list boundary (unit, action, and an explicit shell-metacharacter-injection attempt, all rejected before `systemctl` is ever invoked), the file manager's path-traversal and symlink-escape defenses (`resolveScopedPath`), oversized-read/write rejection, refusal to delete the site root itself, a real list+write round trip against a real filesystem, log redaction (token/password query params, `Authorization: Bearer`/`Basic`), `logs.tail`'s input validation, domain-name validation (including injection-shaped inputs), `systemUserForDomain`'s bounding/sanitization, and the deterministic php-fpm-pool/socket/vhost path builders |
+| `apps/controlplane` | 25 | Auth/session lifecycle (create, MFA-verify, expiry, delete), bcrypt password rules, email normalization/uniqueness, TOTP round-trip/skew/rejection, bootstrap-token single-use/expiry/unknown-token, server create/list/get, revocation (cert-serial blocking + status transitions, including that a stray disconnect can't resurrect a revoked server), heartbeat recording, audit-log append, site create/list, backup create/list/get (including that an unknown backup ID is correctly reported not-found), and 5 full HTTP integration tests through `routes()` with `httptest` covering signup→login→protected-route, the full 2FA enroll→logout→login→MFA-challenge→access flow, server create/list/revoke, agent registration with a bad token, and the backup endpoints (empty-list-by-default, scope validation before dispatch, a clean "not connected" failure with no orphan row persisted, and restore-of-unknown-ID → 404) |
+| `packages/capabilities` | 36 | Capability dispatch (unknown name rejected, `system.ping` works, nil `Progress` doesn't panic, the registry has a handler for every declared `Cap*` constant), `service.control`'s allow-list boundary (unit, action, and an explicit shell-metacharacter-injection attempt, all rejected before `systemctl` is ever invoked), the file manager's path-traversal and symlink-escape defenses (`resolveScopedPath`), oversized-read/write rejection, refusal to delete the site root itself, a real list+write round trip against a real filesystem, log redaction (token/password query params, `Authorization: Bearer`/`Basic`), `logs.tail`'s input validation, domain-name validation (including injection-shaped inputs), `systemUserForDomain`'s bounding/sanitization, the deterministic php-fpm-pool/socket/vhost path builders, `backup.restore`'s full input-validation boundary (scope, `backup_path` confined to the managed backup directory including a `../` traversal attempt, missing archive, `site_root`/`db_name` validation, checksum-mismatch rejection), and a **real backup → mutate → restore round trip** (`TestBackupRunRestoreFilesRoundTrip`) that creates a site directory, backs it up with the real `backup.run`, corrupts/adds files to simulate data loss, restores with the real `backup.restore`, and asserts the original content came back and the stray file was removed — this is what caught the same-second filename-collision bug below |
 
 None of this is mocked where a cheap real implementation was possible: sessions/users/
 servers/audit run against a real temp-file SQLite database with the real schema (not
-`:memory:` with a fake driver); the file-manager tests create and traverse real
-directories/symlinks under `/home/sites` (skipped gracefully if that path isn't
-writable, so the suite still runs in an unprivileged container); the HTTP tests run the
-real `routes()` mux with a real in-process CA and gateway, not a hand-rolled router
-stub.
+`:memory:` with a fake driver); the file-manager and backup-restore tests create and
+traverse real directories/archives under `/home/sites` and
+`/var/backups/serverpanel` using the real `tar`/`cp` binaries (skipped gracefully if
+those paths aren't writable, so the suite still runs in an unprivileged container); the
+HTTP tests run the real `routes()` mux with a real in-process CA and gateway, not a
+hand-rolled router stub.
 
 ## 2. What's deliberately not covered by `go test`
 
 Capabilities that require real system services this environment can't safely or
 meaningfully fake are **not** exercised by the automated suite:
 `stack.install` (apt/systemd), `app.wordpress_install` (real `wp-cli` + a running
-MariaDB), `ssl.issue_letsencrypt` (real ACME/public DNS), `db.create/delete/list`
-(a running MariaDB), `backup.run` (real file/db dump), `service.control`'s actual
+MariaDB), `ssl.issue_letsencrypt` (real ACME/public DNS), `db.create/delete/list` and
+`backup.run`/`backup.restore`'s `db`/`full` scope (a running MariaDB — no `mysql`/
+`mysqld` binary is installed in this environment), `service.control`'s actual
 `systemctl` invocation, and the agent's registration/connect/reconnect loop against a
-live gateway.
+live gateway. `backup.run`/`backup.restore`'s `files` scope **is** exercised for real
+(see the round-trip test in §1) since it only needs the filesystem and `tar`/`cp`,
+both available here.
 
 These were **manually verified against a real Ubuntu 24.04 host in a prior session**
 (see `SYSTEM.md` §27 / the bug list below) — real `apt-get` installs, a manually
@@ -91,28 +95,45 @@ From the prior session's manual integration pass:
 - Heartbeats only ever populated uptime; load/memory/disk were implemented via
   `/proc/loadavg`, `/proc/meminfo`, and `syscall.Statfs`.
 
-This session's automated-test pass (see §1) found **no new defects** — every test
-passed on the first correctly-written attempt, which is consistent with (not
-independent proof beyond) the prior manual pass having been genuine.
+From this session's work adding `backup.restore`:
+- `backup.run`'s output filename only had second-precision granularity
+  (`label-scope-YYYYMMDDTHHMMSSZ.tar.gz`), so two backups of the same site+scope
+  within the same second silently overwrote each other. This is exactly what
+  `backup.restore`'s own pre-restore checkpoint does (a `backup.run` of the same
+  label+scope as the archive about to be restored), so it was caught immediately by
+  the real round-trip test (`TestBackupRunRestoreFilesRoundTrip`) rather than shipped
+  silently: the checkpoint step was clobbering the archive the restore was about to
+  read from before extraction ever ran. Fixed by adding a random 8-hex-char suffix to
+  every backup filename (`randHex` in `packages/capabilities/backup.go`).
+
+This session's automated-test pass (see §1) found the one new defect described above,
+caught by a real (not mocked) integration test — consistent with the project's stated
+testing philosophy of exercising real system operations wherever feasible rather than
+trusting that a change without a real test is correct.
 
 ## 5. Known gaps / recommended next testing investment, in priority order
 
-1. **Backup restore has no capability to test yet** — write `backup.restore` first
-   (see `OPERATIONS.md` §Backup and restore), then test it for real, including a
-   pre-restore checkpoint and a restore-to-a-different-server scenario.
-2. **Scripted real-VPS/container integration tests** — turn the manual pass in §2 into
+1. **Scripted real-VPS/container integration tests** — turn the manual pass in §2 into
    a repeatable script (a disposable Ubuntu 24.04 Docker container or cloud-init VM),
    runnable in CI, covering the installation-test checklist in the project brief
    (agent install → register → stack install → site create → WordPress deploy →
-   DB create → SSL issue → file ops → backup → agent restart → network
-   disconnect/reconnect → failed-install recovery → upgrade → rollback → revoke).
-3. **Browser/mobile end-to-end tests** — Playwright driving the dashboard at each of
+   DB create → SSL issue → file ops → backup → **restore** → agent restart → network
+   disconnect/reconnect → failed-install recovery → failed-restore recovery → upgrade →
+   rollback → revoke). This is now the top item: `backup.restore` exists and has a real
+   `files`-scope round-trip test, but its `db`/`full` scope has only been validated for
+   input handling, never against a real MariaDB — this is the environment that would
+   let that happen.
+2. **Browser/mobile end-to-end tests** — Playwright driving the dashboard at each of
    the 320/375/390/414/768/desktop breakpoints, checking for horizontal overflow,
-   clipped content, and usable touch targets, screenshotted for review.
-4. **Load/failure testing of agent reconnect** under real network partition
+   clipped content, and usable touch targets, screenshotted for review. Should include
+   the new Backups section (create-backup modal, restore confirmation flow).
+3. **Load/failure testing of agent reconnect** under real network partition
    conditions (not just the backoff-loop code review already done).
-5. **`govulncheck`/dependency vulnerability scanning** wired into a CI pipeline (none
+4. **`govulncheck`/dependency vulnerability scanning** wired into a CI pipeline (none
    exists yet).
+5. **Restore-to-a-different-server scenario** — exercise copying a backup archive to a
+   second agent's `backupBaseDir` and restoring it there, once real multi-VPS test
+   infrastructure exists (depends on item 1).
 
 ## 6. Running the suite
 

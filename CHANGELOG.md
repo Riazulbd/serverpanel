@@ -2,6 +2,62 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-17 — Backup restore, backup persistence, and dashboard Backups UI
+
+Closes the single largest functional gap flagged in the prior session's documentation
+pass (`docs/SYSTEM.md` §19/§21, `docs/OPERATIONS.md` §3, `docs/TESTING.md` §5 item 1):
+there was no way to restore a backup.
+
+- Agent: new `backup.restore` capability
+  (`packages/capabilities/backup.go`/`capabilities.go`). Validates `backup_path` stays
+  under the agent's managed `backupBaseDir` (rejecting a `../` traversal attempt, not
+  just a prefix string match — resolved via `filepath.EvalSymlinks` + `filepath.Clean`
+  the same way `resolveScopedPath` does for the file manager), re-verifies the
+  archive's SHA-256 if one is supplied, takes a **pre-restore checkpoint** (a fresh
+  `backup.run` of the current live state) before touching anything and aborts the
+  whole restore if that checkpoint itself fails, then extracts the archive and either
+  pipes a SQL dump into `mysql <db>` (new `runWithStdin` helper in
+  `exec_helpers.go` — the one place besides `run()` that shells out, still a fixed
+  argv, untrusted content only ever flows through stdin) or clears the live site
+  directory and copies the restored files back into place.
+- Control plane: `backups` table gained `site_root`/`db_name` columns (recorded at
+  backup time, so a restore always operates on the exact source a given archive came
+  from rather than a caller-resupplied value); new `store.createBackup`/`listBackups`/
+  `getBackup` methods; new `POST /api/v1/servers/{id}/backups` (dispatch `backup.run`,
+  persist on success — the same dispatch → parse → insert pattern `handleCreateSite`
+  already uses), `GET /api/v1/servers/{id}/backups`, and
+  `POST /api/v1/servers/{id}/backups/{backupId}/restore` (dispatches `backup.restore`
+  using the recorded backup's own params, never caller-supplied ones).
+- Dashboard: a "Backups" section on the server-detail page — list, "+ New backup"
+  (scope/site-root/db-name form), and a "Restore" button per backup with a
+  confirmation dialog explaining the automatic pre-restore checkpoint.
+- Testing: capability-level input-validation tests for every rejection path in
+  `backup.restore` (invalid scope, `backup_path` outside the managed directory
+  including a traversal attempt, missing archive, invalid `site_root`/`db_name`,
+  checksum mismatch), plus a **real backup → mutate → restore round trip**
+  (`TestBackupRunRestoreFilesRoundTrip`, `packages/capabilities/backup_test.go`)
+  against the actual filesystem and real `tar`/`cp` binaries — no mocks. Store-level
+  and HTTP-integration tests for the new endpoints, following the same patterns
+  `store_test.go`/`http_test.go` already use for sites. `go test ./...` (61 functions,
+  up from 48), `go vet`, `gofmt -l`, and `-race` all clean.
+- **Bug found and fixed by the new round-trip test** (kept as evidence the testing is
+  real, matching this project's existing practice — see `docs/TESTING.md` §4):
+  `backup.run`'s output filename only had second-precision timestamp granularity, so
+  two backups of the same site+scope within the same second silently overwrote each
+  other — exactly what `backup.restore`'s own pre-restore checkpoint does. The round
+  trip caught this immediately (the checkpoint clobbered the very archive being
+  restored from). Fixed by adding a random 8-hex-char suffix to every backup filename.
+- Docs: `SYSTEM.md`, `API.md`, `OPERATIONS.md`, `TESTING.md`, and `README.md` updated
+  to reflect that backup restore is implemented and tested, not planned.
+
+Known gap this pass didn't close: restoring to a *different* server is not yet a
+one-click flow (the archive/capability don't prevent it, but nothing automates copying
+the archive to another agent's backup directory and recording it there — see
+`OPERATIONS.md` §3); and `backup.restore`'s `db`/`full` scope has only been
+validated for input handling, never against a real MariaDB, since no MariaDB is
+available in this session's environment (same limitation `backup.run`/`db.create`
+already had — see `TESTING.md` §2).
+
 ## 2026-08-14 — Automated test suite, doc restructuring
 
 - Added `go test` coverage across `apps/controlplane` and `packages/capabilities`

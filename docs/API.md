@@ -43,6 +43,9 @@ protected route; there is no route that skips it by omission.
 | `POST` | `/api/v1/servers/{id}/tasks` | Dispatch an arbitrary allow-listed capability (see §3) |
 | `GET` | `/api/v1/servers/{id}/sites` | List sites on a server |
 | `POST` | `/api/v1/servers/{id}/sites` | Dispatch `site.create` and persist the resulting site record |
+| `GET` | `/api/v1/servers/{id}/backups` | List backups recorded for a server |
+| `POST` | `/api/v1/servers/{id}/backups` | Dispatch `backup.run` and persist the resulting backup record |
+| `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a previously-recorded backup |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -102,6 +105,33 @@ Dispatches `site.create`, and only on the agent reporting success, persists a `s
 row. → `201 {"site": {...siteRecord}, "temp_domain": "<user>.<ip-with-dashes>.sslip.io"}`.
 A dispatch failure or agent-side failure never leaves an orphan site record — the
 row is written after (and only after) the agent confirms success.
+
+### `POST /api/v1/servers/{id}/backups`
+```json
+{"site_id": "site_abc123", "scope": "files", "site_root": "/home/sites/sp_abc123/public", "db_name": ""}
+```
+`site_id` is optional (only used to associate the backup record with a site for
+listing purposes); `scope` is required (`db`/`files`/`full`); `site_root` is required
+for `files`/`full`, `db_name` for `db`/`full` — same validation `backup.run` itself
+applies. Dispatches `backup.run`, and only on success, persists a `backups` row
+(including the `site_root`/`db_name` used, so a later restore doesn't need them
+re-supplied). → `201` with the `backupRecord` JSON. `502` for a transport-level
+dispatch failure (e.g. server not connected) — no row is written in that case.
+
+### `GET /api/v1/servers/{id}/backups`
+→ `200` with an array of `backupRecord` (`ID`, `ServerID`, `SiteID`, `SiteRoot`,
+`DBName`, `Scope`, `Path`, `SizeBytes`, `SHA256`, `Status`, `CreatedAt`), newest first.
+
+### `POST /api/v1/servers/{id}/backups/{backupId}/restore`
+No request body — every parameter `backup.restore` needs (`scope`, `backup_path`,
+`site_root`, `db_name`, `sha256`) is read from the backup record itself, not from the
+caller, specifically so a restore request can't be pointed at a different site's data
+than the one the archive actually came from. → `404` if the backup ID isn't found for
+this server; `502` for a transport-level dispatch failure; `422` if the agent reports
+the restore itself failed (e.g. its own pre-restore checkpoint failed, or a checksum
+mismatch was detected); `200 {"restored": {...backupRecord}, "detail": {...}}` on
+success, where `detail` is `backup.restore`'s own result (including
+`checkpoint_detail`, the pre-restore checkpoint backup that was taken automatically).
 
 ### `POST /agents/register`
 ```json
