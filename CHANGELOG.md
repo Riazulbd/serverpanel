@@ -2,6 +2,36 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-17 — Database control-plane persistence and dashboard UI (DB-005)
+
+- **Closed the DB-001 "Known differences" gap flagged in the previous entry**: `db.create`
+  and `db.delete` (`packages/capabilities/db.go`) now return structured JSON detail
+  (`{"name", "owner_user"}` / `{"name"}`) instead of a human-readable string, so the
+  control plane can parse and persist a durable record on success — the same
+  dispatch-then-persist-on-success pattern `site.create` and `backup.run` already use.
+- Added a `databases` table (`apps/controlplane/db.go`) and store methods
+  (`createDatabase`/`listDatabases`/`getDatabase`/`deleteDatabase`, each scoped by
+  server ID the same way `getSite`/`getBackup` are) plus a new
+  `apps/controlplane/databases.go` with three endpoints: `GET`/`POST
+  /api/v1/servers/{id}/databases` and `DELETE /api/v1/servers/{id}/databases/{dbId}`.
+- The owner password is generated server-side (24 random bytes, base64url) rather than
+  accepted from the caller, and is returned exactly once in the create response — it is
+  never persisted anywhere, including the `databases` table itself, the same handling
+  `createServer` already gives a bootstrap token.
+- Added a "Databases" panel to the server-detail dashboard view (create-database modal,
+  databases table, per-row delete with a destructive-action confirmation dialog),
+  mirroring the "Backups"/"Sites" panels already there.
+- Added 6 new capability-layer tests (`db_test.go`: name/owner/password validation
+  ahead of any MariaDB connection, JSON round-trip) and 2 new control-plane HTTP tests
+  (`TestDatabaseEndpointsValidateAndScopeByServer`,
+  `TestDeleteDatabaseIsScopedToItsOwnServer` — the latter proves a database ID from one
+  server can't be deleted through a different server's URL). `db.create`/`db.delete`'s
+  actual MariaDB round trip remains manually verified only (no MariaDB in this
+  environment — see `TESTING.md` §2 and the DB-001 parity entry).
+- Updated `docs/SERVERAVATAR_PARITY.md` (DB-001 detail block rewritten to reflect the
+  new persistence/UI layer; DB-005 folded into it and removed as a separate gap),
+  `docs/API.md`, and `docs/SYSTEM.md` accordingly.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

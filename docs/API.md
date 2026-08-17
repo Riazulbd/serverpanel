@@ -46,6 +46,9 @@ protected route; there is no route that skips it by omission.
 | `GET` | `/api/v1/servers/{id}/sites/{siteId}/backups` | List backups for a site, newest first |
 | `POST` | `/api/v1/servers/{id}/sites/{siteId}/backups` | Dispatch `backup.run` and persist the resulting backup record |
 | `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a previously recorded backup |
+| `GET` | `/api/v1/servers/{id}/databases` | List databases on a server, newest first |
+| `POST` | `/api/v1/servers/{id}/databases` | Dispatch `db.create` and persist the resulting database record |
+| `DELETE` | `/api/v1/servers/{id}/databases/{dbId}` | Dispatch `db.delete` and, on success, remove the database record |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -137,6 +140,32 @@ isn't connected; `422` if `backup.restore` itself failed on the agent (the agent
 error message explains why, and any checkpoint already taken is named in it so it's
 never a silent loss).
 
+### `POST /api/v1/servers/{id}/databases`
+```json
+{"name": "app_db", "owner_user": ""}
+```
+`name` must match `^[a-z][a-z0-9_]{0,30}$`; `owner_user` is optional and defaults to
+`name` (validated against the same pattern). The owner password is never
+caller-supplied — the control plane generates a random 24-byte (base64url) password
+server-side and dispatches `db.create` with it. Only on the agent reporting success is
+a `databases` row persisted. → `201 {"database": {...databaseRecord}, "owner_password": "..."}`.
+`owner_password` is returned exactly once and is never stored anywhere, including the
+`databases` table — same handling as a bootstrap token. `400` for an invalid name/owner;
+`502` if the agent isn't connected; `422` if `db.create` itself failed on the agent.
+
+### `GET /api/v1/servers/{id}/databases`
+→ `200` with an array of `databaseRecord` (`ID`, `ServerID`, `Name`, `OwnerUser`,
+`Status`, `CreatedAt`), newest first. `404` if the server doesn't exist.
+
+### `DELETE /api/v1/servers/{id}/databases/{dbId}`
+No request body — the database's own recorded `name` and `owner_user` are read from the
+`databases` table and passed to `db.delete` verbatim; a caller can only ever delete a
+database that was actually created and recorded through this platform, addressed only
+by the store-assigned ID, never an arbitrary name string, and only when it belongs to
+the server named in the URL. → `204` on success. `404` if the database doesn't exist on
+that server; `502` if the agent isn't connected; `422` if `db.delete` itself failed on
+the agent (the record is only removed after the agent confirms the drop).
+
 ### `POST /agents/register`
 ```json
 {"token": "<bootstrap token>", "csr_pem": "<PEM-encoded CSR>"}
@@ -197,3 +226,12 @@ database or site files, a fresh checkpoint backup of the *current* state is take
 `backup.run` — its path is returned in the result's `checkpoints`, so a restore is
 always recoverable, never a one-way trip. Returns
 `{"scope", "archive_path", "checkpoints": [...], "restored_at"}` on success.
+
+### `db.create` / `db.delete`
+`db.create` takes `{"name", "owner_user", "owner_password"}` (`owner_password` must be
+at least 16 characters) and returns `{"name", "owner_user"}` on success — the password
+is never echoed back. `db.delete` takes `{"name", "owner_user"}` and returns `{"name"}`.
+Both validate `name`/`owner_user` against `^[a-z][a-z0-9_]{0,30}$` before opening a
+database connection, so a malformed identifier is rejected without ever reaching
+MariaDB. See §1/§2 for how the control plane's `/api/v1/servers/{id}/databases`
+endpoints wrap these with persistence.
