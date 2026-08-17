@@ -2,6 +2,50 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-17 (2) — Database control-plane persistence and dashboard UI
+
+- **Closed DB-001's tracked gap** (`docs/SERVERAVATAR_PARITY.md`, flagged as the
+  recommended next iteration): database create/delete now follow the same
+  dispatch-then-persist(-or-remove) pattern already used for sites and backups,
+  instead of only being reachable through generic capability dispatch.
+- `packages/capabilities/db.go`: `db.create`/`db.delete` now return a structured JSON
+  `dbResult{name, owner_user}` detail (never the password) instead of a free-text
+  string, so the control plane can parse and persist a durable record the way it
+  already does for `site.create`/`backup.run`. Exported `ValidIdentifier` so the
+  control plane validates database/owner names with the exact same allow-list regex
+  the agent enforces, rather than a second regex that could drift out of sync.
+- `apps/controlplane`: new `databases` table (`server_id`, optional `site_id` label,
+  `name`, `owner_user`, `status`, `created_at` — deliberately no password column);
+  `handleCreateDatabase`/`handleListDatabases`/`handleDeleteDatabase`
+  (`databases.go`); three new endpoints
+  (`GET`/`POST /api/v1/servers/{id}/databases`,
+  `DELETE /api/v1/servers/{id}/databases/{databaseId}`). The owner password is
+  generated control-plane-side (`crypto/rand`, 32 bytes hex) and returned exactly once
+  in the create response — never persisted anywhere, the same "shown once" pattern
+  already used for bootstrap-token install commands — since this codebase has no
+  at-rest secret-encryption subsystem yet and a stored, decryptable credential would be
+  a bigger liability than a non-recoverable one. A lost password's documented recovery
+  path is delete-and-recreate, stated in the dashboard modal itself, not hidden.
+- Dashboard: a "Databases" panel on the server-detail view (mirroring "Sites") with a
+  "+ New database" modal (name/optional owner_user, one-time password display with a
+  copy-now warning) and a per-row "Delete" action behind a destructive-action
+  `confirm()`.
+- Added `packages/capabilities/db_test.go` (6 tests: the identifier allow-list table
+  test plus `db.create`/`db.delete`'s invalid-name/invalid-owner/short-password
+  rejection paths, all exercised without a MariaDB connection since validation runs
+  first) and 4 new `apps/controlplane` tests (database create/list/get/delete round
+  trip and cross-server-scoping in `store_test.go`; database-creation validation and
+  delete-of-nonexistent-record HTTP boundary tests in `http_test.go`). Full suite: 71
+  test functions, `go vet`/`gofmt` clean. The real MariaDB round trip
+  (`CREATE DATABASE`/`CREATE USER`/`GRANT`/`DROP`) remains manually-verified-only in
+  this environment (no MariaDB here), same as `backup.run`/`backup.restore`'s db/full
+  scope — documented, not silently promoted to a fully-automated `COMPLETE`.
+- Updated `SYSTEM.md` (schema table, server-management feature table, new §19a
+  "Database management and credential model"), `API.md` (three new endpoint sections),
+  `TESTING.md` (updated counts/descriptions), and `SERVERAVATAR_PARITY.md` (DB-001
+  promoted to a full detail block; DB-005's now-closed gap folded into it rather than
+  left as a stale duplicate row).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

@@ -113,19 +113,19 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Category**: Database Management
 - **Documentation page**: Database Management → "Understanding Database Management"
 - **Short description**: Create a MySQL/MariaDB database with a least-privilege owner user.
-- **Our implementation**: `db.create`/`db.delete`/`db.list` — identifier allow-list regex, `CREATE USER`/`GRANT` scoped to exactly one database (never global), Unix-socket root auth (no stored MySQL root password on disk for this path).
-- **Frontend**: not yet surfaced as its own dashboard panel (capability exists and is dispatchable via generic task dispatch; no dedicated "Databases" tab yet).
-- **Backend service**: `gateway.dispatch` → `packages/capabilities.handleDBCreate/Delete/List`.
-- **API endpoint(s)**: `POST /api/v1/servers/{id}/tasks`.
+- **Our implementation**: `db.create`/`db.delete`/`db.list` (agent) — identifier allow-list regex, `CREATE USER`/`GRANT` scoped to exactly one database (never global), Unix-socket root auth (no stored MySQL root password on disk for this path); `db.create`/`db.delete` return a JSON `dbResult{name, owner_user}` detail (never the password) so the control plane can persist a durable record the same way `site.create`/`backup.run` already do. Control plane: `POST/GET /api/v1/servers/{id}/databases` and `DELETE .../databases/{databaseId}` dispatch-then-persist (create) / dispatch-then-remove (delete) into a new `databases` table, mirroring the `backups` pattern exactly. The owner password is generated control-plane-side (`crypto/rand`, 32 bytes hex) and returned exactly once in the create response — never persisted, same "shown once" pattern as bootstrap-token install commands — since this codebase has no at-rest secret-encryption subsystem yet (task-brief §89) and a plaintext-recoverable stored credential would be worse than a non-recoverable one.
+- **Frontend**: server-detail "Databases" panel — "+ New database" modal (name/owner_user fields, one-time password display with a copy-now warning), databases table with a "Delete" action (destructive-action `confirm()`).
+- **Backend service**: `apiServer.handleCreateDatabase/handleListDatabases/handleDeleteDatabase` (`apps/controlplane/databases.go`).
+- **API endpoint(s)**: `POST/GET /api/v1/servers/{id}/databases`, `DELETE /api/v1/servers/{id}/databases/{databaseId}`.
 - **Agent command**: `db.create`, `db.delete`, `db.list`.
-- **DB tables**: none on the control-plane side yet (no `databases` table — see Known differences).
+- **DB tables**: `databases` (`server_id`, `site_id` optional label, `name`, `owner_user`, `status`, `created_at` — no password column, by design).
 - **Required permission**: authenticated session.
-- **Security considerations**: identifier allow-list (`^[a-z][a-z0-9_]{0,30}$`) prevents SQL-identifier injection where placeholders can't be used; grants are always single-database-scoped.
-- **Test coverage**: manually verified in a prior session against a real MariaDB; not covered by `go test` (requires a running MariaDB — this environment has none).
-- **Current status**: `PARTIAL`
-- **Completion date**: n/a
-- **Known differences**: MongoDB support, a dedicated dashboard UI, and control-plane persistence of database records (so they show up per-site the way backups now do) don't exist yet.
-- **Reason**: capability-layer work landed before the control-plane persistence/UI layer that backups just got (see BAK-001) — same pattern, not yet applied here. Good candidate for the next iteration.
+- **Security considerations**: identifier allow-list (`^[a-z][a-z0-9_]{0,30}$`, now exported as `capabilities.ValidIdentifier` so the control plane validates with the exact same rule the agent enforces, not a second regex that could drift) rejects a bad name before a password is even generated; grants are always single-database-scoped; delete only ever acts on a database this control plane actually created and recorded (name/owner_user are read server-side from the stored row, never accepted as free-form client input for the delete call); the audit log records `name`/`owner_user` on create/delete but never the password.
+- **Test coverage**: `packages/capabilities/db_test.go` (identifier-validation table test plus `db.create`/`db.delete`'s invalid-name/invalid-owner/short-password rejection paths — all exercised without a MariaDB connection, since validation runs first); `apps/controlplane/store_test.go` (`TestDatabaseCreateListGetDeleteRoundTrip`, `TestGetDatabaseIsScopedToServerID` — including that a delete scoped to the wrong server is a no-op, not a cross-tenant delete); `apps/controlplane/http_test.go` (`TestCreateDatabaseRejectsInvalidNames`, `TestDeleteDatabaseRequiresARealRecord`). The real `CREATE DATABASE`/`CREATE USER`/`GRANT`/`DROP` MariaDB round trip is not exercised by `go test` in this environment (no MariaDB here) — manually verified in a prior session, same bucket as `backup.run`/`backup.restore`'s db/full scope.
+- **Current status**: `PARTIAL` (validation layer and full control-plane persistence/UI are `COMPLETE`-quality and automated-tested; the real-MariaDB round trip remains manually-verified-only in this environment, so this isn't promoted to `COMPLETE` per this file's own rule in the header)
+- **Completion date**: control-plane persistence/UI landed 2026-08-17; real-MariaDB verification remains outstanding in this environment.
+- **Known differences**: MongoDB support (DB-002), a database-admin-tool integration such as phpMyAdmin (DB-003), and database process/query monitoring (DB-004) don't exist yet; a database's `site_id` is an optional label only (no FK-enforced ownership beyond existence-checking at creation time); no credential-rotation/re-issue endpoint (a lost password requires delete-and-recreate).
+- **Reason**: those are separate, larger pieces of scope (a second database engine's whole capability surface, an embedded admin tool, live query monitoring) rather than gaps in this pass; tracked as their own summary-table rows below, not silently folded in.
 
 ### BAK-001 — On-demand backup (files/db/full)
 - **Category**: Backups
@@ -261,7 +261,6 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | DB-002 | MongoDB support | `NOT_STARTED` | |
 | DB-003 | phpMyAdmin / DB admin UI integration | `NOT_STARTED` | |
 | DB-004 | Database process/query monitoring | `NOT_STARTED` | |
-| DB-005 | Control-plane persistence + dashboard UI for databases (mirroring what BAK-001 just got) | `NOT_STARTED` | See DB-001's "Known differences" |
 
 ### WordPress Toolkit (WP-*)
 | ID | Feature | Status |
@@ -296,9 +295,9 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | Status | Count (detailed entries) | Count (summary-table rows) |
 |---|---|---|
 | `COMPLETE` | 3 (SRV-001, BAK-002, ACC-001) | 1 (PROV-006) |
-| `PARTIAL` | 3 (SRV-002, APP-001, APP-002, DB-001, BAK-001 — 5 total, see note) | 6 |
-| `NOT_STARTED` | 0 | ~55 |
-| `BLOCKED_EXTERNAL` | 0 (sub-scoped within BAK-001/BAK-002's db/full-scope MariaDB verification) | 0 |
+| `PARTIAL` | 5 (SRV-002, APP-001, APP-002, DB-001, BAK-001 — see note) | 6 |
+| `NOT_STARTED` | 0 | ~54 |
+| `BLOCKED_EXTERNAL` | 0 (sub-scoped within BAK-001/BAK-002/DB-001's db/full-scope or real-MariaDB verification) | 0 |
 | `INTENTIONALLY_NOT_APPLICABLE` | 0 | 1 |
 
 *Note: BAK-001 and BAK-002 are each simultaneously `COMPLETE` for their files-scope path
@@ -354,6 +353,11 @@ establish the tracking process and close the single highest-priority gap
 
 ## Change history
 
+- **2026-08-17 (2)**: DB-001 moved from capability-layer-only to full control-plane
+  persistence + dashboard UI (dispatch-then-persist `databases` table, "Databases"
+  panel, one-time-shown generated owner password), closing the gap this file's own §7
+  workflow flagged as the recommended next iteration. DB-005 (the tracking row for that
+  gap) folded into DB-001 now that it's done, rather than left as a stale duplicate.
 - **2026-08-17**: initial version. Established the tracking process; recorded
   SRV-001/002, APP-001/002, DB-001, ACC-001 (pre-existing work) at accurate status, and
   BAK-001/BAK-002 reflecting this session's backup-restore implementation. ~60

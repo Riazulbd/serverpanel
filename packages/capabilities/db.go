@@ -3,6 +3,7 @@ package capabilities
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"regexp"
 
@@ -15,6 +16,24 @@ import (
 // before backtick-quoting and interpolating, never to accept an arbitrary
 // string into a CREATE DATABASE/USER statement.
 var identifierRe = regexp.MustCompile(`^[a-z][a-z0-9_]{0,30}$`)
+
+// ValidIdentifier reports whether s is safe to use as a database or
+// database-user name. Exported so the control plane (which decides what
+// name/owner_user to dispatch in the first place) can reject a bad name
+// before ever contacting an agent, using the exact same rule the agent
+// itself enforces — one source of truth, not two regexes that could drift.
+func ValidIdentifier(s string) bool { return identifierRe.MatchString(s) }
+
+// dbResult is what db.create returns as its TaskEvent detail (JSON) — the
+// control plane parses this to persist a database record; see
+// apps/controlplane/databases.go handleCreateDatabase. It deliberately
+// never includes the password: the control plane already knows it (it
+// generated it) and a completed task's detail is logged/persisted, which a
+// credential must never be.
+type dbResult struct {
+	Name      string `json:"name"`
+	OwnerUser string `json:"owner_user"`
+}
 
 func mariaDBConn() (*sql.DB, error) {
 	// Connects as root over the local Unix socket, matching MariaDB's
@@ -75,7 +94,11 @@ func handleDBCreate(ctx context.Context, params map[string]any, progress Progres
 		return "", fmt.Errorf("flush privileges: %w", err)
 	}
 
-	return fmt.Sprintf("database %q created, owned by user %q with grants scoped to that database only", name, owner), nil
+	detail, err := json.Marshal(dbResult{Name: name, OwnerUser: owner})
+	if err != nil {
+		return "", err
+	}
+	return string(detail), nil
 }
 
 func handleDBDelete(ctx context.Context, params map[string]any, progress Progress) (string, error) {
@@ -100,7 +123,11 @@ func handleDBDelete(ctx context.Context, params map[string]any, progress Progres
 		}
 		db.ExecContext(ctx, fmt.Sprintf("DROP USER IF EXISTS `%s`@'localhost'", owner))
 	}
-	return fmt.Sprintf("database %q deleted", name), nil
+	detail, err := json.Marshal(dbResult{Name: name, OwnerUser: owner})
+	if err != nil {
+		return "", err
+	}
+	return string(detail), nil
 }
 
 func handleDBList(ctx context.Context, params map[string]any, progress Progress) (string, error) {
