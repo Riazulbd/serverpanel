@@ -2,6 +2,47 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-17 (later) — Database management: control-plane persistence + dashboard UI
+
+- Closed the gap the previous entry's parity tracker flagged as the recommended next
+  step: `db.create`/`db.delete` (previously agent-capability-only, dispatchable only
+  through the generic task-dispatch endpoint) now go through the same
+  dispatch-then-persist-on-success pattern `site.create` and `backup.run` already use.
+- Added a `databases` table (`apps/controlplane/db.go`) and `store` methods
+  (`createDatabase`/`listDatabases`/`getDatabase`/`deleteDatabase`, each scoped by
+  server ID the same way `getSite`/`getBackup` are) — deliberately **no password
+  column**: `handleCreateDatabase` (`apps/controlplane/databases.go`) generates a
+  random 32-character owner password with `crypto/rand`, hands it to the agent to set,
+  returns it exactly once in the `201` response, and never persists it anywhere — the
+  same "don't store the secret" posture bootstrap tokens and sessions already use.
+- Added three endpoints: `GET`/`POST /api/v1/servers/{id}/databases`,
+  `DELETE /api/v1/servers/{id}/databases/{databaseId}`. Delete reads the stored
+  `name`/`owner_user` server-side before dispatching `db.delete` — a caller can only
+  ever delete a database this control plane actually created and recorded, mirroring
+  `handleRestoreBackup`'s "can't redirect at an arbitrary target" property. Both
+  `name` and `owner_user` are validated against the agent's own identifier allow-list
+  (`^[a-z][a-z0-9_]{0,30}$`, duplicated control-plane-side) before any dispatch, so an
+  invalid request fails as a `400`, not a wasted round trip to the agent.
+- Added a "Databases" panel to the server-detail dashboard view: a "+ New database"
+  modal that shows the generated password exactly once with a copy-now warning, a
+  databases table, and a delete action with a destructive-action confirmation dialog.
+- Added 9 new tests: `packages/capabilities/db_test.go` (identifier-regex accept/
+  reject, and `handleDBCreate`/`handleDBDelete` rejecting invalid name/owner/password
+  params before ever touching MariaDB — the previous session's gap where the `db.go`
+  capability had no dedicated test file at all), `TestDatabaseCreateListGetDeleteRoundTrip`
+  in `store_test.go`, and two HTTP boundary tests in `http_test.go`
+  (`TestCreateDatabaseRejectsInvalidNameAndDispatchesWhenValid`,
+  `TestDeleteDatabaseRequiresARealRecord`). Full suite: 70 test functions passing,
+  `go vet`/`gofmt` clean.
+- Updated `SYSTEM.md`, `API.md`, and `SERVERAVATAR_PARITY.md` (DB-001 now reflects the
+  new persistence/UI layer as `COMPLETE`-for-that-layer, with the real-MariaDB round
+  trip still `BLOCKED_EXTERNAL` in this environment, same as BAK-001/BAK-002; the
+  now-redundant DB-005 summary row was folded into DB-001).
+- Real `CREATE DATABASE`/`CREATE USER`/`GRANT`/`DROP` execution against a live MariaDB
+  is unchanged from the prior session (manually verified then, not re-verified here —
+  no MariaDB in this environment) — only the new control-plane layer around it is new,
+  and that layer is fully automated-tested.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the
