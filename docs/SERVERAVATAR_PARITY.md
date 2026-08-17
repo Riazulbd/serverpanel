@@ -73,6 +73,25 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Known differences**: only PHP 8.3 is actually installed by `stack.install` today, even though per-site PHP-version selection is already parameterized; Apache/OpenLiteSpeed stack adapters don't exist yet.
 - **Reason**: Phase 1 deliberately ships one stack profile; additional stacks are Phase 3 (`product-plan.md` §9).
 
+### SRV-005 — Cron job management
+- **Category**: Server Management
+- **Documentation page**: Server Management → cron/scheduled-task management
+- **Short description**: Create, edit, delete, and enable/disable scheduled commands ("cron jobs") for an application.
+- **Expected behavior** (per ServerAvatar's documented workflow): pick a schedule and a command, the job runs on that schedule under the site's own user, and can be edited/disabled/removed later.
+- **Our implementation**: `cron.sync` (agent) — declarative, not incremental: every create/edit/delete/enable/disable resolves, control-plane side, to "recompute this site's full desired job list and push it," and the agent atomically rewrites that one system user's *entire* crontab in one `crontab -u <user> -` call (stdin, never a shell string), the same "control plane is the source of truth, regenerate the whole file" pattern `site.create` uses for nginx vhosts. Jobs are not a free-text shell command: each is `{binary, args}` where `binary` is one of an allow-listed, already-vetted set (`php`, `wp`, `composer`, `curl`) resolved to an absolute path at sync time, and every arg is checked against a character allow-list containing no shell metacharacter — so even though cron itself ultimately parses the resulting line with `/bin/sh`, there is no character available to a caller that could terminate the intended command or chain a second one. Output is redirected (by the agent, not the caller) to a per-job log file under `/var/log/serverpanel/cron/<user>/<job_id>.log`, owned by that site's own user.
+- **Frontend**: site-detail "Cron jobs" panel — "New cron job" modal (schedule, command dropdown, arguments), jobs table with enable/disable and delete actions.
+- **Backend service**: `apiServer.handleCreateCronJob/handleUpdateCronJob/handleDeleteCronJob/handleSyncCronJobs` (`apps/controlplane/cron.go`), `syncCronForSite` (dispatch-after-persist pattern).
+- **API endpoint(s)**: `GET|POST /api/v1/servers/{id}/sites/{siteId}/cron`, `PUT|DELETE /api/v1/servers/{id}/sites/{siteId}/cron/{jobId}`, `POST /api/v1/servers/{id}/sites/{siteId}/cron/sync`.
+- **Agent command**: `cron.sync`.
+- **DB tables**: `cron_jobs` (`server_id`, `site_id`, `schedule`, `command_binary`, `args_json`, `enabled`, `created_at`, `updated_at`).
+- **Required permission**: authenticated session; `run_as_user` is always the requesting site's own recorded `system_user` (looked up server-side, exactly like `handleRestoreBackup` looks up `docroot`) — a caller can never point a cron job at another site's user or at root.
+- **Security considerations**: `run_as_user` is independently re-validated agent-side (`site_` prefix required, and confirmed to be a real system user via `id -u`) rather than trusted just because the control plane sent it; schedule fields and command arguments are each checked against dedicated allow-list regexes before being placed into a crontab line; a job count cap (100/site) bounds crontab/file-descriptor growth; the log directory is `chown`ed to the job's own user so one site's cron output is never readable by another.
+- **Test coverage**: `packages/capabilities/cron_test.go` — schedule-syntax validation (accept/reject), a regression test for an embedded-newline schedule-normalization defect found and fixed in this pass's own security self-review (`TestValidateCronScheduleRejectsEmbeddedNewline`, `TestHandleCronSyncNormalizesEmbeddedNewlineInSchedule` — see `TESTING.md` §4), allow-listed-binary rejection, `run_as_user` restriction (rejects `root`, rejects an unknown user), argument-injection rejection, a job-count cap, and — against a real installed `crontab` binary plus a real throwaway system user in this session's own Ubuntu 24.04 container — a full write→verify-via-`crontab -l`→clear round trip, confirming the log directory is created and owned correctly. `apps/controlplane/store_test.go` (`TestCronJobCreateListGetUpdateDeleteRoundTrip`, including cross-server-scoping rejection) and `apps/controlplane/http_test.go` (`TestCronEndpointsRequireARealSite`, `TestCreateCronJobRejectsInvalidInput` — validation-before-dispatch, and that a job is persisted/removed even when the sync to a disconnected agent fails).
+- **Current status**: `COMPLETE`
+- **Completion date**: 2026-08-17
+- **Known differences**: no per-job timezone override (jobs run in the server's local system timezone); no in-dashboard viewer for the per-job output log files `cron.sync` already writes; execution is not confirmed against a real running `cron.service` in any environment this project has been tested in (no PID-1 systemd here — see `TESTING.md` §3/§6) even though the crontab-file-contents step is verified for real.
+- **Reason**: timezone-per-job and a log viewer are incremental UI/UX additions on top of a already-complete, already-tested core; scoped out of this pass to keep it focused, not silently dropped (tracked in `SYSTEM.md` §12 "Cron job management" and `TESTING.md` §5).
+
 ### APP-001 — Application (site) lifecycle: create, enable/disable
 - **Category**: Application Management
 - **Documentation page**: Application Management → "Deploy Custom PHP"
@@ -229,7 +248,6 @@ capability surface (per task-brief §3/§101), not just what's already built.
 |---|---|---|---|
 | SRV-003 | SSH/SFTP management, key management, port/root-login controls | `NOT_STARTED` | `product-plan.md` Phase 2 |
 | SRV-004 | Firewall (UFW) rule editing UI, Fail2Ban jail management | `PARTIAL` | Installed with safe defaults by `stack.install`; no rule-editing capability/UI yet |
-| SRV-005 | Cron job management | `NOT_STARTED` | |
 | SRV-006 | Supervisor/PM2 worker management | `NOT_STARTED` | |
 | SRV-007 | Process list / kill | `NOT_STARTED` | |
 | SRV-008 | Historical monitoring (CPU/RAM/disk/network graphs, alerts) | `PARTIAL` | Heartbeat carries current uptime/load/mem%/disk%; no history retention or alerting yet |
@@ -295,9 +313,9 @@ capability surface (per task-brief §3/§101), not just what's already built.
 
 | Status | Count (detailed entries) | Count (summary-table rows) |
 |---|---|---|
-| `COMPLETE` | 3 (SRV-001, BAK-002, ACC-001) | 1 (PROV-006) |
+| `COMPLETE` | 4 (SRV-001, SRV-005, BAK-002, ACC-001) | 1 (PROV-006) |
 | `PARTIAL` | 3 (SRV-002, APP-001, APP-002, DB-001, BAK-001 — 5 total, see note) | 6 |
-| `NOT_STARTED` | 0 | ~55 |
+| `NOT_STARTED` | 0 | ~54 |
 | `BLOCKED_EXTERNAL` | 0 (sub-scoped within BAK-001/BAK-002's db/full-scope MariaDB verification) | 0 |
 | `INTENTIONALLY_NOT_APPLICABLE` | 0 | 1 |
 

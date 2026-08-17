@@ -2,6 +2,59 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-17 — Cron job management (SRV-005)
+
+- **Implemented `cron.sync`** (`packages/capabilities/cron.go`), closing the top
+  `NOT_STARTED` Server Management gap in `SERVERAVATAR_PARITY.md`. Declarative, not
+  incremental: one capability call replaces a site's own system user's *entire*
+  crontab with exactly the job set given, so create/edit/delete/enable/disable are all,
+  agent-side, the same "recompute desired state, sync the whole thing" operation
+  `site.create` already uses for nginx vhosts — no add-one-line/remove-one-line
+  capability, keeping the allow-list small and every sync idempotent/safe to retry.
+  Jobs are not a free-text shell string: each is `{binary, args}`, `binary` drawn from
+  an allow-listed, already-vetted set (`php`, `wp`, `composer`, `curl`) resolved to an
+  absolute path at sync time rather than left to cron's own often-minimal `PATH`, and
+  every argument is checked against a character allow-list containing no shell
+  metacharacter — so no argument can terminate the intended command or smuggle a second
+  one, even though the resulting crontab line is ultimately parsed by cron's own
+  `/bin/sh`. `run_as_user` is independently re-validated agent-side (must be a
+  `site_`-prefixed, actually-existing system user — never root, never trusted just
+  because the control plane sent it) and each job's stdout/stderr is redirected, by the
+  agent rather than the caller, to a per-job log file under a directory `chown`ed to
+  that site's own user.
+- Wired `cron.sync` into the control plane end-to-end: a new `cron_jobs` table (source
+  of truth for job definitions — the agent's crontab is a derived, resynced view of
+  it), `createCronJob`/`listCronJobs`/`getCronJob`/`updateCronJob`/`deleteCronJob` store
+  methods (each scoped by server ID like `getSite`/`getBackup`), five new endpoints
+  (`GET`/`POST /api/v1/servers/{id}/sites/{siteId}/cron`,
+  `PUT`/`DELETE .../cron/{jobId}`, `POST .../cron/sync` as an explicit retry path), and
+  a "Cron jobs" panel per site in the dashboard (new-job modal, jobs table with
+  enable/disable and delete). A job is persisted before the sync is attempted, so a
+  sync failure (agent briefly disconnected) never loses the job's definition — it's
+  retried by the next mutation or an explicit sync call.
+- Added 11 new capability-layer tests, including — against a real `crontab` binary
+  installed in this session specifically to exercise it, and a real throwaway system
+  user on this session's real Ubuntu 24.04.4 LTS container — a full write→verify (via
+  an independent `crontab -l` shell-out, not the handler's own return value)→clear
+  round trip, plus schedule/binary/argument/user validation and injection-rejection
+  tests. Added 1 new store test (full CRUD round trip + cross-server-scoping rejection)
+  and 2 new HTTP tests (not-found boundaries; validation-before-dispatch, and that a job
+  is persisted/removed even when the sync to a disconnected agent fails). Full suite:
+  75 test functions, `go vet`/`gofmt`/`-race` clean.
+- **Security self-review caught and fixed one real defect before commit**: schedule
+  validation checked each of a schedule's 5 fields but wrote the caller's *original*
+  string (not the validated/normalized form) into the generated crontab line — a
+  schedule containing an embedded newline could still tokenize into 5 valid-looking
+  fields (since `strings.Fields` splits on any whitespace) and would have injected a
+  second, attacker-controlled crontab entry. Fixed by having `validateCronSchedule`
+  return the re-joined, normalized field string and requiring every caller to use it;
+  pinned by two regression tests, one of which round-trips through a real `crontab -l`
+  to confirm exactly one job line results. See `TESTING.md` §4 for the full writeup.
+- Updated `SYSTEM.md`, `ARCHITECTURE.md` (the pre-implementation `cron.upsert` sketch
+  is superseded by the as-built `cron.sync` design), `API.md`, `TESTING.md`, and
+  `SERVERAVATAR_PARITY.md` (SRV-005 moved from the not-started summary table to a full
+  `COMPLETE` detail block) to reflect cron job management as implemented.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

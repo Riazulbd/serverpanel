@@ -287,6 +287,113 @@ func TestCreateBackupRejectsInvalidScope(t *testing.T) {
 	}
 }
 
+func TestCronEndpointsRequireARealSite(t *testing.T) {
+	secureCookies = false
+	defer func() { secureCookies = true }()
+
+	a := newTestAPIServer(t)
+	h := a.routes()
+
+	doJSON(t, h, "POST", "/api/v1/auth/signup", map[string]string{
+		"Email": "ops3@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	rec := doJSON(t, h, "POST", "/api/v1/auth/login", map[string]string{
+		"Email": "ops3@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	cookie := sessionCookie(rec)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers", map[string]any{"Name": "web-13"}, cookie)
+	var created struct {
+		ServerID string `json:"server_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+
+	rec = doJSON(t, h, "GET", "/api/v1/servers/"+created.ServerID+"/sites/site_nonexistent/cron", nil, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("list cron jobs for nonexistent site: status = %d, want 404", rec.Code)
+	}
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/sites/site_nonexistent/cron",
+		map[string]any{"schedule": "* * * * *", "binary": "curl"}, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("create cron job for nonexistent site: status = %d, want 404", rec.Code)
+	}
+	rec = doJSON(t, h, "DELETE", "/api/v1/servers/"+created.ServerID+"/sites/site_nonexistent/cron/cron_x", nil, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("delete cron job for nonexistent site: status = %d, want 404", rec.Code)
+	}
+}
+
+func TestCreateCronJobRejectsInvalidInput(t *testing.T) {
+	secureCookies = false
+	defer func() { secureCookies = true }()
+
+	a := newTestAPIServer(t)
+	h := a.routes()
+
+	doJSON(t, h, "POST", "/api/v1/auth/signup", map[string]string{
+		"Email": "ops4@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	rec := doJSON(t, h, "POST", "/api/v1/auth/login", map[string]string{
+		"Email": "ops4@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	cookie := sessionCookie(rec)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers", map[string]any{"Name": "web-14"}, cookie)
+	var created struct {
+		ServerID string `json:"server_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+
+	site, err := a.store.createSite(created.ServerID, "d.example.com", "site_d", "/home/sites/site_d", "wordpress", "8.3")
+	if err != nil {
+		t.Fatalf("createSite: %v", err)
+	}
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/sites/"+site.ID+"/cron",
+		map[string]any{"schedule": "", "binary": "curl"}, cookie)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("create cron job with empty schedule: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/sites/"+site.ID+"/cron",
+		map[string]any{"schedule": "* * * * *", "binary": "bash"}, cookie)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("create cron job with non-allow-listed binary: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// A valid, well-formed request against a site whose server has no
+	// connected agent still persists the job (the control plane, not the
+	// agent, is the source of truth for the job's existence) but reports
+	// the sync failure rather than claiming success.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/sites/"+site.ID+"/cron",
+		map[string]any{"schedule": "0 3 * * *", "binary": "wp", "args": []string{"cron", "event", "run", "--due-now"}}, cookie)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("create cron job with no agent connected: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	rec = doJSON(t, h, "GET", "/api/v1/servers/"+created.ServerID+"/sites/"+site.ID+"/cron", nil, cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list cron jobs status = %d", rec.Code)
+	}
+	var jobs []cronJobRecord
+	json.Unmarshal(rec.Body.Bytes(), &jobs)
+	if len(jobs) != 1 || jobs[0].Schedule != "0 3 * * *" {
+		t.Fatalf("expected the cron job to be persisted despite the sync failure, got %+v", jobs)
+	}
+
+	// Deleting it (also failing to sync, no agent connected) should still
+	// remove it from the control plane's own list.
+	rec = doJSON(t, h, "DELETE", "/api/v1/servers/"+created.ServerID+"/sites/"+site.ID+"/cron/"+jobs[0].ID, nil, cookie)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("delete cron job with no agent connected: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	rec = doJSON(t, h, "GET", "/api/v1/servers/"+created.ServerID+"/sites/"+site.ID+"/cron", nil, cookie)
+	json.Unmarshal(rec.Body.Bytes(), &jobs)
+	if len(jobs) != 0 {
+		t.Fatalf("expected the cron job to be gone from the list after delete, got %+v", jobs)
+	}
+}
+
 func TestRegisterEndpointRejectsBadToken(t *testing.T) {
 	a := newTestAPIServer(t)
 	h := a.routes()

@@ -485,6 +485,134 @@ func scanBackup(row rowScanner) (*backupRecord, error) {
 	return &rec, nil
 }
 
+type cronJobRecord struct {
+	ID        string
+	ServerID  string
+	SiteID    string
+	Schedule  string
+	Binary    string
+	Args      []string
+	Enabled   bool
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// createCronJob persists a new cron job definition. It does not itself
+// touch the server's crontab — see apps/controlplane/cron.go
+// syncCronForSite, which re-derives the agent's desired crontab state from
+// this table after every mutation, the same "control plane is the source
+// of truth" split responsibility createSite/createBackup use relative to
+// their own agent-side capabilities.
+func (s *store) createCronJob(serverID, siteID, schedule, binary string, args []string, enabled bool) (*cronJobRecord, error) {
+	argsJSON, _ := json.Marshal(args)
+	now := time.Now().UTC()
+	rec := &cronJobRecord{
+		ID: randID("cron"), ServerID: serverID, SiteID: siteID, Schedule: schedule,
+		Binary: binary, Args: args, Enabled: enabled, CreatedAt: now, UpdatedAt: now,
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO cron_jobs (id, server_id, site_id, schedule, command_binary, args_json, enabled, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		rec.ID, rec.ServerID, rec.SiteID, rec.Schedule, rec.Binary, string(argsJSON), boolToInt(rec.Enabled),
+		rec.CreatedAt.Format(time.RFC3339Nano), rec.UpdatedAt.Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return nil, err
+	}
+	return rec, nil
+}
+
+// listCronJobs returns a site's cron jobs, newest first. siteID must be
+// non-empty: every cron job this control plane creates is created through
+// the per-site endpoint (see cron.go), so there is always a site to scope
+// the list to — the same convention listBackups follows.
+func (s *store) listCronJobs(serverID, siteID string) []*cronJobRecord {
+	rows, err := s.db.Query(
+		`SELECT id, server_id, site_id, schedule, command_binary, args_json, enabled, created_at, updated_at
+		 FROM cron_jobs WHERE server_id = ? AND site_id = ? ORDER BY created_at DESC`, serverID, siteID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var out []*cronJobRecord
+	for rows.Next() {
+		rec, err := scanCronJob(rows)
+		if err != nil {
+			continue
+		}
+		out = append(out, rec)
+	}
+	return out
+}
+
+// getCronJob looks up one cron job scoped to serverID, for the same
+// cross-tenant-addressing reason getSite/getBackup are scoped to serverID.
+func (s *store) getCronJob(serverID, jobID string) (*cronJobRecord, bool) {
+	row := s.db.QueryRow(
+		`SELECT id, server_id, site_id, schedule, command_binary, args_json, enabled, created_at, updated_at
+		 FROM cron_jobs WHERE id = ? AND server_id = ?`, jobID, serverID)
+	rec, err := scanCronJob(row)
+	if err != nil {
+		return nil, false
+	}
+	return rec, true
+}
+
+func (s *store) updateCronJob(serverID, jobID, schedule, binary string, args []string, enabled bool) (*cronJobRecord, error) {
+	argsJSON, _ := json.Marshal(args)
+	now := time.Now().UTC()
+	res, err := s.db.Exec(
+		`UPDATE cron_jobs SET schedule = ?, command_binary = ?, args_json = ?, enabled = ?, updated_at = ?
+		 WHERE id = ? AND server_id = ?`,
+		schedule, binary, string(argsJSON), boolToInt(enabled), now.Format(time.RFC3339Nano), jobID, serverID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, fmt.Errorf("cron job not found")
+	}
+	rec, ok := s.getCronJob(serverID, jobID)
+	if !ok {
+		return nil, fmt.Errorf("cron job not found after update")
+	}
+	return rec, nil
+}
+
+func (s *store) deleteCronJob(serverID, jobID string) error {
+	res, err := s.db.Exec(`DELETE FROM cron_jobs WHERE id = ? AND server_id = ?`, jobID, serverID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("cron job not found")
+	}
+	return nil
+}
+
+func scanCronJob(row rowScanner) (*cronJobRecord, error) {
+	var rec cronJobRecord
+	var argsJSON, createdAt, updatedAt string
+	var enabled int
+	if err := row.Scan(&rec.ID, &rec.ServerID, &rec.SiteID, &rec.Schedule, &rec.Binary, &argsJSON,
+		&enabled, &createdAt, &updatedAt); err != nil {
+		return nil, err
+	}
+	json.Unmarshal([]byte(argsJSON), &rec.Args)
+	rec.Enabled = enabled != 0
+	rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+	rec.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedAt)
+	return &rec, nil
+}
+
 func randID(prefix string) string {
 	n, _ := rand.Int(rand.Reader, big.NewInt(1<<62))
 	return fmt.Sprintf("%s_%x", prefix, n)

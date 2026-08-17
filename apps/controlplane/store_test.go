@@ -297,3 +297,56 @@ func TestBackupCreateListGetRoundTrip(t *testing.T) {
 		t.Fatal("expected getBackup to refuse a backup ID under the wrong server")
 	}
 }
+
+func TestCronJobCreateListGetUpdateDeleteRoundTrip(t *testing.T) {
+	st := newTestStore(t)
+	serverID, _, _ := st.createServer("web-11", "", nil, time.Hour, "admin@example.com")
+	site, err := st.createSite(serverID, "cron.example.com", "site_cron", "/home/sites/site_cron", "wordpress", "8.3")
+	if err != nil {
+		t.Fatalf("createSite: %v", err)
+	}
+
+	job, err := st.createCronJob(serverID, site.ID, "0 3 * * *", "wp", []string{"cron", "event", "run", "--due-now"}, true)
+	if err != nil {
+		t.Fatalf("createCronJob: %v", err)
+	}
+	if job.ID == "" || !job.Enabled {
+		t.Fatalf("unexpected cron job record: %+v", job)
+	}
+
+	list := st.listCronJobs(serverID, site.ID)
+	if len(list) != 1 || list[0].Schedule != "0 3 * * *" || len(list[0].Args) != 4 {
+		t.Fatalf("listCronJobs = %+v, want one matching entry", list)
+	}
+
+	got, ok := st.getCronJob(serverID, job.ID)
+	if !ok || got.Binary != "wp" {
+		t.Fatalf("getCronJob = %+v, ok=%v", got, ok)
+	}
+
+	otherServer, _, _ := st.createServer("web-12", "", nil, time.Hour, "admin@example.com")
+	if _, ok := st.getCronJob(otherServer, job.ID); ok {
+		t.Fatal("expected getCronJob to refuse a job ID under the wrong server")
+	}
+
+	updated, err := st.updateCronJob(serverID, job.ID, "*/15 * * * *", "curl", []string{"https://example.com/cron"}, false)
+	if err != nil {
+		t.Fatalf("updateCronJob: %v", err)
+	}
+	if updated.Schedule != "*/15 * * * *" || updated.Binary != "curl" || updated.Enabled {
+		t.Fatalf("unexpected updated record: %+v", updated)
+	}
+	if _, err := st.updateCronJob(otherServer, job.ID, "* * * * *", "curl", nil, true); err == nil {
+		t.Fatal("expected updateCronJob to refuse a job ID under the wrong server")
+	}
+
+	if err := st.deleteCronJob(otherServer, job.ID); err == nil {
+		t.Fatal("expected deleteCronJob to refuse a job ID under the wrong server")
+	}
+	if err := st.deleteCronJob(serverID, job.ID); err != nil {
+		t.Fatalf("deleteCronJob: %v", err)
+	}
+	if _, ok := st.getCronJob(serverID, job.ID); ok {
+		t.Fatal("expected the cron job to be gone after deleteCronJob")
+	}
+}

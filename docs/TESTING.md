@@ -2,7 +2,7 @@
 
 ## 1. Current automated coverage
 
-`go test ./...` — 61 test functions across two packages, all passing, no `-race`
+`go test ./...` — 75 test functions across two packages, all passing, no `-race`
 failures, `go vet` clean, `gofmt -l` clean:
 
 ```
@@ -15,8 +15,8 @@ go test ./... -race
 
 | Package | Tests | What they cover |
 |---|---|---|
-| `apps/controlplane` | 27 | Auth/session lifecycle (create, MFA-verify, expiry, delete), bcrypt password rules, email normalization/uniqueness, TOTP round-trip/skew/rejection, bootstrap-token single-use/expiry/unknown-token, server create/list/get, revocation (cert-serial blocking + status transitions, including that a stray disconnect can't resurrect a revoked server), heartbeat recording, audit-log append, site create/list, `getSite`'s cross-server scoping, backup create/list/get round trip and its own cross-server scoping, and 6 full HTTP integration tests through `routes()` with `httptest` covering signup→login→protected-route, the full 2FA enroll→logout→login→MFA-challenge→access flow, server create/list/revoke, agent registration with a bad token, the backup endpoints' not-found boundaries, and backup-request validation (bad scope, missing `db_name`, and confirming validation runs before dispatch) |
-| `packages/capabilities` | 34 | Capability dispatch (unknown name rejected, `system.ping` works, nil `Progress` doesn't panic, the registry has a handler for every declared `Cap*` constant), `service.control`'s allow-list boundary (unit, action, and an explicit shell-metacharacter-injection attempt, all rejected before `systemctl` is ever invoked), the file manager's path-traversal and symlink-escape defenses (`resolveScopedPath`), oversized-read/write rejection, refusal to delete the site root itself, a real list+write round trip against a real filesystem, log redaction (token/password query params, `Authorization: Bearer`/`Basic`), `logs.tail`'s input validation, domain-name validation (including injection-shaped inputs), `systemUserForDomain`'s bounding/sanitization, the deterministic php-fpm-pool/socket/vhost path builders, `backup.run`'s scope validation and a real files-backup-and-checksum round trip, and `backup.restore`'s archive-location/checksum validation, a real files backup→corrupt→restore round trip (with a real throwaway system user, verifying both content restoration and pre-restore checkpoint creation), and `extractTarGzSafely`'s rejection of path-traversal entries, absolute-path entries, and oversized archives |
+| `apps/controlplane` | 30 | Auth/session lifecycle (create, MFA-verify, expiry, delete), bcrypt password rules, email normalization/uniqueness, TOTP round-trip/skew/rejection, bootstrap-token single-use/expiry/unknown-token, server create/list/get, revocation (cert-serial blocking + status transitions, including that a stray disconnect can't resurrect a revoked server), heartbeat recording, audit-log append, site create/list, `getSite`'s cross-server scoping, backup create/list/get round trip and its own cross-server scoping, cron job create/list/get/update/delete round trip and its own cross-server scoping, and 8 full HTTP integration tests through `routes()` with `httptest` covering signup→login→protected-route, the full 2FA enroll→logout→login→MFA-challenge→access flow, server create/list/revoke, agent registration with a bad token, the backup endpoints' not-found boundaries, backup-request validation (bad scope, missing `db_name`, and confirming validation runs before dispatch), the cron endpoints' not-found boundaries, and cron-request validation (empty schedule, non-allow-listed binary, and confirming a job is persisted — and a delete is applied — even when the sync to a not-currently-connected agent fails) |
+| `packages/capabilities` | 45 | Capability dispatch (unknown name rejected, `system.ping` works, nil `Progress` doesn't panic, the registry has a handler for every declared `Cap*` constant), `service.control`'s allow-list boundary (unit, action, and an explicit shell-metacharacter-injection attempt, all rejected before `systemctl` is ever invoked), the file manager's path-traversal and symlink-escape defenses (`resolveScopedPath`), oversized-read/write rejection, refusal to delete the site root itself, a real list+write round trip against a real filesystem, log redaction (token/password query params, `Authorization: Bearer`/`Basic`), `logs.tail`'s input validation, domain-name validation (including injection-shaped inputs), `systemUserForDomain`'s bounding/sanitization, the deterministic php-fpm-pool/socket/vhost path builders, `backup.run`'s scope validation and a real files-backup-and-checksum round trip, `backup.restore`'s archive-location/checksum validation, a real files backup→corrupt→restore round trip (with a real throwaway system user, verifying both content restoration and pre-restore checkpoint creation), `extractTarGzSafely`'s rejection of path-traversal entries, absolute-path entries, and oversized archives, and `cron.sync`'s schedule-syntax validation, allow-listed-binary enforcement, run-as-user restriction (rejects `root`, rejects an unknown system user), shell-metacharacter-injection rejection in job arguments, a job-count cap, and — against a real installed `crontab` binary and a real throwaway system user — a full write→verify-via-`crontab -l`→clear round trip, including that the job's log directory is created and `chown`ed to that user |
 
 None of this is mocked where a cheap real implementation was possible: sessions/users/
 servers/audit run against a real temp-file SQLite database with the real schema (not
@@ -39,6 +39,18 @@ real throwaway system user, real `chown`); their **db**/**full** scope (real
 `mysqldump`/`mysql` against a running MariaDB) is not — this environment doesn't run
 MariaDB, so those paths remain in the same manually-verified-in-a-prior-session bucket
 as the rest of this list.
+
+`cron.sync` is an exception worth calling out precisely: this session's container is
+real, unmodified Ubuntu 24.04.4 LTS (`/etc/os-release`, matches `checkOSSupported`'s
+requirement exactly) running as root, and the `cron` package (providing `/usr/bin/crontab`)
+was not preinstalled — it was `apt-get install`ed in this session specifically so
+`TestHandleCronSyncWritesAndClearsCrontab` could exercise the real binary instead of
+skipping. That test creates a real throwaway system user, calls `handleCronSync`, then
+independently shells out to `crontab -u <user> -l` to assert on what was actually
+written to that user's real crontab (not on `handleCronSync`'s return value), and
+confirms a second sync with an empty job list actually clears it. `systemctl`, by
+contrast, has no PID-1 systemd in this container to act on, which is why it (unlike
+`crontab`) remains in the not-verified list below.
 
 These were **manually verified against a real Ubuntu 24.04 host in a prior session**
 (see `SYSTEM.md` §27 / the bug list below) — real `apt-get` installs, a manually
@@ -95,9 +107,25 @@ From the prior session's manual integration pass:
 - Heartbeats only ever populated uptime; load/memory/disk were implemented via
   `/proc/loadavg`, `/proc/meminfo`, and `syscall.Statfs`.
 
-This session's automated-test pass (see §1) found **no new defects** — every test
-passed on the first correctly-written attempt, which is consistent with (not
-independent proof beyond) the prior manual pass having been genuine.
+The backup-restore session's automated-test pass found no new defects — every test
+passed on the first correctly-written attempt.
+
+The cron job management session (this entry) found one, in its own security
+self-review before committing: `validateCronSchedule` checked each of a schedule's 5
+whitespace-split fields against an allow-list regex, but the *original* (un-normalized)
+schedule string was what got written into the generated crontab line. Since
+`strings.Fields` splits on any whitespace including a literal newline, a schedule like
+`"0\n3 * * *"` still tokenized into exactly 5 individually-valid fields, passed
+validation, and would have had its embedded newline written straight into the crontab
+file — terminating the intended line early and letting the rest be parsed as a second,
+attacker-controlled entry. Fixed by having `validateCronSchedule` return the
+re-joined, single-space-normalized field string, and requiring every caller to use that
+return value rather than the original input; pinned by two regression tests
+(`TestValidateCronScheduleRejectsEmbeddedNewline`,
+`TestHandleCronSyncNormalizesEmbeddedNewlineInSchedule` — the latter round-trips through
+a real `crontab -l` to confirm exactly one job line results, not two). This is exactly
+the "measure twice" self-review the repo's contribution process asks for, working as
+intended — the bug never reached a committed state.
 
 ## 5. Known gaps / recommended next testing investment, in priority order
 
@@ -122,6 +150,12 @@ independent proof beyond) the prior manual pass having been genuine.
    conditions (not just the backoff-loop code review already done).
 5. **`govulncheck`/dependency vulnerability scanning** wired into a CI pipeline (none
    exists yet).
+6. **`cron.sync` against a real, systemd-managed `cron.service`** — this session
+   verified the `crontab` file contents directly (see §2), which is the part that
+   matters for injection/isolation safety, but never confirmed a scheduled job is
+   actually *executed* by a running cron daemon at its scheduled time (no systemd PID 1
+   in this container, same limitation as `service.control`). A dashboard log viewer for
+   the per-job output files `cron.sync` already writes is also not built yet.
 
 ## 6. Running the suite
 

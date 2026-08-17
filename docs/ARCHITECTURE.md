@@ -99,7 +99,7 @@ e.g.:
 | `ssl.issue_letsencrypt` | `{domain}` | Invokes certbot/ACME client with fixed flags, no shell interpolation of user input |
 | `service.control` | `{unit: "nginx", action: "restart"}` | `unit` restricted to an allow-list of managed systemd units |
 | `db.create` | `{name, owner}` | Executes via MySQL client library with parameter binding, not raw SQL string concat |
-| `cron.upsert` | `{schedule, command_id, user}` | `command_id` maps to a pre-registered, reviewed command template — not a free-text shell string |
+| `cron.sync` | `{run_as_user, jobs: [{id, schedule, binary, args}]}` | As built (not `cron.upsert`): `binary` is one of an allow-listed set of reviewed tools (`php`/`wp`/`composer`/`curl`), resolved to an absolute path and combined with allow-list-validated `args` — not a free-text shell string. One call replaces the whole crontab for `run_as_user` (always the requesting site's own isolated system user), so create/edit/delete/enable/disable are all the same declarative sync rather than five separate capabilities |
 | `firewall.apply_rules` | `{rules: [...]}` | Validated, dry-run diffed, applied via the commit-confirm flow (see security doc) |
 | `backup.run` | `{scope: "db"\|"files"\|"full", target}` | Streams progress events back over the same channel |
 

@@ -80,7 +80,7 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | SSH/SFTP management, SSH-key mgmt, port mgmt, root-login controls | ⬜ Phase 2 |
 | Automatic security updates | ⬜ Phase 2 (`unattended-upgrades` integration) |
 | Service controls | ✅ `service.control`, allow-listed units/actions only |
-| Cron-job management | ⬜ Phase 2 |
+| Cron-job management | ✅ `cron.sync` — see "Cron job management" below |
 | Process/worker management | ⬜ Phase 2 |
 | Disk-usage analysis, safe cleanup | ⬜ not started |
 | Server diagnostics | 🚧 `diagnostics.basic` (read-only service-state check); no
@@ -113,6 +113,39 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | Archive creation/extraction | ⬜ not implemented |
 | Application logs / advanced log viewer | 🚧 `logs.tail` (redacted) exists; no
   filtering/search UI yet |
+
+### Cron job management
+| Feature | Status |
+|---|---|
+| Create / edit / delete | ✅ `POST\|PUT\|DELETE /api/v1/servers/{id}/sites/{siteId}/cron[/{jobId}]`,
+  persisted in the `cron_jobs` table (source of truth), then pushed to the agent |
+| Enable / disable | ✅ `enabled` flag on the job record; disabled jobs are simply
+  omitted from the payload the next time the site's crontab is synced, no separate
+  agent-side capability needed |
+| Run-as-user | ✅ always the site's own isolated `system_user` (looked up server-side
+  from the `sites` table, never accepted from the request) — a cron job can never run as
+  another site's user or as root |
+| Schedule validation | ✅ standard 5-field cron syntax, each field checked against an
+  allow-list regex (`validateCronSchedule`); no `@daily`-style macros |
+| Command model | 🚧 not a free-text shell string — each job is `{binary, args}` where
+  `binary` is one of an allow-listed set (`php`, `wp`, `composer`, `curl`), resolved to
+  an absolute path at sync time (never left to cron's own often-minimal `PATH`), and
+  every arg is validated against a character allow-list that excludes every shell
+  metacharacter — so no argument can terminate the intended command or chain a second
+  one, even though cron itself ultimately runs the resulting line through `/bin/sh` |
+| Execution history / output logging | ✅ every job's stdout+stderr is redirected (by
+  the agent, not user-suppliable) to `/var/log/serverpanel/cron/<user>/<job_id>.log`,
+  owned by the site's own user; there is no in-dashboard log viewer for it yet (tracked
+  alongside the general log-viewer gap above) |
+| Timezone awareness | ⬜ not implemented — jobs run in the server's local system
+  timezone, same as `cron` itself; no per-job timezone override |
+| Agent capability | `cron.sync` (`packages/capabilities/cron.go`) — declarative: every
+  create/edit/delete/enable/disable resolves, control-plane side, to "recompute this
+  site's full desired job list and push it," then the agent atomically rewrites that
+  one system user's entire crontab via `crontab -u <user> -` (stdin, never a shell
+  string). This mirrors `site.create`'s "regenerate the whole file" pattern for nginx
+  vhosts, keeps the allow-list to one capability instead of one per CRUD verb, and makes
+  every sync idempotent/safe to retry. |
 
 ### Git deployment
 All ⬜ — explicitly scoped to Phase 2 (`product-plan.md` §9). No Git deployment,
@@ -164,14 +197,14 @@ Phase boundaries and full milestone/estimate tables are in `product-plan.md` §6
 is the condensed status:
 
 - **Phase 1 — secure working foundation:** ~90% of the *capability* surface exists and
-  is tested per-capability (see the tables above); the biggest real gaps are backup
-  **restore**, an automated test suite (now added, see `TESTING.md`), SSL auto-renewal,
-  and agent cert auto-rotation. Not "GA-ready" yet, but the architecture and security
-  primitives it depends on (mTLS, allow-listed capabilities, per-app isolation, audit
-  log) are real and proven, not stubs.
-- **Phase 2 — professional server management:** not started. Git deployment,
-  cron/process management, SSH/firewall management UI, remote backups, cross-server
-  migration all remain ⬜.
+  is tested per-capability (see the tables above); the biggest real gaps are an
+  automated test suite (now added, see `TESTING.md`), SSL auto-renewal, and agent cert
+  auto-rotation. Not "GA-ready" yet, but the architecture and security primitives it
+  depends on (mTLS, allow-listed capabilities, per-app isolation, audit log) are real
+  and proven, not stubs.
+- **Phase 2 — professional server management:** started. Cron job management is done
+  (see §"Cron job management" above); Git deployment, process/worker management,
+  SSH/firewall management UI, remote backups, and cross-server migration remain ⬜.
 - **Phase 3 — commercial platform:** not started.
 
 ## 4. System architecture
@@ -297,8 +330,8 @@ Current capability list: `system.ping`, `service.control`, `diagnostics.basic`,
 `stack.install`, `site.create`, `site.set_php_version`, `site.set_status`,
 `app.wordpress_install`, `ssl.issue_letsencrypt`, `ssl.install_custom`, `db.create`,
 `db.delete`, `db.list`, `file.list`, `file.read`, `file.write`, `file.delete`,
-`backup.run`, `backup.restore`, `logs.tail`. Notably absent (by design, until reviewed
-and added): `git.deploy`, `cron.upsert`, `ssh.*`, `firewall.*`, `agent.self_update`.
+`backup.run`, `backup.restore`, `logs.tail`, `cron.sync`. Notably absent (by design,
+until reviewed and added): `git.deploy`, `ssh.*`, `firewall.*`, `agent.self_update`.
 
 ## 13. Installation and deployment
 

@@ -46,6 +46,11 @@ protected route; there is no route that skips it by omission.
 | `GET` | `/api/v1/servers/{id}/sites/{siteId}/backups` | List backups for a site, newest first |
 | `POST` | `/api/v1/servers/{id}/sites/{siteId}/backups` | Dispatch `backup.run` and persist the resulting backup record |
 | `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a previously recorded backup |
+| `GET` | `/api/v1/servers/{id}/sites/{siteId}/cron` | List cron jobs for a site |
+| `POST` | `/api/v1/servers/{id}/sites/{siteId}/cron` | Create a cron job, then dispatch `cron.sync` for the site |
+| `PUT` | `/api/v1/servers/{id}/sites/{siteId}/cron/{jobId}` | Update a cron job (schedule/command/enabled), then dispatch `cron.sync` |
+| `DELETE` | `/api/v1/servers/{id}/sites/{siteId}/cron/{jobId}` | Delete a cron job, then dispatch `cron.sync` |
+| `POST` | `/api/v1/servers/{id}/sites/{siteId}/cron/sync` | Re-dispatch `cron.sync` without changing any record (retry path after a sync failure) |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -136,6 +141,42 @@ pre-restore safety backups taken automatically before anything was overwritten,
 isn't connected; `422` if `backup.restore` itself failed on the agent (the agent-side
 error message explains why, and any checkpoint already taken is named in it so it's
 never a silent loss).
+
+### `POST /api/v1/servers/{id}/sites/{siteId}/cron`
+```json
+{"schedule": "0 3 * * *", "binary": "wp", "args": ["cron", "event", "run", "--due-now"], "enabled": true}
+```
+`schedule` must be a standard 5-field cron expression; `binary` must be one of `php`,
+`wp`, `composer`, `curl`; each entry in `args` is checked against a shell-metacharacter
+-free allow-list before it's accepted. `enabled` defaults to `true` if omitted. The job
+is persisted first (the control plane, not the agent, is this job's source of truth),
+then `cron.sync` is dispatched with the site's full current enabled job list. → `201`
+with the `cronJobRecord` JSON (`ID`, `ServerID`, `SiteID`, `Schedule`, `Binary`, `Args`,
+`Enabled`, `CreatedAt`, `UpdatedAt`) if the sync also succeeded. `404` if the site
+doesn't exist on that server; `400` for an invalid schedule/binary/too many args; `502`
+if the record was saved but the agent isn't connected (the job still exists — see
+`GET .../cron` — and will be retried by the next mutation or an explicit
+`POST .../cron/sync`).
+
+### `GET /api/v1/servers/{id}/sites/{siteId}/cron`
+→ `200` with an array of `cronJobRecord`, newest first. `404` if the site doesn't exist
+on that server.
+
+### `PUT /api/v1/servers/{id}/sites/{siteId}/cron/{jobId}`
+Same body shape as create. Replaces the job's schedule/binary/args/enabled state, then
+re-syncs the site's full job list. `404` if the site or the job (scoped to that site)
+doesn't exist; `400`/`502` as above.
+
+### `DELETE /api/v1/servers/{id}/sites/{siteId}/cron/{jobId}`
+No body. Removes the job's record, then re-syncs — a job disabled by deletion is simply
+absent from the next `cron.sync` payload. → `200 {"status": "deleted"}` even if the sync
+itself fails (`502`), since the control-plane record is already gone at that point;
+retry via `POST .../cron/sync` once the agent reconnects.
+
+### `POST /api/v1/servers/{id}/sites/{siteId}/cron/sync`
+No body. Re-dispatches `cron.sync` with the site's current job list without changing any
+record — the explicit retry path after a `502` from one of the mutating endpoints above.
+→ `200 {"status": "synced"}`, or `502` if the agent still isn't connected.
 
 ### `POST /agents/register`
 ```json
