@@ -43,6 +43,9 @@ protected route; there is no route that skips it by omission.
 | `POST` | `/api/v1/servers/{id}/tasks` | Dispatch an arbitrary allow-listed capability (see §3) |
 | `GET` | `/api/v1/servers/{id}/sites` | List sites on a server |
 | `POST` | `/api/v1/servers/{id}/sites` | Dispatch `site.create` and persist the resulting site record |
+| `GET` | `/api/v1/servers/{id}/sites/{siteId}/backups` | List backups (and pre-restore checkpoints) recorded for a site |
+| `POST` | `/api/v1/servers/{id}/sites/{siteId}/backups` | Dispatch `backup.run` and persist the resulting backup record |
+| `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore`; persists the agent's own pre-restore checkpoint as a new backup record |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -102,6 +105,40 @@ Dispatches `site.create`, and only on the agent reporting success, persists a `s
 row. → `201 {"site": {...siteRecord}, "temp_domain": "<user>.<ip-with-dashes>.sslip.io"}`.
 A dispatch failure or agent-side failure never leaves an orphan site record — the
 row is written after (and only after) the agent confirms success.
+
+### `POST /api/v1/servers/{id}/sites/{siteId}/backups`
+```json
+{"scope": "full", "db_name": "site_wp_db"}
+```
+`scope` is `db`, `files`, or `full`; `db_name` is required for `db`/`full` (the sites
+table doesn't track a site's database, since one isn't always created — see
+`db.create`). `site_root` is derived server-side from the site's recorded docroot, not
+caller-supplied. Dispatches `backup.run` (up to 300s) and, only on success, persists a
+`backups` row. → `201` with the `backupRecord` JSON (`ID`, `Scope`, `Path`,
+`SizeBytes`, `SHA256`, `DBName`, `Status: "completed"`, `CreatedAt`). Missing/invalid
+scope, or a missing `db_name` for `db`/`full`, → `400` before any dispatch is
+attempted; unknown site → `404`; agent-side failure → `422`; server not connected →
+`502`.
+
+### `GET /api/v1/servers/{id}/sites/{siteId}/backups`
+→ `200` with an array of `backupRecord`, newest first, including any pre-restore
+checkpoints (`Status: "pre_restore_checkpoint"`) alongside ordinary backups — a
+checkpoint is itself a restorable backup, not a hidden side effect.
+
+### `POST /api/v1/servers/{id}/backups/{backupId}/restore`
+No request body — the restore target (site root, database name) and source archive
+are all read from the stored `backupRecord`, never re-supplied by the caller, so a
+restore can't be pointed at a different site/database than the backup was actually
+taken from. Dispatches `backup.restore` (up to 300s), which on the agent side always
+takes a fresh checkpoint of the destination's *current* state before overwriting
+anything (`packages/capabilities/backup.go` `handleBackupRestore`) and verifies the
+source archive's SHA-256 against the value recorded at backup time, refusing to
+restore a corrupted/tampered archive. On success this handler persists that checkpoint
+as its own new `backupRecord` (`Status: "pre_restore_checkpoint"`). →
+`200 {"restored_from": {...backupRecord}, "pre_restore_checkpoint": {...backupRecord}}`.
+Unknown backup ID, or a backup ID belonging to a different `{id}` server, → `404`
+(never restorable cross-server by guessing an ID); agent-side failure (including a
+checksum mismatch) → `422`; server not connected → `502`.
 
 ### `POST /agents/register`
 ```json

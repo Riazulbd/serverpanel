@@ -29,7 +29,40 @@ func openDB(path string) (*sql.DB, error) {
 		db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
+	if err := migrateAddColumnIfMissing(db, "backups", "db_name", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate backups.db_name: %w", err)
+	}
 	return db, nil
+}
+
+// migrateAddColumnIfMissing adds a column to an already-existing table if it
+// isn't there yet. SQLite has no "ADD COLUMN IF NOT EXISTS", and this
+// project has no separate migration tool (see docs/SYSTEM.md §8), so a
+// schema addition to a table that may already exist on disk (from before
+// this column was introduced) needs this one small guarded ALTER TABLE
+// instead of just editing the CREATE TABLE above, which only affects a
+// brand new database file.
+func migrateAddColumnIfMissing(db *sql.DB, table, column, ddl string) error {
+	rows, err := db.Query(fmt.Sprintf(`PRAGMA table_info(%s)`, table))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, colType string
+		var notNull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk); err != nil {
+			return err
+		}
+		if name == column {
+			return nil // already present
+		}
+	}
+	_, err = db.Exec(fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s %s`, table, column, ddl))
+	return err
 }
 
 const schema = `
@@ -105,6 +138,7 @@ CREATE TABLE IF NOT EXISTS backups (
 	path       TEXT NOT NULL,
 	size_bytes INTEGER NOT NULL DEFAULT 0,
 	sha256     TEXT NOT NULL DEFAULT '',
+	db_name    TEXT NOT NULL DEFAULT '',
 	status     TEXT NOT NULL,
 	created_at TEXT NOT NULL
 );

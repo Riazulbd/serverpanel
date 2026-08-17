@@ -109,6 +109,17 @@ Properties this guarantees:
   its entire lifetime. (Exact privilege-separation approach — e.g. Linux capabilities
   vs. a small root helper invoked via a fixed set of subcommands — is an implementation
   detail to finalize in Phase 1, but "no general shell exec" holds either way.)
+- Every capability that accepts a caller-supplied filesystem path resolves it against a
+  fixed managed root via `filepath.EvalSymlinks` before use, rejecting anything that
+  escapes that root by traversal (`../`) or by a symlink planted inside it — not just
+  a string-prefix check. `resolveScopedPath` (`packages/capabilities/file.go`) does
+  this for the file manager against a site's own home directory;
+  `resolveBackupArchivePath` (`packages/capabilities/backup.go`) does the same for
+  `backup.restore`'s `archive_path` against the managed backup directory, so a restore
+  request can never be pointed at an arbitrary file on the host (e.g. `/etc/shadow`) by
+  a crafted path. `backup.restore` additionally re-verifies the archive's SHA-256
+  against the checksum recorded at backup time before restoring anything, refusing a
+  corrupted or tampered archive.
 - All privileged capability invocations are written to an append-only, tamper-evident
   audit log (server-side, in the control plane — not only on the VPS, so a VPS
   compromise can't erase its own history).

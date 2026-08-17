@@ -2,6 +2,53 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-17 — Backup restore: `backup.restore` capability, dedicated backup API, dashboard UI
+
+Closes the single largest functional gap flagged by the previous session (`SYSTEM.md`
+§19/§21, `OPERATIONS.md` §3): backups could be created but never restored.
+
+- **Agent**: new `backup.restore` capability
+  (`packages/capabilities/backup.go`). Verifies the target archive's SHA-256 against
+  the value recorded at backup time before touching anything (refuses a
+  corrupted/tampered archive); always takes a fresh checkpoint backup of the restore
+  destination's *current* state first, so a bad restore is itself recoverable; then
+  restores the database (`mysql` import) and/or files (`cp -a` after clearing the
+  target directory, then `chown` back to the site's system user). Also refactored
+  `backup.run`'s archive format to a stable, scope-independent layout
+  (`manifest.json` + `db.sql` + `files/` at fixed relative paths) so restore never has
+  to guess where the dump/files live inside an archive — the previous format tarred
+  the DB dump from a randomly-named temp path, which restore couldn't reliably locate.
+  New capability constant `CapBackupRestore`, registered in `Default()`.
+- **Control plane**: new `apps/controlplane/backups.go` with
+  `POST/GET /api/v1/servers/{id}/sites/{siteId}/backups` (dispatch `backup.run`,
+  persist the result — same "dispatch, then persist only on success" pattern as
+  `handleCreateSite`) and `POST /api/v1/servers/{id}/backups/{backupId}/restore`
+  (dispatch `backup.restore` using the stored record's own path/checksum/scope — no
+  restore-target parameters accepted from the caller — and persist the agent's
+  pre-restore checkpoint as its own first-class, restorable backup row). Added
+  `store.getSite`, `store.createBackup`, `store.getBackup`, `store.listBackups`, and a
+  `backups.db_name` column with a guarded `ALTER TABLE` migration for databases
+  created before this column existed (`migrateAddColumnIfMissing` in `db.go`).
+- **Dashboard**: a "Backups" panel per site (button on each site's row) — create a
+  backup (scope + optional database name), list existing backups and checkpoints with
+  size/timestamp/status, and restore any of them with a confirmation dialog explaining
+  that a pre-restore checkpoint will be taken first.
+- **Tests**: a real files-scope `backup.run` → `backup.restore` round trip (backs up a
+  real directory tree, corrupts/deletes files, restores, verifies exact content is
+  back) plus archive-path traversal rejection, checksum-mismatch rejection (verifying
+  the target is left untouched), and scope/system-user validation
+  (`packages/capabilities/backup_test.go`, 8 tests); store-level backup CRUD and the
+  `db_name` column migration against a simulated pre-migration database
+  (`apps/controlplane/store_test.go`); HTTP-level request validation for both new
+  endpoints, including that a backup belonging to a different server 404s on restore
+  rather than being restorable by ID-guessing (`apps/controlplane/http_test.go`). Total
+  suite: 60 test functions (was 48), all passing, `go vet`/`gofmt` clean. The db-scope
+  backup/restore path still needs a live MariaDB to exercise for real — same category
+  as `db.create/delete/list`, see `docs/TESTING.md` §2/§5.
+- Updated `docs/API.md`, `docs/SYSTEM.md`, `docs/OPERATIONS.md`, and `docs/TESTING.md`
+  to describe the new endpoints/capability and remove the now-stale "restore not
+  implemented" gap notes.
+
 ## 2026-08-14 — Automated test suite, doc restructuring
 
 - Added `go test` coverage across `apps/controlplane` and `packages/capabilities`

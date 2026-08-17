@@ -1,6 +1,7 @@
 package main
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -243,5 +244,103 @@ func TestCreateAndListSites(t *testing.T) {
 	}
 	if sites[0].Domain != "example.sslip.io" {
 		t.Fatalf("domain = %q, want example.sslip.io", sites[0].Domain)
+	}
+}
+
+func TestGetSiteReturnsRecordByID(t *testing.T) {
+	st := newTestStore(t)
+	id, _, _ := st.createServer("web-7", "", nil, time.Hour, "admin@example.com")
+	site, err := st.createSite(id, "example.org", "sp_xyz", "/home/sites/sp_xyz/public", "php", "8.3")
+	if err != nil {
+		t.Fatalf("createSite: %v", err)
+	}
+	got, ok := st.getSite(site.ID)
+	if !ok {
+		t.Fatal("getSite: expected to find the created site")
+	}
+	if got.Domain != "example.org" || got.SystemUser != "sp_xyz" {
+		t.Fatalf("getSite returned %+v, want domain=example.org system_user=sp_xyz", got)
+	}
+	if _, ok := st.getSite("bkp_does_not_exist"); ok {
+		t.Fatal("getSite: expected an unknown site id to be reported not found")
+	}
+}
+
+func TestCreateAndListBackups(t *testing.T) {
+	st := newTestStore(t)
+	serverID, _, _ := st.createServer("web-8", "", nil, time.Hour, "admin@example.com")
+	site, _ := st.createSite(serverID, "example.net", "sp_bkp1", "/home/sites/sp_bkp1/public", "wordpress", "8.3")
+
+	rec, err := st.createBackup(serverID, site.ID, "full", "/var/backups/serverpanel/sp_bkp1-full-1.tar.gz", 4096, "deadbeef", "sp_bkp1_db", "completed")
+	if err != nil {
+		t.Fatalf("createBackup: %v", err)
+	}
+	if rec.ID == "" {
+		t.Fatal("createBackup: expected a generated ID")
+	}
+
+	got, ok := st.getBackup(rec.ID)
+	if !ok {
+		t.Fatal("getBackup: expected to find the created backup")
+	}
+	if got.DBName != "sp_bkp1_db" || got.Status != "completed" || got.SHA256 != "deadbeef" {
+		t.Fatalf("getBackup returned %+v, want db_name/status/sha256 to round-trip", got)
+	}
+
+	// A pre-restore checkpoint is recorded the same way, just with a
+	// different status — it must show up in the same list.
+	if _, err := st.createBackup(serverID, site.ID, "full", "/var/backups/serverpanel/checkpoint.tar.gz", 2048, "cafef00d", "sp_bkp1_db", "pre_restore_checkpoint"); err != nil {
+		t.Fatalf("createBackup (checkpoint): %v", err)
+	}
+
+	bySite := st.listBackups(serverID, site.ID)
+	if len(bySite) != 2 {
+		t.Fatalf("listBackups(server, site) returned %d, want 2", len(bySite))
+	}
+
+	// listBackups with an empty site filter must still scope to the server.
+	otherServerID, _, _ := st.createServer("web-9", "", nil, time.Hour, "admin@example.com")
+	allOnOriginalServer := st.listBackups(serverID, "")
+	if len(allOnOriginalServer) != 2 {
+		t.Fatalf("listBackups(server, \"\") returned %d, want 2", len(allOnOriginalServer))
+	}
+	if got := st.listBackups(otherServerID, ""); len(got) != 0 {
+		t.Fatalf("listBackups for an unrelated server returned %d, want 0", len(got))
+	}
+}
+
+// TestBackupsTableMigrationAddsDBNameColumn guards the on-disk-upgrade path:
+// a control plane that already has a backups table from before db_name
+// existed must gain the column on next startup rather than fail to open.
+func TestBackupsTableMigrationAddsDBNameColumn(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "legacy.db")
+	db, err := openDB(dbPath)
+	if err != nil {
+		t.Fatalf("openDB (fresh): %v", err)
+	}
+	// Simulate a pre-migration database: drop back to the old column set.
+	if _, err := db.Exec(`DROP TABLE backups`); err != nil {
+		t.Fatalf("drop backups: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TABLE backups (
+		id TEXT PRIMARY KEY, server_id TEXT NOT NULL, site_id TEXT NOT NULL DEFAULT '',
+		scope TEXT NOT NULL, path TEXT NOT NULL, size_bytes INTEGER NOT NULL DEFAULT 0,
+		sha256 TEXT NOT NULL DEFAULT '', status TEXT NOT NULL, created_at TEXT NOT NULL)`); err != nil {
+		t.Fatalf("recreate legacy backups table: %v", err)
+	}
+	db.Close()
+
+	// Re-opening (as the control plane does on every startup) must migrate
+	// the existing table in place, not fail and not silently skip it.
+	db2, err := openDB(dbPath)
+	if err != nil {
+		t.Fatalf("openDB (should migrate legacy table): %v", err)
+	}
+	defer db2.Close()
+	st := newStore(db2)
+
+	id, _, _ := st.createServer("web-10", "", nil, time.Hour, "admin@example.com")
+	if _, err := st.createBackup(id, "", "db", "/var/backups/serverpanel/x.tar.gz", 1, "sha", "some_db", "completed"); err != nil {
+		t.Fatalf("createBackup after migration: %v", err)
 	}
 }

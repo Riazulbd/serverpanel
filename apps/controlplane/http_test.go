@@ -201,6 +201,94 @@ func TestServerCreateListRevokeFlow(t *testing.T) {
 	}
 }
 
+func TestBackupEndpointsValidateWithoutRequiringALiveAgent(t *testing.T) {
+	secureCookies = false
+	defer func() { secureCookies = true }()
+
+	a := newTestAPIServer(t)
+	h := a.routes()
+
+	doJSON(t, h, "POST", "/api/v1/auth/signup", map[string]string{
+		"Email": "backups@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	rec := doJSON(t, h, "POST", "/api/v1/auth/login", map[string]string{
+		"Email": "backups@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	cookie := sessionCookie(rec)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers", map[string]any{"Name": "backup-host"}, cookie)
+	var created struct {
+		ServerID string `json:"server_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+
+	// No such site yet: creating a backup for it must 404, not panic or
+	// attempt to dispatch to a nonexistent site.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/sites/site_missing/backups",
+		map[string]any{"scope": "files"}, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("create backup for missing site status = %d, want 404, body = %s", rec.Code, rec.Body.String())
+	}
+
+	site, err := a.store.createSite(created.ServerID, "example.test", "site_backuptest",
+		"/home/sites/site_backuptest/public", "static", "")
+	if err != nil {
+		t.Fatalf("createSite: %v", err)
+	}
+
+	// Missing scope must be rejected before any dispatch is attempted.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/sites/"+site.ID+"/backups",
+		map[string]any{}, cookie)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("create backup with missing scope status = %d, want 400, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// scope db/full without db_name must be rejected before dispatch too.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/sites/"+site.ID+"/backups",
+		map[string]any{"scope": "db"}, cookie)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("create db-scope backup without db_name status = %d, want 400, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// A valid, well-formed request against a site whose server has no
+	// connected agent must fail with 502 (bad gateway), proving it reached
+	// dispatch rather than 500ing or panicking beforehand.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/sites/"+site.ID+"/backups",
+		map[string]any{"scope": "files"}, cookie)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("create backup against a disconnected server status = %d, want 502, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// Listing must work even with zero backups recorded so far.
+	rec = doJSON(t, h, "GET", "/api/v1/servers/"+created.ServerID+"/sites/"+site.ID+"/backups", nil, cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list backups status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var list []backupRecord
+	json.Unmarshal(rec.Body.Bytes(), &list)
+	if len(list) != 0 {
+		t.Fatalf("expected 0 backups before any succeeded, got %d", len(list))
+	}
+
+	// Restoring an unknown backup ID must 404.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/backups/bkp_missing/restore", nil, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("restore missing backup status = %d, want 404, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// A backup that exists but belongs to a *different* server must also
+	// 404 here, not be restorable cross-server by ID guessing.
+	otherServerID, _, _ := a.store.createServer("other-host", "", nil, time.Hour, "backups@example.com")
+	rec2, err := a.store.createBackup(otherServerID, "", "files", "/var/backups/serverpanel/other.tar.gz", 1, "sha", "", "completed")
+	if err != nil {
+		t.Fatalf("createBackup: %v", err)
+	}
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/backups/"+rec2.ID+"/restore", nil, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("restore backup belonging to a different server status = %d, want 404, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestRegisterEndpointRejectsBadToken(t *testing.T) {
 	a := newTestAPIServer(t)
 	h := a.routes()

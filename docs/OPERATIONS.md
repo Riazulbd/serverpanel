@@ -40,22 +40,28 @@ dashboard).
 
 ## 3. Backup and restore
 
-**Backup** (implemented): dispatch the `backup.run` capability
-(`POST /api/v1/servers/{id}/tasks` with `{"capability": "backup.run", "params": {...}}`)
-— see `packages/capabilities/backup.go` for its `scope`/`target` params. It writes a
-checksummed local tar.gz on the VPS itself and records the checksum in its
-`TaskEvent.detail`. The control plane's `backups` table schema exists (`db.go`) but
-nothing currently writes a row into it automatically — wiring `backup.run`'s dispatch
-through a persistence step analogous to `handleCreateSite` (dispatch → parse result →
-insert row) is a small, well-scoped next task.
+**Backup** (implemented): `POST /api/v1/servers/{id}/sites/{siteId}/backups` with
+`{"scope": "db"|"files"|"full", "db_name": "..."}` dispatches the `backup.run`
+capability and, only on success, persists a `backups` row (`apps/controlplane/backups.go`
+`handleCreateBackup`, mirroring `handleCreateSite`'s "dispatch → parse result → insert
+row" pattern). The archive is a checksummed local tar.gz on the VPS itself, with a
+fixed internal layout (`manifest.json`, `db.sql`, `files/` — see
+`packages/capabilities/backup.go`) so a later restore never has to guess where the
+dump/files live inside it. `GET` on the same path lists a site's backups (and any
+pre-restore checkpoints — see below), newest first.
 
-**Restore** (not implemented): there is no `backup.restore` capability yet. Until one
-exists, restoring from a `backup.run` archive is a fully manual process: SSH to the
-VPS, locate the tar.gz under wherever `backup.run` wrote it, verify its SHA-256 against
-the value in the task's `detail`, and manually extract/restore the DB dump and/or
-files. **Do not represent backup/restore as a complete, tested feature until a real
-`backup.restore` capability exists and has been exercised end-to-end** — see
-`SYSTEM.md` §19 and §21, and `TESTING.md` §5 item 1 for the recommended next step.
+**Restore** (implemented): `POST /api/v1/servers/{id}/backups/{backupId}/restore`
+dispatches the `backup.restore` capability against a previously recorded backup — no
+request body; the source archive, its expected checksum, and the restore destination
+are all read from the stored record, never re-supplied by the caller. Before touching
+anything, the agent verifies the archive's SHA-256 against the value recorded at
+backup time (refusing a corrupted/tampered archive) and takes its own fresh checkpoint
+backup of the destination's *current* state, so a bad restore is itself recoverable.
+That checkpoint is persisted as an ordinary `backups` row
+(`Status: "pre_restore_checkpoint"`) — it shows up in the same list as any other
+backup, restorable the same way. See `SYSTEM.md` §12 and §19, and
+`packages/capabilities/backup_test.go` for the files-scope round-trip test (the
+db-scope path needs a live MariaDB to exercise for real — see `TESTING.md` §5).
 
 ## 4. Monitoring and alerting
 
