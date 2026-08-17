@@ -49,7 +49,10 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | Secure agent install/registration | ✅ bootstrap token → mTLS cert exchange |
 | Agent identity, cert rotation, revocation | 🚧 issuance + revocation done; no
   auto-renewal before expiry yet (see `SECURITY.md` §2) |
-| Server health monitoring | ✅ heartbeat: uptime, load, mem%, disk% |
+| Server health monitoring | ✅ heartbeat: uptime, load, mem%/disk%/absolute-GB, swap
+  (when present); one-time Hello also reports public IP, CPU core count, total
+  memory/disk — all real, sourced from `/proc`, `statfs`, and `runtime.NumCPU()`, no
+  third-party IP-lookup service |
 | Server groups/tags/metadata | ✅ `group`, `tags[]` on server records |
 | Background job queue | ⬜ task dispatch is synchronous request/response today,
   not a durable queue (see `ARCHITECTURE.md` §1 "As built") |
@@ -257,7 +260,8 @@ EXISTS`, applied on every `openDB` call — idempotent, no separate migration to
 |---|---|
 | `users` | id, email (unique, lowercased), bcrypt password hash, TOTP secret/enabled |
 | `sessions` | SHA-256-hashed session token → user, expiry, `mfa_verified` flag |
-| `servers` | id, name, group, tags (JSON), status, cert serial, last heartbeat (JSON) |
+| `servers` | id, name, group, tags (JSON), status, cert serial, agent version, public IP,
+  CPU cores, total memory/disk MB, last heartbeat (JSON) |
 | `bootstrap_tokens` | SHA-256-hashed single-use token → server, expiry |
 | `revoked_certs` | cert serial → server, revoked-at (checked on every gateway handshake) |
 | `audit_log` | append-only: seq, timestamp, server, actor, action, detail |

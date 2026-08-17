@@ -156,6 +156,7 @@
   .gauge-grid { display: flex; flex-wrap: wrap; gap: 18px; justify-content: space-around; align-items: center; }
   .gauge-item { display: flex; flex-direction: column; align-items: center; gap: 6px; }
   .gauge-item .gauge-label { font-size: 11.5px; color: var(--muted); font-weight: 600; }
+  .gauge-item .gauge-detail { font-size: 10.5px; color: var(--muted-2); }
   .gauge-item .stat { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px 14px; }
   .gauge-item .stat .label { font-size: 10.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .03em; }
   .gauge-item .stat .value { font-size: 18px; font-weight: 700; margin-top: 2px; }
@@ -323,6 +324,7 @@
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
             All servers
           </a>
+          <span id="detailBreadcrumbIP"></span>
         </div>
         <div class="card">
           <div class="detail-head">
@@ -335,14 +337,19 @@
 
           <div class="overview-grid">
             <div class="overview-card">
+              <h3>Overview</h3>
+              <div class="kv-list" id="detailOverview"></div>
+            </div>
+            <div class="overview-card">
               <h3>Configuration</h3>
               <div class="kv-list" id="detailConfig"></div>
             </div>
-            <div class="overview-card">
-              <h3>Resource usage</h3>
-              <div class="gauge-grid" id="detailGauges"></div>
-              <p class="field-hint" id="detailNoHeartbeat" style="margin:0"></p>
-            </div>
+          </div>
+
+          <div class="section-title">Resource usage</div>
+          <div class="overview-card">
+            <div class="gauge-grid" id="detailGauges"></div>
+            <p class="field-hint" id="detailNoHeartbeat" style="margin:0"></p>
           </div>
 
           <div class="section-title">Actions</div>
@@ -846,15 +853,25 @@ async function renderServerDetail(id) {
   document.getElementById('detailName').textContent = s.Name;
   document.getElementById('detailId').textContent = s.ID;
   document.getElementById('detailStatus').outerHTML = statusBadge(s.Status).replace('<span', '<span id="detailStatus"');
+  document.getElementById('detailBreadcrumbIP').textContent = s.PublicIP ? (' / ' + s.PublicIP) : '';
 
-  const config = [
+  const overview = [
+    ['Public IP', s.PublicIP || '—'],
     ['Group', s.Group || '—'],
     ['Tags', (s.Tags||[]).length ? (s.Tags||[]).map(escapeHtml).join(', ') : '—'],
+    ['Registered', s.CreatedAt ? new Date(s.CreatedAt).toLocaleDateString() : '—'],
+  ];
+  document.getElementById('detailOverview').innerHTML = kvRows(overview);
+
+  const config = [
+    ['OS', s.PublicIP ? 'Ubuntu 24.04 LTS' : '—'],
+    ['CPU cores', s.CPUCores || '—'],
+    ['Memory', s.MemTotalMB ? formatMB(s.MemTotalMB) : '—'],
+    ['Disk', s.DiskTotalMB ? formatMB(s.DiskTotalMB) : '—'],
     ['Agent version', s.AgentVer || '—'],
     ['Last seen', s.LastSeen && s.LastSeen[0] !== '0' ? new Date(s.LastSeen).toLocaleString() : 'never'],
   ];
-  document.getElementById('detailConfig').innerHTML = config.map(([k,v]) =>
-    `<div class="kv-row"><span class="k">${k}</span><span class="v" title="${escapeHtml(String(v))}">${v}</span></div>`).join('');
+  document.getElementById('detailConfig').innerHTML = kvRows(config);
 
   const hb = s.LastHeartbeat;
   const noHb = document.getElementById('detailNoHeartbeat');
@@ -863,26 +880,44 @@ async function renderServerDetail(id) {
     noHb.textContent = 'No heartbeat received yet — resource usage appears once the agent connects.';
   } else {
     noHb.textContent = '';
-    document.getElementById('detailGauges').innerHTML =
-      gaugeItem(hb.MemUsedPct, 'Memory') + gaugeItem(hb.DiskUsedPct, 'Disk') +
-      `<div class="gauge-item"><div class="stat" style="min-width:76px;text-align:center">
+    let gauges =
+      `<div class="gauge-item"><div class="stat" style="min-width:84px;text-align:center">
          <div class="label">Load (1m)</div><div class="value">${hb.LoadAvg1.toFixed(2)}</div>
-       </div><span class="gauge-label">&nbsp;</span></div>` +
-      `<div class="gauge-item"><div class="stat" style="min-width:76px;text-align:center">
+       </div><span class="gauge-label">${s.CPUCores || '?'} core${s.CPUCores === 1 ? '' : 's'}</span></div>` +
+      gaugeItem(hb.MemUsedPct, 'Memory', hb.MemUsedMB, s.MemTotalMB) +
+      gaugeItem(hb.DiskUsedPct, 'Disk', hb.DiskUsedMB, s.DiskTotalMB);
+    if (hb.SwapTotalMB > 0) {
+      gauges += gaugeItem(hb.SwapUsedMB / hb.SwapTotalMB * 100, 'Swap', hb.SwapUsedMB, hb.SwapTotalMB);
+    }
+    gauges += `<div class="gauge-item"><div class="stat" style="min-width:84px;text-align:center">
          <div class="label">Uptime</div><div class="value" style="font-size:14px">${formatUptime(hb.UptimeSecs)}</div>
        </div><span class="gauge-label">&nbsp;</span></div>`;
+    document.getElementById('detailGauges').innerHTML = gauges;
   }
 }
 
+function kvRows(pairs) {
+  return pairs.map(([k,v]) =>
+    `<div class="kv-row"><span class="k">${k}</span><span class="v" title="${escapeHtml(String(v))}">${v}</span></div>`).join('');
+}
+
+function formatMB(mb) {
+  if (mb >= 1024) return (mb / 1024).toFixed(1) + ' GB';
+  return Math.round(mb) + ' MB';
+}
+
 // gaugeItem renders a small circular usage ring (real percentage, no
-// placeholder/mock data — callers only pass real heartbeat fields) plus a
-// label underneath, in the same visual family as a typical hosting panel's
-// CPU/memory/disk gauges.
-function gaugeItem(pct, label) {
+// placeholder/mock data — callers only pass real heartbeat/hello fields)
+// plus a label and, when both usedMB/totalMB are known, the actual
+// used/free figures underneath — in the same visual family as a typical
+// hosting panel's CPU/memory/disk gauges.
+function gaugeItem(pct, label, usedMB, totalMB) {
   const p = Math.max(0, Math.min(100, pct || 0));
   const r = 28, c = 2 * Math.PI * r;
   const offset = c * (1 - p / 100);
   const color = p >= 90 ? 'var(--danger)' : (p >= 75 ? 'var(--warn)' : 'var(--primary)');
+  const detail = (usedMB != null && totalMB) ?
+    `<span class="gauge-detail">${formatMB(usedMB)} / ${formatMB(totalMB)}</span>` : '';
   return `<div class="gauge-item">
     <svg width="72" height="72" viewBox="0 0 72 72">
       <circle cx="36" cy="36" r="${r}" fill="none" stroke="var(--border)" stroke-width="7"/>
@@ -891,6 +926,7 @@ function gaugeItem(pct, label) {
       <text x="36" y="41" text-anchor="middle" font-size="15" font-weight="700" fill="var(--text)">${Math.round(p)}%</text>
     </svg>
     <span class="gauge-label">${label}</span>
+    ${detail}
   </div>`;
 }
 

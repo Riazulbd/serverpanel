@@ -184,8 +184,13 @@ func TestRecordHeartbeatAndList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("createServer: %v", err)
 	}
-	hb := heartbeatSnapshot{UptimeSecs: 100, LoadAvg1: 0.5, MemUsedPct: 40.2, DiskUsedPct: 12.5, At: time.Now().UTC()}
+	hb := heartbeatSnapshot{
+		UptimeSecs: 100, LoadAvg1: 0.5, MemUsedPct: 40.2, DiskUsedPct: 12.5,
+		MemUsedMB: 512, DiskUsedMB: 8192, SwapTotalMB: 2048, SwapUsedMB: 128,
+		At: time.Now().UTC(),
+	}
 	st.recordHeartbeat(id, hb)
+	st.setAgentFacts(id, "0.2.0", "203.0.113.5", 4, 4096, 40960)
 
 	rec, ok := st.get(id)
 	if !ok {
@@ -196,6 +201,15 @@ func TestRecordHeartbeatAndList(t *testing.T) {
 	}
 	if rec.LastHeartbeat.MemUsedPct != 40.2 {
 		t.Fatalf("MemUsedPct = %v, want 40.2", rec.LastHeartbeat.MemUsedPct)
+	}
+	if rec.LastHeartbeat.MemUsedMB != 512 || rec.LastHeartbeat.SwapTotalMB != 2048 {
+		t.Fatalf("unexpected heartbeat absolute values: %+v", rec.LastHeartbeat)
+	}
+	if rec.PublicIP != "203.0.113.5" || rec.CPUCores != 4 || rec.MemTotalMB != 4096 || rec.DiskTotalMB != 40960 {
+		t.Fatalf("setAgentFacts not reflected in server record: %+v", rec)
+	}
+	if rec.AgentVer != "0.2.0" {
+		t.Fatalf("AgentVer = %q, want 0.2.0", rec.AgentVer)
 	}
 	if len(rec.Tags) != 2 || rec.Tags[0] != "a" {
 		t.Fatalf("Tags = %v, want [a b]", rec.Tags)

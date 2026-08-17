@@ -43,7 +43,11 @@ CREATE TABLE IF NOT EXISTS servers (
 	created_at     TEXT NOT NULL,
 	last_seen      TEXT,
 	agent_version  TEXT NOT NULL DEFAULT '',
-	heartbeat_json TEXT
+	heartbeat_json TEXT,
+	public_ip      TEXT NOT NULL DEFAULT '',
+	cpu_cores      INTEGER NOT NULL DEFAULT 0,
+	mem_total_mb   REAL NOT NULL DEFAULT 0,
+	disk_total_mb  REAL NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS bootstrap_tokens (

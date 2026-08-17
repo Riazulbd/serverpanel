@@ -52,7 +52,13 @@ func runConnection(ctx context.Context, id *identity, reg capabilities.Registry)
 	enc := json.NewEncoder(conn)
 	dec := json.NewDecoder(bufio.NewReader(conn))
 
-	if err := enc.Encode(proto.Envelope{Type: proto.MsgHello, Hello: &proto.Hello{ServerID: id.ServerID, AgentVersion: agentVersion}}); err != nil {
+	mi, di := readMemInfo(), readDiskInfo()
+	hello := &proto.Hello{
+		ServerID: id.ServerID, AgentVersion: agentVersion,
+		PublicIP: primaryIP(), CPUCores: cpuCores(),
+		MemTotalMB: mi.totalMB, DiskTotalMB: di.totalMB,
+	}
+	if err := enc.Encode(proto.Envelope{Type: proto.MsgHello, Hello: hello}); err != nil {
 		return err
 	}
 
@@ -119,12 +125,17 @@ func heartbeatLoop(ctx context.Context, enc *json.Encoder) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			mi, di := readMemInfo(), readDiskInfo()
 			hb := proto.Heartbeat{
 				SentAt:      time.Now().UTC(),
 				UptimeSecs:  uptimeSecs(),
 				LoadAvg1:    loadAvg1(),
-				MemUsedPct:  memUsedPct(),
-				DiskUsedPct: diskUsedPct(),
+				MemUsedPct:  mi.usedPct,
+				DiskUsedPct: di.usedPct,
+				MemUsedMB:   mi.usedMB,
+				DiskUsedMB:  di.usedMB,
+				SwapTotalMB: mi.swapTotalMB,
+				SwapUsedMB:  mi.swapUsedMB,
 			}
 			_ = enc.Encode(proto.Envelope{Type: proto.MsgHeartbeat, Heartbeat: &hb})
 		}

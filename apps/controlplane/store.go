@@ -39,6 +39,10 @@ type serverRecord struct {
 	CreatedAt     time.Time
 	LastSeen      time.Time
 	AgentVer      string
+	PublicIP      string
+	CPUCores      int
+	MemTotalMB    float64
+	DiskTotalMB   float64
 	LastHeartbeat *heartbeatSnapshot
 }
 
@@ -47,6 +51,10 @@ type heartbeatSnapshot struct {
 	LoadAvg1    float64
 	MemUsedPct  float64
 	DiskUsedPct float64
+	MemUsedMB   float64
+	DiskUsedMB  float64
+	SwapTotalMB float64
+	SwapUsedMB  float64
 	At          time.Time
 }
 
@@ -217,8 +225,14 @@ func (s *store) setConnected(serverID string, connected bool) {
 		string(newStatus), time.Now().UTC().Format(time.RFC3339Nano), serverID)
 }
 
-func (s *store) setAgentVersion(serverID, version string) {
-	s.db.Exec(`UPDATE servers SET agent_version = ? WHERE id = ?`, version, serverID)
+// setAgentFacts records the host facts reported once in the agent's Hello
+// message (version, public IP, CPU/memory/disk capacity) — separate from
+// recordHeartbeat, which handles the periodic/dynamic numbers, because
+// these are only ever sent once per connection (see proto.Hello's doc
+// comment).
+func (s *store) setAgentFacts(serverID, version, publicIP string, cpuCores int, memTotalMB, diskTotalMB float64) {
+	s.db.Exec(`UPDATE servers SET agent_version = ?, public_ip = ?, cpu_cores = ?, mem_total_mb = ?, disk_total_mb = ? WHERE id = ?`,
+		version, publicIP, cpuCores, memTotalMB, diskTotalMB, serverID)
 }
 
 func (s *store) recordHeartbeat(serverID string, hb heartbeatSnapshot) {
@@ -227,10 +241,11 @@ func (s *store) recordHeartbeat(serverID string, hb heartbeatSnapshot) {
 		string(hbJSON), hb.At.Format(time.RFC3339Nano), serverID)
 }
 
+const serverColumns = `id, name, grp, tags_json, status, cert_serial, created_at, last_seen, agent_version,
+	heartbeat_json, public_ip, cpu_cores, mem_total_mb, disk_total_mb`
+
 func (s *store) get(serverID string) (*serverRecord, bool) {
-	row := s.db.QueryRow(
-		`SELECT id, name, grp, tags_json, status, cert_serial, created_at, last_seen, agent_version, heartbeat_json
-		 FROM servers WHERE id = ?`, serverID)
+	row := s.db.QueryRow(`SELECT `+serverColumns+` FROM servers WHERE id = ?`, serverID)
 	rec, err := scanServer(row)
 	if err != nil {
 		return nil, false
@@ -239,9 +254,7 @@ func (s *store) get(serverID string) (*serverRecord, bool) {
 }
 
 func (s *store) list() []*serverRecord {
-	rows, err := s.db.Query(
-		`SELECT id, name, grp, tags_json, status, cert_serial, created_at, last_seen, agent_version, heartbeat_json
-		 FROM servers ORDER BY created_at DESC`)
+	rows, err := s.db.Query(`SELECT ` + serverColumns + ` FROM servers ORDER BY created_at DESC`)
 	if err != nil {
 		return nil
 	}
@@ -271,7 +284,8 @@ func scanServer(row rowScanner) (*serverRecord, error) {
 	var createdAt string
 
 	if err := row.Scan(&rec.ID, &rec.Name, &rec.Group, &tagsJSON, &rec.Status, &rec.CertSerial,
-		&createdAt, &lastSeen, &rec.AgentVer, &heartbeatJSON); err != nil {
+		&createdAt, &lastSeen, &rec.AgentVer, &heartbeatJSON, &rec.PublicIP, &rec.CPUCores,
+		&rec.MemTotalMB, &rec.DiskTotalMB); err != nil {
 		return nil, err
 	}
 

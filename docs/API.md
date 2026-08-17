@@ -172,8 +172,8 @@ connection carries newline-delimited JSON `Envelope`s in both directions
 (`packages/proto/proto.go`):
 
 ```json
-{"type": "hello", "hello": {"server_id": "...", "agent_version": "..."}}
-{"type": "heartbeat", "heartbeat": {"sent_at": "...", "uptime_secs": 0, "load_avg_1": 0, "mem_used_pct": 0, "disk_used_pct": 0}}
+{"type": "hello", "hello": {"server_id": "...", "agent_version": "...", "public_ip": "...", "cpu_cores": 0, "mem_total_mb": 0, "disk_total_mb": 0}}
+{"type": "heartbeat", "heartbeat": {"sent_at": "...", "uptime_secs": 0, "load_avg_1": 0, "mem_used_pct": 0, "disk_used_pct": 0, "mem_used_mb": 0, "disk_used_mb": 0, "swap_total_mb": 0, "swap_used_mb": 0}}
 {"type": "task", "task": {"id": "...", "capability": "...", "params": {}, "issued_at": "..."}}
 {"type": "task_event", "task_event": {"task_id": "...", "status": "queued|running|succeeded|failed|rejected", "message": "...", "detail": "...", "at": "..."}}
 {"type": "ack"}

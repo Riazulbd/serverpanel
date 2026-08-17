@@ -2,6 +2,43 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-17 — Real host facts (IP/CPU/memory/disk) end-to-end; overview/gauge redesign
+
+Prompted by a design reference showing overview cards and circular usage gauges
+(original branding, not a copied competitor asset — see the prior entry's redesign
+for that distinction). Implemented for real rather than approximated with placeholder
+numbers:
+
+- Wire protocol (`packages/proto`): `Hello` now carries `public_ip`, `cpu_cores`,
+  `mem_total_mb`, `disk_total_mb` — sent once per connection, since these essentially
+  never change mid-session, keeping steady-state heartbeat traffic unchanged.
+  `Heartbeat` gained `mem_used_mb`, `disk_used_mb`, `swap_total_mb`, `swap_used_mb`
+  alongside the existing percentages.
+- Agent (`apps/agent/metrics.go`): `readMemInfo`/`readDiskInfo` now return absolute
+  values (not just percentages) from the same `/proc/meminfo`/`statfs` reads already
+  being done — no new syscalls per field. `cpuCores` via `runtime.NumCPU()`.
+  `primaryIP` determines the outbound-facing IP via a UDP dial trick (resolves a
+  route and reads the local bound address — no packet ever sent, no third-party
+  IP-lookup API, keeping the core platform free of paid/external dependencies).
+- Control plane: `servers` table gained `public_ip`/`cpu_cores`/`mem_total_mb`/
+  `disk_total_mb` columns, populated by a new `setAgentFacts` (replacing
+  `setAgentVersion`) called from the gateway's `Hello` handler.
+- Dashboard: server-detail page restructured into Overview (public IP, group, tags,
+  registered date) and Configuration (OS, CPU cores, memory, disk, agent version, last
+  seen) cards, plus a resource-usage row with real circular gauges for memory/disk
+  (and swap, only when the host actually has any configured) showing both percentage
+  and actual GB used/free, alongside numeric load-average and uptime tiles.
+- Verified end-to-end against a real running agent (not just unit tests): started the
+  control plane and a real agent locally, registered it, waited for a live heartbeat,
+  and screenshotted the populated dashboard at desktop and 375px — 0px horizontal
+  overflow, all figures cross-checked against the container's actual `/proc` values.
+- Still deliberately not shown: a "Stack" card (web server/database/provider) — those
+  facts are only true after `stack.install` succeeds, and that isn't persisted to the
+  control plane yet (only written to a report file on the agent's own disk), so
+  showing it before verifying would risk misrepresenting a server's real state. A
+  load-history chart remains unimplemented for the same reason as before: no heartbeat
+  history is stored yet, only the latest snapshot.
+
 ## 2026-08-17 — WordPress deployment actually installs; dashboard redesign
 
 - **Bug fix: selecting "WordPress" as a site type never installed WordPress.** The

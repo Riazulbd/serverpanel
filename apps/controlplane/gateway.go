@@ -147,9 +147,11 @@ func (g *gateway) handleConn(conn net.Conn) {
 		switch env.Type {
 		case proto.MsgHello:
 			// Identity is already established from the client cert; Hello
-			// is informational (agent version) and logged, not trusted for auth.
+			// is informational (agent version + host facts) and logged, not
+			// trusted for auth.
 			if env.Hello != nil {
-				g.store.setAgentVersion(serverID, env.Hello.AgentVersion)
+				g.store.setAgentFacts(serverID, env.Hello.AgentVersion, env.Hello.PublicIP,
+					env.Hello.CPUCores, env.Hello.MemTotalMB, env.Hello.DiskTotalMB)
 				g.store.log(serverID, "", "agent.hello", fmt.Sprintf("agent_version=%s", env.Hello.AgentVersion))
 			}
 		case proto.MsgHeartbeat:
@@ -157,6 +159,8 @@ func (g *gateway) handleConn(conn net.Conn) {
 				g.store.recordHeartbeat(serverID, heartbeatSnapshot{
 					UptimeSecs: env.Heartbeat.UptimeSecs, LoadAvg1: env.Heartbeat.LoadAvg1,
 					MemUsedPct: env.Heartbeat.MemUsedPct, DiskUsedPct: env.Heartbeat.DiskUsedPct,
+					MemUsedMB: env.Heartbeat.MemUsedMB, DiskUsedMB: env.Heartbeat.DiskUsedMB,
+					SwapTotalMB: env.Heartbeat.SwapTotalMB, SwapUsedMB: env.Heartbeat.SwapUsedMB,
 					At: env.Heartbeat.SentAt,
 				})
 			}
