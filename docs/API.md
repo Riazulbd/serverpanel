@@ -99,12 +99,33 @@ See `SYSTEM.md` §12 for the full list of valid `capability` values.
 
 ### `POST /api/v1/servers/{id}/sites`
 ```json
-{"domain": "example.com", "app_type": "wordpress", "php_version": "8.3"}
+{"domain": "example.com", "app_type": "wordpress", "php_version": "8.3",
+ "admin_email": "you@example.com", "admin_user": "admin", "site_title": "My Site"}
 ```
 Dispatches `site.create`, and only on the agent reporting success, persists a `sites`
 row. → `201 {"site": {...siteRecord}, "temp_domain": "<user>.<ip-with-dashes>.sslip.io"}`.
 A dispatch failure or agent-side failure never leaves an orphan site record — the
 row is written after (and only after) the agent confirms success.
+
+`admin_email` is **required** when `app_type` is `wordpress` (→ `400` without it) and
+ignored otherwise; `admin_user` defaults to `admin` and `site_title` to the domain. For
+`app_type=wordpress`, this endpoint additionally chains `db.create` and
+`app.wordpress_install` after `site.create` succeeds, generating a least-privilege
+database plus a random admin password, and returns them once:
+
+```json
+{"site": {...}, "temp_domain": "...",
+ "wordpress": {"db_name": "wp_a1b2c3d4e5f6", "admin_user": "admin", "admin_password": "<generated>"}}
+```
+
+The admin password and DB credentials are **not persisted anywhere** in the control
+plane (there is no databases table yet) — this response is the only time they are
+shown, the same treatment `POST /api/v1/servers` gives the bootstrap token. If a
+chained step fails, the response is still `201` but carries
+`{"wordpress_error": "..."}` instead of `wordpress` — the site itself already exists at
+that point and there is no automatic rollback of a successful `site.create`, so the
+caller is told the site exists *and* that the WordPress layer on top of it needs a
+retry, rather than being given a misleading error for the whole call.
 
 ### `POST /api/v1/servers/{id}/backups`
 ```json

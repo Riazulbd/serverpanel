@@ -2,6 +2,41 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-17 — WordPress deployment actually installs; dashboard redesign
+
+- **Bug fix: selecting "WordPress" as a site type never installed WordPress.** The
+  dashboard's New Site flow only ever dispatched `site.create` (system user, PHP-FPM
+  pool, nginx vhost); `app.wordpress_install` existed as a capability but nothing ever
+  called it, and `site.create` writes no placeholder for `app_type=wordpress` (unlike
+  `static`/`php`) — so choosing WordPress produced a working vhost serving an empty
+  document root. `handleCreateSite` now chains `site.create` → `db.create` →
+  `app.wordpress_install` for WordPress sites, generating a least-privilege database
+  and a random admin password, and returns the credentials once in the response (never
+  persisted — there is no databases table yet). A failure in a chained step is reported
+  as `wordpress_error` alongside the created site rather than as an HTTP error, since
+  the site itself already exists at that point and there is no automatic rollback.
+  WordPress core still comes from wordpress.org via `wp-cli`, Composer from
+  getcomposer.org (SHA-384 verified), and WP-CLI from its official GitHub release
+  (SHA-512 verified) — nothing is mirrored or re-hosted by this panel.
+- Dashboard redesign: sidebar navigation (off-canvas drawer under 880px with an
+  explicit close button), page headers, a restructured server-detail page with a
+  configuration card and real SVG usage gauges driven by actual heartbeat data,
+  sites/backups count tiles, tables that reflow into stacked cards under 720px,
+  bottom-sheet modals on phones, copy-to-clipboard for the install command and
+  generated WordPress credentials, focus rings, `aria-label`s on icon-only buttons,
+  Escape-to-close on modals, and 40px+ touch targets. No ServerAvatar/Webuzo assets,
+  markup, or branding were copied — only generic dashboard patterns common to the
+  category.
+- Verified with real browser automation (Playwright/Chromium) at 320/375/414/768px and
+  desktop: **0px horizontal overflow at every breakpoint**, no console or page errors,
+  screenshots reviewed for each. Two real CSS bugs were found and fixed this way: the
+  sidebar close button leaked onto desktop (`button.icon-btn`'s `display:inline-flex`
+  out-specified a bare `.sidebar-close { display:none }`), and the "Resource usage"
+  card rendered as an empty grey box before the first heartbeat.
+- Known gap deliberately not faked: the server-detail page has no load/usage *history*
+  chart, because only the latest heartbeat is stored — a time-series chart would need
+  heartbeat history persisted first, so none is drawn rather than showing invented data.
+
 ## 2026-08-17 — Backup restore, backup persistence, and dashboard Backups UI
 
 Closes the single largest functional gap flagged in the prior session's documentation

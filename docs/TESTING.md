@@ -59,12 +59,16 @@ next testing investment worth making, tracked below.
   been built/tested in.
 - Agent behavior across a real network disconnect/reconnect cycle, a real VPS reboot,
   or a real control-plane restart while agents are live.
-- Dashboard mobile responsiveness at 320/375/390/414/768px — no browser-automation
-  screenshot pass has been run against the dashboard in this session. The dashboard is
-  plain HTML/CSS with no fixed-width layout assumptions spotted on inspection, but
-  "should be responsive" is not the same claim as "verified responsive," and this
-  should not be reported as done until it's actually been checked with real viewport
-  screenshots.
+- ~~Dashboard mobile responsiveness~~ — **now verified** with real browser automation
+  (Playwright + Chromium) at 320/375/414/768px and desktop: signup/login, the servers
+  list, server creation, the server-detail page, the sidebar drawer, and the New Site
+  modal were each driven and screenshotted, asserting
+  `document.documentElement.scrollWidth - clientWidth === 0` (no horizontal overflow)
+  at every breakpoint, with console and `pageerror` listeners attached (none fired).
+  Two real CSS defects were found and fixed by this pass — see §4. Not yet covered:
+  390px specifically (320/375/414 bracket it), screen-reader/keyboard-only navigation
+  testing beyond the static attributes added, and the WordPress/backup flows end-to-end
+  in a browser against a *connected* agent (no agent runs in this environment).
 - Load/performance testing (dashboard CPU/memory under load, agent CPU/memory at idle
   and under task load, backup/restore throughput) — no measurements have been taken.
 - Cross-server workflows (migration/cloning) — not applicable yet, since the feature
@@ -106,10 +110,27 @@ From this session's work adding `backup.restore`:
   read from before extraction ever ran. Fixed by adding a random 8-hex-char suffix to
   every backup filename (`randHex` in `packages/capabilities/backup.go`).
 
-This session's automated-test pass (see §1) found the one new defect described above,
-caught by a real (not mocked) integration test — consistent with the project's stated
-testing philosophy of exercising real system operations wherever feasible rather than
-trusting that a change without a real test is correct.
+From the WordPress/UI pass:
+- **Selecting "WordPress" in the New Site modal never installed WordPress.** The
+  dashboard only dispatched `site.create`; `app.wordpress_install` was implemented and
+  tested at the capability level but no code path ever called it, and `site.create`
+  writes no placeholder file for `app_type=wordpress` — so the flow produced a working
+  nginx vhost over an empty document root, with no error anywhere. Found by tracing the
+  UI flow end-to-end against the handler rather than by any test, which is itself the
+  finding: per-capability tests passing says nothing about whether a capability is
+  *reachable*. Fixed by chaining `site.create` → `db.create` → `app.wordpress_install`
+  in `handleCreateSite`.
+- Two CSS defects found by the browser screenshot pass (not by any assertion — by
+  looking at the rendered output): the sidebar close button leaked onto desktop
+  (`button.icon-btn`'s `display:inline-flex` out-specified a bare
+  `.sidebar-close { display:none }` at equal specificity, so source order won), and the
+  "Resource usage" card rendered as an empty grey box before the first heartbeat
+  arrived.
+
+This session's automated-test passes (see §1) found the defects described above, caught
+by real (not mocked) integration tests and real browser rendering — consistent with the
+project's stated testing philosophy of exercising real system operations wherever
+feasible rather than trusting that a change without a real test is correct.
 
 ## 5. Known gaps / recommended next testing investment, in priority order
 

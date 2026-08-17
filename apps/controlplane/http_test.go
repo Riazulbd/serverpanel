@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"testing"
 	"time"
 )
@@ -256,6 +257,68 @@ func TestBackupEndpointsRequireAConnectedAgentAndValidateInput(t *testing.T) {
 	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/backups/bkp_nonexistent/restore", nil, cookie)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("restore unknown backup status = %d, want 404, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCreateSiteRejectsWordPressWithoutAdminEmail(t *testing.T) {
+	secureCookies = false
+	defer func() { secureCookies = true }()
+
+	a := newTestAPIServer(t)
+	h := a.routes()
+
+	doJSON(t, h, "POST", "/api/v1/auth/signup", map[string]string{
+		"Email": "wp@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	rec := doJSON(t, h, "POST", "/api/v1/auth/login", map[string]string{
+		"Email": "wp@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	cookie := sessionCookie(rec)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers", map[string]any{"Name": "web-1"}, cookie)
+	var created struct {
+		ServerID string `json:"server_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/sites", map[string]any{
+		"domain": "example.com", "app_type": "wordpress",
+	}, cookie)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("create wordpress site with no admin_email status = %d, want 400, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// A non-WordPress site must not require admin_email; with no agent
+	// connected this fails at dispatch (502), never at input validation.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/sites", map[string]any{
+		"domain": "example.com", "app_type": "static",
+	}, cookie)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("create static site status = %d, want 502 (no connected agent), body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestRandomIdentifierMatchesDBIdentifierFormat(t *testing.T) {
+	id, err := randomIdentifier("wp_")
+	if err != nil {
+		t.Fatalf("randomIdentifier: %v", err)
+	}
+	if len(id) > 31 || len(id) == 0 {
+		t.Fatalf("randomIdentifier produced %q (%d chars), want 1-31 chars to satisfy db.go's identifierRe", id, len(id))
+	}
+	matched, _ := regexp.MatchString(`^[a-z][a-z0-9_]{0,30}$`, id)
+	if !matched {
+		t.Fatalf("randomIdentifier produced %q, which does not match identifierRe", id)
+	}
+}
+
+func TestRandomSecretMeetsMinimumLength(t *testing.T) {
+	secret, err := randomSecret(16)
+	if err != nil {
+		t.Fatalf("randomSecret: %v", err)
+	}
+	if len(secret) < 16 {
+		t.Fatalf("randomSecret(16) produced a %d-char secret, want at least 16 (db.create's minimum)", len(secret))
 	}
 }
 

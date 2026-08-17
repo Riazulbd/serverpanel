@@ -84,7 +84,10 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 ### Application management
 | Feature | Status |
 |---|---|
-| WordPress deployment | ✅ real `wp-cli` install as the site's own user |
+| WordPress deployment | ✅ real `wp-cli` install as the site's own user, wired into the
+  New Site flow: `site.create` → `db.create` → `app.wordpress_install`, with a
+  generated least-privilege DB and random admin password returned once. WordPress core
+  is downloaded from wordpress.org by `wp-cli` itself — never mirrored by this panel |
 | Custom PHP / static-site deployment | ✅ `site.create` with `app_type` |
 | Laravel, Node.js, n8n, Mautic deployment | ⬜ Phase 3 |
 | Application isolation | ✅ own system user, php-fpm pool, `open_basedir`,
@@ -187,9 +190,21 @@ bundler, no `node_modules`), embedded into the Go binary via `//go:embed`. Plain
 handles the session token directly — `HttpOnly` cookie). This trades "modern SPA
 tooling" for "the entire frontend is one deployable file with zero build step and zero
 frontend dependency surface to patch," a deliberate Phase 1 choice given the security-
-sensitive nature of the product. It is not yet verified mobile-responsive at the
-320–768px breakpoints called out in the original requirements — see `TESTING.md`
-§Known gaps for what a future pass needs to check with real browser automation.
+sensitive nature of the product.
+
+Layout: a fixed sidebar (Servers / Audit Log / Security) that becomes an off-canvas
+drawer below 880px; tables reflow into stacked cards below 720px via `data-label`
+pseudo-element headers; modals become bottom sheets below 480px. **Verified with
+Playwright/Chromium at 320/375/414/768px and desktop — 0px horizontal overflow at every
+breakpoint, no console errors** (see `TESTING.md`). Accessibility: focus-visible rings,
+`aria-label` on every icon-only control, `role="dialog"`/`aria-modal` on modals,
+Escape-to-close, `role="alert"`/`role="status"` on error and task-result regions, and
+≥40px touch targets.
+
+Deliberately **not** drawn: a server load/usage history chart. Only the latest
+heartbeat is stored (§8), so there is no time series to plot — a chart there would be
+invented data. Persisting heartbeat history is the prerequisite, tracked as a future
+item rather than faked in the UI.
 
 ## 6. Backend architecture
 
