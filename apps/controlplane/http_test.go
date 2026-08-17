@@ -201,6 +201,73 @@ func TestServerCreateListRevokeFlow(t *testing.T) {
 	}
 }
 
+func TestBackupEndpointsFailCleanlyWithoutAConnectedAgent(t *testing.T) {
+	secureCookies = false
+	defer func() { secureCookies = true }()
+
+	a := newTestAPIServer(t)
+	h := a.routes()
+
+	doJSON(t, h, "POST", "/api/v1/auth/signup", map[string]string{
+		"Email": "backups@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	rec := doJSON(t, h, "POST", "/api/v1/auth/login", map[string]string{
+		"Email": "backups@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	cookie := sessionCookie(rec)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers", map[string]any{"Name": "web-backups"}, cookie)
+	var created struct {
+		ServerID string `json:"server_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+
+	// No agent has ever connected for this server, so dispatch must fail
+	// with a clean 502, not hang or panic.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/backups", map[string]any{
+		"scope": "db", "db_name": "somedb",
+	}, cookie)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("create backup with no connected agent status = %d, body = %s, want 502", rec.Code, rec.Body.String())
+	}
+
+	// Missing scope must be rejected before any dispatch is attempted.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/backups", map[string]any{}, cookie)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("create backup with missing scope status = %d, want 400", rec.Code)
+	}
+
+	// scope=files with no site_id must be rejected before dispatch too.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/backups", map[string]any{"scope": "files"}, cookie)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("create backup scope=files with no site_id status = %d, want 400", rec.Code)
+	}
+
+	// Listing backups for a server with none yet must return an empty list,
+	// not an error.
+	rec = doJSON(t, h, "GET", "/api/v1/servers/"+created.ServerID+"/backups", nil, cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list backups status = %d, want 200", rec.Code)
+	}
+
+	// Restoring an unknown backup id must 404, not attempt to dispatch.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/backups/backup_does_not_exist/restore", nil, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("restore unknown backup status = %d, want 404", rec.Code)
+	}
+
+	// A backup that does exist, but with no agent connected: restore must
+	// still fail cleanly with 502, same as create.
+	backup, err := a.store.createBackup(created.ServerID, "", "files", "/var/backups/serverpanel/x.tar.gz", 10, "sha", "completed", "manual", `{"scope":"files","site_root":"/home/sites/x"}`)
+	if err != nil {
+		t.Fatalf("seed backup record: %v", err)
+	}
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/backups/"+backup.ID+"/restore", nil, cookie)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("restore with no connected agent status = %d, body = %s, want 502", rec.Code, rec.Body.String())
+	}
+}
+
 func TestRegisterEndpointRejectsBadToken(t *testing.T) {
 	a := newTestAPIServer(t)
 	h := a.routes()

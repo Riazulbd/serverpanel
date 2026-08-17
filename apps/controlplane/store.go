@@ -339,6 +339,7 @@ type siteRecord struct {
 	Domain     string
 	SystemUser string
 	Docroot    string
+	HomeDir    string
 	AppType    string
 	PHPVersion string
 	Status     string
@@ -347,7 +348,7 @@ type siteRecord struct {
 
 func (s *store) listSites(serverID string) []*siteRecord {
 	rows, err := s.db.Query(
-		`SELECT id, server_id, domain, system_user, docroot, app_type, php_version, status, created_at
+		`SELECT id, server_id, domain, system_user, docroot, home_dir, app_type, php_version, status, created_at
 		 FROM sites WHERE server_id = ? ORDER BY created_at DESC`, serverID)
 	if err != nil {
 		return nil
@@ -358,7 +359,7 @@ func (s *store) listSites(serverID string) []*siteRecord {
 	for rows.Next() {
 		var rec siteRecord
 		var createdAt string
-		if err := rows.Scan(&rec.ID, &rec.ServerID, &rec.Domain, &rec.SystemUser, &rec.Docroot,
+		if err := rows.Scan(&rec.ID, &rec.ServerID, &rec.Domain, &rec.SystemUser, &rec.Docroot, &rec.HomeDir,
 			&rec.AppType, &rec.PHPVersion, &rec.Status, &createdAt); err != nil {
 			continue
 		}
@@ -368,21 +369,115 @@ func (s *store) listSites(serverID string) []*siteRecord {
 	return out
 }
 
-func (s *store) createSite(serverID, domain, systemUser, docroot, appType, phpVersion string) (*siteRecord, error) {
+func (s *store) getSite(serverID, siteID string) (*siteRecord, bool) {
+	for _, rec := range s.listSites(serverID) {
+		if rec.ID == siteID {
+			return rec, true
+		}
+	}
+	return nil, false
+}
+
+func (s *store) createSite(serverID, domain, systemUser, docroot, homeDir, appType, phpVersion string) (*siteRecord, error) {
 	rec := &siteRecord{
 		ID: randID("site"), ServerID: serverID, Domain: domain, SystemUser: systemUser,
-		Docroot: docroot, AppType: appType, PHPVersion: phpVersion, Status: "active", CreatedAt: time.Now().UTC(),
+		Docroot: docroot, HomeDir: homeDir, AppType: appType, PHPVersion: phpVersion, Status: "active", CreatedAt: time.Now().UTC(),
 	}
 	_, err := s.db.Exec(
-		`INSERT INTO sites (id, server_id, domain, system_user, docroot, app_type, php_version, status, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		rec.ID, rec.ServerID, rec.Domain, rec.SystemUser, rec.Docroot, rec.AppType, rec.PHPVersion, rec.Status,
+		`INSERT INTO sites (id, server_id, domain, system_user, docroot, home_dir, app_type, php_version, status, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		rec.ID, rec.ServerID, rec.Domain, rec.SystemUser, rec.Docroot, rec.HomeDir, rec.AppType, rec.PHPVersion, rec.Status,
 		rec.CreatedAt.Format(time.RFC3339Nano),
 	)
 	if err != nil {
 		return nil, err
 	}
 	return rec, nil
+}
+
+// backupRecord mirrors one row of the backups table. ParamsJSON persists
+// the exact scope/site_root/db_name a backup was taken with, so restoring
+// it later never requires the caller to re-derive or re-supply those —
+// see apps/controlplane/backups.go handleRestoreBackup.
+type backupRecord struct {
+	ID         string
+	ServerID   string
+	SiteID     string
+	Scope      string
+	Path       string
+	SizeBytes  int64
+	SHA256     string
+	Status     string
+	Kind       string // "manual" (user-triggered) or "checkpoint" (auto-created before a restore)
+	ParamsJSON string
+	CreatedAt  time.Time
+}
+
+func (s *store) createBackup(serverID, siteID, scope, path string, sizeBytes int64, sha256, status, kind, paramsJSON string) (*backupRecord, error) {
+	rec := &backupRecord{
+		ID: randID("backup"), ServerID: serverID, SiteID: siteID, Scope: scope, Path: path,
+		SizeBytes: sizeBytes, SHA256: sha256, Status: status, Kind: kind, ParamsJSON: paramsJSON,
+		CreatedAt: time.Now().UTC(),
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO backups (id, server_id, site_id, scope, path, size_bytes, sha256, status, kind, params_json, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		rec.ID, rec.ServerID, rec.SiteID, rec.Scope, rec.Path, rec.SizeBytes, rec.SHA256, rec.Status, rec.Kind,
+		rec.ParamsJSON, rec.CreatedAt.Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return nil, err
+	}
+	return rec, nil
+}
+
+func scanBackup(row rowScanner) (*backupRecord, error) {
+	var rec backupRecord
+	var createdAt string
+	if err := row.Scan(&rec.ID, &rec.ServerID, &rec.SiteID, &rec.Scope, &rec.Path, &rec.SizeBytes,
+		&rec.SHA256, &rec.Status, &rec.Kind, &rec.ParamsJSON, &createdAt); err != nil {
+		return nil, err
+	}
+	rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+	return &rec, nil
+}
+
+func (s *store) listBackups(serverID, siteID string) []*backupRecord {
+	query := `SELECT id, server_id, site_id, scope, path, size_bytes, sha256, status, kind, params_json, created_at
+		 FROM backups WHERE server_id = ?`
+	args := []any{serverID}
+	if siteID != "" {
+		query += ` AND site_id = ?`
+		args = append(args, siteID)
+	}
+	query += ` ORDER BY created_at DESC`
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var out []*backupRecord
+	for rows.Next() {
+		rec, err := scanBackup(rows)
+		if err != nil {
+			continue
+		}
+		out = append(out, rec)
+	}
+	return out
+}
+
+func (s *store) getBackup(serverID, backupID string) (*backupRecord, bool) {
+	row := s.db.QueryRow(
+		`SELECT id, server_id, site_id, scope, path, size_bytes, sha256, status, kind, params_json, created_at
+		 FROM backups WHERE server_id = ? AND id = ?`, serverID, backupID)
+	rec, err := scanBackup(row)
+	if err != nil {
+		return nil, false
+	}
+	return rec, true
 }
 
 func randID(prefix string) string {

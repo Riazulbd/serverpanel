@@ -2,6 +2,55 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-17 — Backup restore, and backups wired into the dashboard/API
+
+- Added `backup.restore` (`packages/capabilities/backup.go`), closing the gap flagged
+  as the single largest functional shortfall in the prior pass (see 2026-08-14 below
+  and `SYSTEM.md` §19/§21). It extracts a `backup.run` archive and, for `files`/`full`
+  scope, replaces the target `site_root`'s contents with the archive's (clearing what's
+  there first, then `cp -a`, then a best-effort ownership fix), and for `db`/`full`
+  scope, pipes the archive's dump into `mysql <db_name>`. Unless `checkpoint: false` is
+  passed, it takes a fresh `backup.run` of whatever's about to be overwritten *first*
+  and aborts the entire restore before touching anything if that step fails — a
+  pre-restore safety net, not a note in a doc.
+- Refactored `backup.run`'s archive layout so restoring is possible at all: instead of
+  embedding the caller's actual paths (which baked in the original temp-dir name for
+  DB dumps and the original site directory name for files), the archive now always
+  uses fixed top-level entry names (`db/<name>.sql`, `files/...`) built via `tar -h -C`
+  against a staging directory. This is also what makes restoring a backup onto a
+  *different* site or server's `site_root`/`db_name` possible in principle, ahead of
+  the product plan's cross-server-restore requirement — the dashboard/API restore flow
+  itself still only targets the server the backup was listed under (see `SYSTEM.md`
+  §19/§21 for that remaining gap).
+- Added `resolveBackupPath` (mirrors `file.go`'s `resolveScopedPath` symlink-safe
+  containment check, applied to `/var/backups/serverpanel` instead of a site root) so
+  `backup.restore` can't be handed a path outside the managed backup directory.
+- Wired backups into the control plane end-to-end, previously entirely missing despite
+  the `backups` table existing in schema since the first Phase 1 pass: new
+  `POST`/`GET /api/v1/servers/{id}/backups` and
+  `POST /api/v1/servers/{id}/backups/{backupId}/restore` endpoints
+  (`apps/controlplane/backups.go`), new `store` methods (`createBackup`, `listBackups`
+  with an optional site filter, `getBackup`), and a `backups` dashboard section per
+  server (back up now, list with size/scope/kind, one-click restore with a
+  confirmation dialog that explains the automatic checkpoint).
+- Added `sites.home_dir` (and `siteResult.HomeDir`/`site.go`'s `home` value) so the
+  control plane has the site's actual home directory on hand for backup/restore
+  requests, instead of fragilely re-deriving it from `docroot`'s parent.
+- Added `migrateSchema` (`apps/controlplane/db.go`) — best-effort, idempotent
+  `ALTER TABLE ... ADD COLUMN` statements for the two new `backups` columns
+  (`kind`, `params_json`) and the new `sites.home_dir` column, so an existing
+  development database doesn't need to be deleted to pick up the new columns. Not a
+  real migration framework — documented as a known limitation in `SYSTEM.md` §21.
+- Tests: 13 new test functions (48 → 61 total, see `TESTING.md`) covering
+  `backup.run`/`backup.restore`'s scope validation, `resolveBackupPath`'s
+  containment/traversal/directory-rejection defenses, a full files-scope
+  backup→mutate→restore round trip against a real filesystem (including that files
+  added after the backup don't survive restore and nested subdirectories do), a
+  checkpoint-then-restore-the-checkpoint scenario proving the safety net actually
+  recovers the pre-restore state, the new `store` methods, and the new HTTP endpoints
+  failing cleanly (400/404/502) with no agent connected. `go build`, `go vet`,
+  `gofmt -l`, `go test ./...`, and `go test ./... -race` all clean.
+
 ## 2026-08-14 — Automated test suite, doc restructuring
 
 - Added `go test` coverage across `apps/controlplane` and `packages/capabilities`

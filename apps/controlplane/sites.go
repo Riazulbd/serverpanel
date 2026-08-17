@@ -51,6 +51,7 @@ func (a *apiServer) handleCreateSite(w http.ResponseWriter, r *http.Request) {
 		TempDomain string `json:"temp_domain"`
 		SystemUser string `json:"system_user"`
 		Docroot    string `json:"docroot"`
+		HomeDir    string `json:"home_dir"`
 		PHPVersion string `json:"php_version"`
 		AppType    string `json:"app_type"`
 	}
@@ -59,7 +60,7 @@ func (a *apiServer) handleCreateSite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	site, err := a.store.createSite(serverID, result.Domain, result.SystemUser, result.Docroot, result.AppType, result.PHPVersion)
+	site, err := a.store.createSite(serverID, result.Domain, result.SystemUser, result.Docroot, result.HomeDir, result.AppType, result.PHPVersion)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "site was created on the agent but could not be recorded: "+err.Error())
 		return

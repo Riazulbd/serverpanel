@@ -101,7 +101,8 @@ e.g.:
 | `db.create` | `{name, owner}` | Executes via MySQL client library with parameter binding, not raw SQL string concat |
 | `cron.upsert` | `{schedule, command_id, user}` | `command_id` maps to a pre-registered, reviewed command template — not a free-text shell string |
 | `firewall.apply_rules` | `{rules: [...]}` | Validated, dry-run diffed, applied via the commit-confirm flow (see security doc) |
-| `backup.run` | `{scope: "db"\|"files"\|"full", target}` | Streams progress events back over the same channel |
+| `backup.run` | `{scope: "db"\|"files"\|"full", site_root, db_name}` | Archive uses fixed `db/`/`files/` entry names, decoupled from the original path/DB name, so it can be restored elsewhere |
+| `backup.restore` | `{path, scope, site_root, db_name, checkpoint}` | Takes a fresh `backup.run` of the restore target first (unless `checkpoint: false`), aborting before touching anything if that fails |
 
 Every capability call is logged (request + result) into the append-only audit log.
 Capabilities are versioned so the control plane can detect an agent that doesn't yet

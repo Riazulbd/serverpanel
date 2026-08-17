@@ -33,6 +33,27 @@ func run(ctx context.Context, name string, args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), err
 }
 
+// runWithStdinFile is run's counterpart for commands that read their input
+// from stdin (e.g. `mysql dbname < dump.sql`) instead of taking it as an
+// argument — still a fixed argv, just with a file attached as stdin rather
+// than a shell redirection.
+func runWithStdinFile(ctx context.Context, stdinPath, name string, args ...string) (string, error) {
+	f, err := os.Open(stdinPath)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Stdin = f
+	cmd.Env = append(os.Environ(),
+		"DEBIAN_FRONTEND=noninteractive",
+		"COMPOSER_ALLOW_SUPERUSER=1",
+	)
+	out, err := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out)), err
+}
+
 // isPackageInstalled reports whether an apt package is already installed,
 // which is what makes stack installation idempotent/safely-retryable: a
 // re-run skips every step whose target state already holds.

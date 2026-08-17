@@ -40,22 +40,41 @@ dashboard).
 
 ## 3. Backup and restore
 
-**Backup** (implemented): dispatch the `backup.run` capability
-(`POST /api/v1/servers/{id}/tasks` with `{"capability": "backup.run", "params": {...}}`)
-— see `packages/capabilities/backup.go` for its `scope`/`target` params. It writes a
-checksummed local tar.gz on the VPS itself and records the checksum in its
-`TaskEvent.detail`. The control plane's `backups` table schema exists (`db.go`) but
-nothing currently writes a row into it automatically — wiring `backup.run`'s dispatch
-through a persistence step analogous to `handleCreateSite` (dispatch → parse result →
-insert row) is a small, well-scoped next task.
+**Backup** (implemented): from the dashboard, open a server, pick "Back up now,"
+choose a scope (files / database / both) and, for files/full, a site. Under the hood
+this is `POST /api/v1/servers/{id}/backups` (`{"scope", "site_id", "db_name"}`), which
+dispatches the `backup.run` capability (`packages/capabilities/backup.go`) and, only
+on success, persists a `backups` row — the same dispatch-then-record shape as site
+creation (`handleCreateSite`). The archive is a checksummed local tar.gz on the VPS
+itself (`/var/backups/serverpanel`), never uploaded anywhere (no S3-compatible remote
+storage yet — see `SYSTEM.md` §21).
 
-**Restore** (not implemented): there is no `backup.restore` capability yet. Until one
-exists, restoring from a `backup.run` archive is a fully manual process: SSH to the
-VPS, locate the tar.gz under wherever `backup.run` wrote it, verify its SHA-256 against
-the value in the task's `detail`, and manually extract/restore the DB dump and/or
-files. **Do not represent backup/restore as a complete, tested feature until a real
-`backup.restore` capability exists and has been exercised end-to-end** — see
-`SYSTEM.md` §19 and §21, and `TESTING.md` §5 item 1 for the recommended next step.
+**Restore** (implemented): click "Restore" next to any backup in the dashboard's
+backups list. This calls `POST /api/v1/servers/{id}/backups/{backupId}/restore`, which
+recovers the original `scope`/`site_root`/`db_name` from the backup's stored
+parameters and dispatches `backup.restore`. By default (`{"checkpoint": true}`, the
+implicit default when the request body is omitted, as the dashboard does) the agent
+first takes a fresh backup of whatever is about to be overwritten and aborts the
+entire restore before touching anything if that checkpoint step itself fails — so a
+restore is never a one-way door. The checkpoint, when one is taken, is itself
+persisted as a normal listable/restorable backup (`Kind: "checkpoint"`).
+
+Operationally: restoring a `files`/`full` backup **replaces** the target site's
+current directory contents outright (existing files not in the backup are removed,
+matching "restore to the backup's state," not "merge with current state") — this is
+why the default checkpoint is on. Restoring a `db`/`full` backup pipes the archive's
+SQL dump into the target database via `mysql <db_name>` — the database must already
+exist (created via `db.create`) with a name matching `db_name`; `backup.restore` does
+not create databases. There is no dashboard flow yet for restoring onto a *different*
+server than the backup was listed under, even though the capability itself doesn't
+require the site/DB names to match what the backup was originally taken from (see
+`SYSTEM.md` §19).
+
+**Manual recovery**, if the dashboard/API path is unavailable: SSH to the VPS, the
+archive is under `/var/backups/serverpanel/`, verify its SHA-256 against the value
+recorded on the backup's dashboard row, `tar -xzf` it (it always contains `db/` and/or
+`files/` top-level entries — see `handleBackupRun`'s doc comment), and restore each
+piece by hand.
 
 ## 4. Monitoring and alerting
 

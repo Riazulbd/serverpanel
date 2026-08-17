@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -29,7 +30,33 @@ func openDB(path string) (*sql.DB, error) {
 		db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
+	if err := migrateSchema(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate schema: %w", err)
+	}
 	return db, nil
+}
+
+// migrateSchema applies additive, best-effort column additions for columns
+// introduced after a table's original CREATE TABLE IF NOT EXISTS — the only
+// kind of schema change this project's no-separate-migration-tool approach
+// (see docs/SYSTEM.md §6) can handle safely without a real migration
+// framework. Each statement is independent and idempotent: on a fresh
+// database the column already exists (added by schema above) and the
+// ALTER simply fails with "duplicate column name", which is ignored; on an
+// existing database predating the column, the ALTER adds it in place.
+func migrateSchema(db *sql.DB) error {
+	stmts := []string{
+		`ALTER TABLE sites ADD COLUMN home_dir TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE backups ADD COLUMN params_json TEXT NOT NULL DEFAULT '{}'`,
+		`ALTER TABLE backups ADD COLUMN kind TEXT NOT NULL DEFAULT 'manual'`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+			return fmt.Errorf("%s: %w", stmt, err)
+		}
+	}
+	return nil
 }
 
 const schema = `
@@ -91,6 +118,7 @@ CREATE TABLE IF NOT EXISTS sites (
 	domain       TEXT NOT NULL,
 	system_user  TEXT NOT NULL,
 	docroot      TEXT NOT NULL,
+	home_dir     TEXT NOT NULL DEFAULT '',
 	app_type     TEXT NOT NULL,
 	php_version  TEXT NOT NULL DEFAULT '',
 	status       TEXT NOT NULL DEFAULT 'active',
@@ -98,14 +126,16 @@ CREATE TABLE IF NOT EXISTS sites (
 );
 
 CREATE TABLE IF NOT EXISTS backups (
-	id         TEXT PRIMARY KEY,
-	server_id  TEXT NOT NULL REFERENCES servers(id),
-	site_id    TEXT NOT NULL DEFAULT '',
-	scope      TEXT NOT NULL,
-	path       TEXT NOT NULL,
-	size_bytes INTEGER NOT NULL DEFAULT 0,
-	sha256     TEXT NOT NULL DEFAULT '',
-	status     TEXT NOT NULL,
-	created_at TEXT NOT NULL
+	id          TEXT PRIMARY KEY,
+	server_id   TEXT NOT NULL REFERENCES servers(id),
+	site_id     TEXT NOT NULL DEFAULT '',
+	scope       TEXT NOT NULL,
+	path        TEXT NOT NULL,
+	size_bytes  INTEGER NOT NULL DEFAULT 0,
+	sha256      TEXT NOT NULL DEFAULT '',
+	status      TEXT NOT NULL,
+	kind        TEXT NOT NULL DEFAULT 'manual',
+	params_json TEXT NOT NULL DEFAULT '{}',
+	created_at  TEXT NOT NULL
 );
 `

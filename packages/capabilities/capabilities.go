@@ -50,6 +50,7 @@ const (
 	CapFileWrite        = "file.write"
 	CapFileDelete       = "file.delete"
 	CapBackupRun        = "backup.run"
+	CapBackupRestore    = "backup.restore"
 	CapLogsTail         = "logs.tail"
 )
 
@@ -94,6 +95,7 @@ func Default() Registry {
 		CapFileWrite:        handleFileWrite,
 		CapFileDelete:       handleFileDelete,
 		CapBackupRun:        handleBackupRun,
+		CapBackupRestore:    handleBackupRestore,
 		CapLogsTail:         handleLogsTail,
 	}
 }

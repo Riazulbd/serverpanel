@@ -234,7 +234,7 @@ func TestCreateAndListSites(t *testing.T) {
 	if err != nil {
 		t.Fatalf("createServer: %v", err)
 	}
-	if _, err := st.createSite(id, "example.sslip.io", "sp_abc123", "/home/sites/sp_abc123/public", "static", ""); err != nil {
+	if _, err := st.createSite(id, "example.sslip.io", "sp_abc123", "/home/sites/sp_abc123/public", "/home/sites/sp_abc123", "static", ""); err != nil {
 		t.Fatalf("createSite: %v", err)
 	}
 	sites := st.listSites(id)
@@ -243,5 +243,70 @@ func TestCreateAndListSites(t *testing.T) {
 	}
 	if sites[0].Domain != "example.sslip.io" {
 		t.Fatalf("domain = %q, want example.sslip.io", sites[0].Domain)
+	}
+	if sites[0].HomeDir != "/home/sites/sp_abc123" {
+		t.Fatalf("home_dir = %q, want /home/sites/sp_abc123", sites[0].HomeDir)
+	}
+
+	site, ok := st.getSite(id, sites[0].ID)
+	if !ok {
+		t.Fatal("getSite: expected to find the site just created")
+	}
+	if site.Domain != "example.sslip.io" {
+		t.Fatalf("getSite domain = %q, want example.sslip.io", site.Domain)
+	}
+	if _, ok := st.getSite(id, "site_does_not_exist"); ok {
+		t.Fatal("getSite: expected an unknown site id to be not-found")
+	}
+}
+
+func TestCreateListAndGetBackups(t *testing.T) {
+	st := newTestStore(t)
+	serverID, _, err := st.createServer("web-7", "", nil, time.Hour, "admin@example.com")
+	if err != nil {
+		t.Fatalf("createServer: %v", err)
+	}
+	site, err := st.createSite(serverID, "example.com", "site_example_com", "/home/sites/site_example_com/public", "/home/sites/site_example_com", "wordpress", "8.3")
+	if err != nil {
+		t.Fatalf("createSite: %v", err)
+	}
+
+	b1, err := st.createBackup(serverID, site.ID, "files", "/var/backups/serverpanel/one.tar.gz", 1024, "abc123", "completed", "manual", `{"scope":"files"}`)
+	if err != nil {
+		t.Fatalf("createBackup: %v", err)
+	}
+	if b1.ID == "" {
+		t.Fatal("expected createBackup to assign an id")
+	}
+
+	// A second backup for a different (nonexistent, but that's fine for this
+	// test) site_id, so the site_id filter has something to exclude.
+	if _, err := st.createBackup(serverID, "site_other", "files", "/var/backups/serverpanel/two.tar.gz", 2048, "def456", "completed", "manual", `{}`); err != nil {
+		t.Fatalf("createBackup #2: %v", err)
+	}
+
+	all := st.listBackups(serverID, "")
+	if len(all) != 2 {
+		t.Fatalf("listBackups(serverID, \"\") returned %d, want 2", len(all))
+	}
+
+	filtered := st.listBackups(serverID, site.ID)
+	if len(filtered) != 1 || filtered[0].ID != b1.ID {
+		t.Fatalf("listBackups(serverID, site.ID) = %+v, want exactly [%s]", filtered, b1.ID)
+	}
+
+	got, ok := st.getBackup(serverID, b1.ID)
+	if !ok {
+		t.Fatal("getBackup: expected to find the backup just created")
+	}
+	if got.SHA256 != "abc123" || got.Kind != "manual" {
+		t.Fatalf("getBackup = %+v, want sha256=abc123 kind=manual", got)
+	}
+
+	if _, ok := st.getBackup(serverID, "backup_does_not_exist"); ok {
+		t.Fatal("getBackup: expected an unknown backup id to be not-found")
+	}
+	if _, ok := st.getBackup("srv_other", b1.ID); ok {
+		t.Fatal("getBackup: expected a backup id under a different server_id to be not-found")
 	}
 }

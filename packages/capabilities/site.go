@@ -30,6 +30,7 @@ type siteResult struct {
 	TempDomain string `json:"temp_domain"`
 	SystemUser string `json:"system_user"`
 	Docroot    string `json:"docroot"`
+	HomeDir    string `json:"home_dir"`
 	PHPVersion string `json:"php_version"`
 	AppType    string `json:"app_type"`
 }
@@ -123,7 +124,7 @@ func handleSiteCreate(ctx context.Context, params map[string]any, progress Progr
 		}
 	}
 
-	res := siteResult{Domain: domain, TempDomain: tempDomain, SystemUser: sysUser, Docroot: docroot, PHPVersion: phpVersion, AppType: appType}
+	res := siteResult{Domain: domain, TempDomain: tempDomain, SystemUser: sysUser, Docroot: docroot, HomeDir: home, PHPVersion: phpVersion, AppType: appType}
 	out, _ := json.Marshal(res)
 
 	if appType == "static" {
