@@ -29,7 +29,48 @@ func openDB(path string) (*sql.DB, error) {
 		db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
+	if err := runMigrations(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("apply migrations: %w", err)
+	}
 	return db, nil
+}
+
+// runMigrations applies schema changes made after a table's original
+// `CREATE TABLE IF NOT EXISTS` was written, so an existing database file
+// (not just a fresh one) picks them up. SQLite has no
+// `ADD COLUMN IF NOT EXISTS`, so each migration checks PRAGMA table_info
+// first — this is what keeps re-running openDB against an already-migrated
+// database a safe no-op instead of an error.
+func runMigrations(db *sql.DB) error {
+	return addColumnIfMissing(db, "backups", "db_name", "TEXT NOT NULL DEFAULT ''")
+}
+
+func addColumnIfMissing(db *sql.DB, table, column, decl string) error {
+	rows, err := db.Query(fmt.Sprintf(`PRAGMA table_info(%s)`, table))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notNull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dflt, &pk); err != nil {
+			return err
+		}
+		if name == column {
+			return nil // already migrated
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	_, err = db.Exec(fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s %s`, table, column, decl))
+	return err
 }
 
 const schema = `
@@ -103,6 +144,7 @@ CREATE TABLE IF NOT EXISTS backups (
 	site_id    TEXT NOT NULL DEFAULT '',
 	scope      TEXT NOT NULL,
 	path       TEXT NOT NULL,
+	db_name    TEXT NOT NULL DEFAULT '',
 	size_bytes INTEGER NOT NULL DEFAULT 0,
 	sha256     TEXT NOT NULL DEFAULT '',
 	status     TEXT NOT NULL,

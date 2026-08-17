@@ -2,6 +2,44 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-17 — Backup restore, ServerAvatar parity tracking
+
+- **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the
+  single largest functional gap flagged in the previous entry. Restores a
+  `backup.run` archive with, in order: archive-location validation (must resolve to a
+  file directly inside the agent's backup directory, never an arbitrary path),
+  optional checksum verification against the value `backup.run` originally returned,
+  safe extraction via Go's `archive/tar` directly (not a shelled-out `tar`) into a
+  private temp directory — rejecting any entry with an absolute path or one that would
+  traverse outside it, and skipping anything that isn't a plain file or directory — a
+  pre-restore checkpoint backup of the live state taken via `backup.run` itself
+  (returned in the result, so a bad restore is always recoverable), then the database
+  restore (`mysql` import, streamed from disk, never buffered as a string or passed as
+  an argv value) and/or an atomic-as-possible directory swap for files, with ownership
+  restored to the site's own system user afterward.
+- Wired `backup.restore` (and, previously dispatch-only, `backup.run`) into the control
+  plane end-to-end: new `backups` store methods (`createBackup`/`listBackups`/
+  `getBackup`, each scoped by server ID the same way `getSite` now is), three new
+  endpoints (`GET`/`POST /api/v1/servers/{id}/sites/{siteId}/backups`,
+  `POST /api/v1/servers/{id}/backups/{backupId}/restore`), an idempotent
+  `db_name` column migration for the pre-existing `backups` table, and a "Backups"
+  panel per site in the dashboard (create-backup modal with scope selection, a backups
+  table, and a restore button with a destructive-action confirmation dialog).
+- Added 9 new capability-layer tests (archive-location/checksum/path-traversal
+  rejection, a real files backup→corrupt→restore round trip against a real throwaway
+  system user, and `archive/tar` extraction-safety unit tests for path traversal,
+  absolute paths, and a decompression-size limit) and 4 new control-plane tests
+  (backup CRUD round trip, cross-server scoping for both `getSite` and `getBackup`,
+  and HTTP boundary/validation tests for the new endpoints). Full suite: 61 test
+  functions, `go vet`/`gofmt` clean.
+- Updated `SYSTEM.md`, `API.md`, `OPERATIONS.md`, and `TESTING.md` to reflect restore
+  as implemented (same-server only — cross-server restore remains a Phase 2 gap,
+  tracked alongside cross-server migration).
+- Added `docs/SERVERAVATAR_PARITY.md` and `docs/SERVERAVATAR_DOC_INVENTORY.md`,
+  establishing the ongoing feature-parity tracking process against ServerAvatar's
+  public product documentation (capability reference only — no ServerAvatar code,
+  copy, or design assets used).
+
 ## 2026-08-14 — Automated test suite, doc restructuring
 
 - Added `go test` coverage across `apps/controlplane` and `packages/capabilities`

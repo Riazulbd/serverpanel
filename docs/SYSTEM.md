@@ -16,6 +16,11 @@ next. Other docs go deeper on specific topics; this one is the map.
 - [`product-plan.md`](product-plan.md) — the original pre-implementation product/
   business plan (phase estimates, cost, postponed features, open product-owner
   questions) — still the source of truth for what's intentionally *not* built yet
+- [`SERVERAVATAR_PARITY.md`](SERVERAVATAR_PARITY.md) — feature-by-feature parity
+  tracker against ServerAvatar's documented capabilities (functional reference only —
+  no ServerAvatar code/assets used)
+- [`SERVERAVATAR_DOC_INVENTORY.md`](SERVERAVATAR_DOC_INVENTORY.md) — inventory of
+  ServerAvatar's documentation structure that the parity tracker is diffed against
 - [`../CHANGELOG.md`](../CHANGELOG.md) — dated log of what changed and why
 
 ## 1. Product purpose
@@ -116,18 +121,32 @@ webhook push-to-deploy, deploy keys, or rollback exist in this codebase yet.
 ### Backup and restoration
 | Feature | Status |
 |---|---|
-| DB/file/full backups | ✅ `backup.run` — checksummed local tar.gz |
+| DB/file/full backups | ✅ `backup.run` — checksummed local tar.gz; persisted as a
+  `backups` row via `POST /api/v1/servers/{id}/sites/{siteId}/backups`, listed per site
+  in the dashboard |
 | Scheduling, retention policies | ⬜ not implemented (backups are on-demand only) |
 | Encryption | ⬜ not implemented (local tar.gz is unencrypted; relies on host
   filesystem permissions today) |
-| Backup verification | 🚧 SHA-256 checksum is recorded and returned; the dashboard
-  does not yet re-verify it automatically |
+| Backup verification | 🚧 SHA-256 checksum is recorded, returned, and re-verified
+  automatically before every restore (`backup.restore`'s `expected_sha256` check); the
+  dashboard does not yet run a periodic standalone re-verify-without-restoring pass |
 | Local storage | ✅ |
 | S3-compatible / Amazon S3 / R2 / B2 / Spaces / Wasabi | ⬜ Phase 2 |
-| Restore (same or another server) | ⬜ **not implemented — there is no restore
-  capability yet, only `backup.run`.** This is the most significant gap relative to
-  the "backup and restore model" the product plan calls for; see `OPERATIONS.md`. |
-| Pre-restore checkpoints, progress tracking, failure recovery | ⬜ depends on restore |
+| Restore (same server) | ✅ `backup.restore` — validates the archive is one this agent
+  actually created (path + checksum), extracts with Go's `archive/tar` directly (never
+  a shelled-out `tar`, so every entry's path is validated before anything is written),
+  takes a pre-restore checkpoint of the live state before touching it, then restores
+  the database (`mysql` import) and/or files (atomic-as-possible directory swap +
+  ownership restore). Exposed via `POST /api/v1/servers/{id}/backups/{backupId}/restore`. |
+| Restore to another server | ⬜ not implemented — `backup.restore` only runs on the
+  same agent that owns `archive_path`; cross-server restore needs a transfer step first
+  (tracked under cross-server migration, Phase 2) |
+| Pre-restore checkpoints | ✅ `handleBackupRestore` always takes a fresh checkpoint
+  backup of the current live state immediately before overwriting anything, and returns
+  its path — a restore is recoverable, not a one-way trip |
+| Restore progress tracking, failure recovery | ✅ `Progress` callback reports each
+  restore stage (verify → extract → checkpoint → restore → chown); a failure at any
+  step names the checkpoint path in its error so nothing is a silent loss |
 
 ### Security and monitoring
 See `SECURITY.md` for the detailed, section-by-section implemented-vs-planned
@@ -278,9 +297,8 @@ Current capability list: `system.ping`, `service.control`, `diagnostics.basic`,
 `stack.install`, `site.create`, `site.set_php_version`, `site.set_status`,
 `app.wordpress_install`, `ssl.issue_letsencrypt`, `ssl.install_custom`, `db.create`,
 `db.delete`, `db.list`, `file.list`, `file.read`, `file.write`, `file.delete`,
-`backup.run`, `logs.tail`. Notably absent (by design, until reviewed and added):
-`backup.restore`, `git.deploy`, `cron.upsert`, `ssh.*`, `firewall.*`,
-`agent.self_update`.
+`backup.run`, `backup.restore`, `logs.tail`. Notably absent (by design, until reviewed
+and added): `git.deploy`, `cron.upsert`, `ssh.*`, `firewall.*`, `agent.self_update`.
 
 ## 13. Installation and deployment
 
@@ -343,12 +361,14 @@ defenses on the file manager (`resolveScopedPath`).
 
 ## 19. Backup and restore model
 
-**Backup**: implemented (`backup.run` — local, checksummed tar.gz of DB and/or files).
-**Restore**: **not implemented**. This is the single largest functional gap in the
-Phase 1 feature set relative to what the product plan calls for, and should be the
-next priority after this documentation pass — see `OPERATIONS.md` §Backup and restore
-for the concrete plan (a `backup.restore` capability mirroring `backup.run`'s
-validation approach, plus a pre-restore checkpoint step).
+**Backup**: implemented (`backup.run` — local, checksummed tar.gz of DB and/or files,
+persisted as a `backups` row per site).
+**Restore**: implemented (`backup.restore`) for same-server restore of a backup this
+control plane created and recorded — the restore is only ever given `archive_path`,
+`scope`, `db_name`, and `expected_sha256` that come from the stored `backups` row, never
+caller-supplied free-form values. See `OPERATIONS.md` §Backup and restore for the
+operational walkthrough. Cross-server restore (copying a backup to a different agent
+first) remains a Phase 2 gap — see §21.
 
 ## 20. Monitoring and alerting
 
@@ -359,7 +379,9 @@ all ⬜, scoped to Phase 2 per `product-plan.md` §9.
 
 ## 21. Known limitations
 
-- No backup **restore** capability (see §19).
+- Backup restore only works on the same server that created the backup — there is no
+  cross-server restore (transfer-then-restore) yet (see §19).
+- No backup scheduling/retention policy — backups are on-demand only.
 - No on-disk agent task journal — a task in flight when the agent process restarts is
   lost, not resumed (see `ARCHITECTURE.md` §4 "As built").
 - No agent certificate auto-renewal before its 30-day expiry (see `SECURITY.md` §2).

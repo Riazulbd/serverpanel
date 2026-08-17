@@ -245,3 +245,55 @@ func TestCreateAndListSites(t *testing.T) {
 		t.Fatalf("domain = %q, want example.sslip.io", sites[0].Domain)
 	}
 }
+
+func TestGetSiteIsScopedToServerID(t *testing.T) {
+	st := newTestStore(t)
+	serverA, _, _ := st.createServer("web-a", "", nil, time.Hour, "admin@example.com")
+	serverB, _, _ := st.createServer("web-b", "", nil, time.Hour, "admin@example.com")
+	site, err := st.createSite(serverA, "a.example.com", "sp_a", "/home/sites/sp_a", "static", "")
+	if err != nil {
+		t.Fatalf("createSite: %v", err)
+	}
+
+	if _, ok := st.getSite(serverA, site.ID); !ok {
+		t.Fatal("expected getSite to find the site under its real server")
+	}
+	if _, ok := st.getSite(serverB, site.ID); ok {
+		t.Fatal("expected getSite to refuse a site ID under the wrong server")
+	}
+}
+
+func TestBackupCreateListGetRoundTrip(t *testing.T) {
+	st := newTestStore(t)
+	serverID, _, _ := st.createServer("web-7", "", nil, time.Hour, "admin@example.com")
+	site, err := st.createSite(serverID, "b.example.com", "sp_b", "/home/sites/sp_b", "wordpress", "8.3")
+	if err != nil {
+		t.Fatalf("createSite: %v", err)
+	}
+
+	backup, err := st.createBackup(serverID, site.ID, "full", "/var/backups/serverpanel/b-full-1.tar.gz", "wpdb", 12345, "deadbeef")
+	if err != nil {
+		t.Fatalf("createBackup: %v", err)
+	}
+	if backup.ID == "" || backup.Status != "complete" {
+		t.Fatalf("unexpected backup record: %+v", backup)
+	}
+
+	list := st.listBackups(serverID, site.ID)
+	if len(list) != 1 || list[0].Path != backup.Path {
+		t.Fatalf("listBackups = %+v, want one entry matching the created backup", list)
+	}
+
+	got, ok := st.getBackup(serverID, backup.ID)
+	if !ok {
+		t.Fatal("expected getBackup to find the created backup")
+	}
+	if got.DBName != "wpdb" || got.SHA256 != "deadbeef" {
+		t.Fatalf("getBackup = %+v, fields don't round-trip", got)
+	}
+
+	otherServer, _, _ := st.createServer("web-8", "", nil, time.Hour, "admin@example.com")
+	if _, ok := st.getBackup(otherServer, backup.ID); ok {
+		t.Fatal("expected getBackup to refuse a backup ID under the wrong server")
+	}
+}

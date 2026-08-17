@@ -43,6 +43,9 @@ protected route; there is no route that skips it by omission.
 | `POST` | `/api/v1/servers/{id}/tasks` | Dispatch an arbitrary allow-listed capability (see §3) |
 | `GET` | `/api/v1/servers/{id}/sites` | List sites on a server |
 | `POST` | `/api/v1/servers/{id}/sites` | Dispatch `site.create` and persist the resulting site record |
+| `GET` | `/api/v1/servers/{id}/sites/{siteId}/backups` | List backups for a site, newest first |
+| `POST` | `/api/v1/servers/{id}/sites/{siteId}/backups` | Dispatch `backup.run` and persist the resulting backup record |
+| `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a previously recorded backup |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -103,6 +106,37 @@ row. → `201 {"site": {...siteRecord}, "temp_domain": "<user>.<ip-with-dashes>.
 A dispatch failure or agent-side failure never leaves an orphan site record — the
 row is written after (and only after) the agent confirms success.
 
+### `POST /api/v1/servers/{id}/sites/{siteId}/backups`
+```json
+{"scope": "files", "db_name": ""}
+```
+`scope` is one of `db`, `files`, `full`; `db_name` is required when `scope` is `db` or
+`full`. Dispatches `backup.run` with `site_root` taken from the site's own recorded
+`docroot` (never caller-supplied), with a 20-minute dispatch timeout (backups of large
+sites can run long). Only on the agent reporting success is a `backups` row persisted.
+→ `201` with the `backupRecord` JSON (`ID`, `ServerID`, `SiteID`, `Scope`, `Path`,
+`DBName`, `SizeBytes`, `SHA256`, `Status`, `CreatedAt`). `404` if the site doesn't exist
+on that server; `400` for an invalid/missing scope; `502` if the agent isn't connected;
+`422` if `backup.run` itself failed on the agent.
+
+### `GET /api/v1/servers/{id}/sites/{siteId}/backups`
+→ `200` with an array of `backupRecord`, newest first. `404` if the site doesn't exist
+on that server.
+
+### `POST /api/v1/servers/{id}/backups/{backupId}/restore`
+No request body — the backup's own recorded `archive_path`, `scope`, `db_name`, and
+`sha256` (as `expected_sha256`) are read from the `backups` table and passed to
+`backup.restore` verbatim; a caller can only ever restore a backup that was actually
+created and recorded, never point restore at an arbitrary path. For a `files`/`full`
+scope backup, the owning site's current `docroot` is looked up fresh (not cached from
+backup time) and passed as `site_root`. 20-minute dispatch timeout. → `200` with the
+agent's `restoreResult` JSON (`scope`, `archive_path`, `checkpoints` — paths to the
+pre-restore safety backups taken automatically before anything was overwritten,
+`restored_at`). `404` if the backup doesn't exist on that server; `502` if the agent
+isn't connected; `422` if `backup.restore` itself failed on the agent (the agent-side
+error message explains why, and any checkpoint already taken is named in it so it's
+never a silent loss).
+
 ### `POST /agents/register`
 ```json
 {"token": "<bootstrap token>", "csr_pem": "<PEM-encoded CSR>"}
@@ -136,3 +170,30 @@ HTTP handler) until it sees a terminal event for the task ID it sent, or its con
 deadline expires. There is no message type for a free-form command — `capability` must
 be a name in `packages/capabilities`'s fixed registry, or the agent returns `rejected`
 without executing anything.
+
+## 4. Capability reference
+
+The full allow-listed capability names `packages/capabilities.Default()` registers
+(see `SYSTEM.md` §12 for the allow-list rationale): `system.ping`, `service.control`,
+`diagnostics.basic`, `stack.install`, `site.create`, `site.set_php_version`,
+`site.set_status`, `app.wordpress_install`, `ssl.issue_letsencrypt`,
+`ssl.install_custom`, `db.create`, `db.delete`, `db.list`, `file.list`, `file.read`,
+`file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`.
+
+### `backup.restore`
+```json
+{"archive_path": "/var/backups/serverpanel/wpdb-full-20260101T000000Z.tar.gz",
+ "scope": "full", "site_root": "/home/sites/site_example", "db_name": "wpdb",
+ "expected_sha256": "<sha256 backup.run originally returned>"}
+```
+Restores a `backup.run` archive. `archive_path` must resolve to a file directly inside
+the agent's backup directory (`/var/backups/serverpanel`) — never an arbitrary path.
+If `expected_sha256` is supplied it's verified before any extraction happens.
+Extraction uses Go's `archive/tar` directly (not a shelled-out `tar`), rejecting any
+entry with an absolute path or one that would resolve outside the private extraction
+directory, and skipping anything that isn't a plain file or directory (no symlinks,
+hardlinks, or device nodes are ever written). Immediately before touching the live
+database or site files, a fresh checkpoint backup of the *current* state is taken via
+`backup.run` — its path is returned in the result's `checkpoints`, so a restore is
+always recoverable, never a one-way trip. Returns
+`{"scope", "archive_path", "checkpoints": [...], "restored_at"}` on success.

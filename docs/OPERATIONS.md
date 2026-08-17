@@ -40,22 +40,43 @@ dashboard).
 
 ## 3. Backup and restore
 
-**Backup** (implemented): dispatch the `backup.run` capability
-(`POST /api/v1/servers/{id}/tasks` with `{"capability": "backup.run", "params": {...}}`)
-— see `packages/capabilities/backup.go` for its `scope`/`target` params. It writes a
-checksummed local tar.gz on the VPS itself and records the checksum in its
-`TaskEvent.detail`. The control plane's `backups` table schema exists (`db.go`) but
-nothing currently writes a row into it automatically — wiring `backup.run`'s dispatch
-through a persistence step analogous to `handleCreateSite` (dispatch → parse result →
-insert row) is a small, well-scoped next task.
+**Backup** (implemented): from the dashboard, open a server → a site → "Create backup"
+(scope `files`, `db`, or `full`; `db_name` required for `db`/`full`). This calls
+`POST /api/v1/servers/{id}/sites/{siteId}/backups`, which dispatches `backup.run`
+(`packages/capabilities/backup.go`) with `site_root` taken from the site's own recorded
+`docroot`. The agent writes a checksummed local tar.gz under
+`/var/backups/serverpanel` on the VPS itself; on success the control plane persists a
+`backups` row (path, scope, size, SHA-256) — a raw dispatch success alone is never
+enough, the row is the durable record a restore can later be pointed at.
 
-**Restore** (not implemented): there is no `backup.restore` capability yet. Until one
-exists, restoring from a `backup.run` archive is a fully manual process: SSH to the
-VPS, locate the tar.gz under wherever `backup.run` wrote it, verify its SHA-256 against
-the value in the task's `detail`, and manually extract/restore the DB dump and/or
-files. **Do not represent backup/restore as a complete, tested feature until a real
-`backup.restore` capability exists and has been exercised end-to-end** — see
-`SYSTEM.md` §19 and §21, and `TESTING.md` §5 item 1 for the recommended next step.
+**Restore** (implemented): from the same site's Backups list, click "Restore" on any
+recorded backup and confirm. This calls
+`POST /api/v1/servers/{id}/backups/{backupId}/restore`, which looks up the backup's own
+recorded `archive_path`/`scope`/`db_name`/`sha256` (never accepts these as free-form
+input) and dispatches `backup.restore`. On the agent:
+
+1. the checksum is re-verified against the recorded SHA-256 before anything is touched;
+2. the archive is extracted with Go's `archive/tar` directly into a private temp
+   directory, rejecting any entry that would traverse outside it;
+3. a fresh checkpoint backup of the *current* live state (database and/or files) is
+   taken and its path returned — so a restore is always recoverable, never a one-way
+   trip;
+4. the database is restored via `mysql <db> < dump.sql` (streamed, not read into
+   memory) and/or the site's files are swapped in via an atomic-as-possible
+   rename-based directory replace, then ownership is restored to the site's own system
+   user.
+
+Restore is currently **same-server only**: `backup.restore` runs on the same agent
+whose backup directory holds `archive_path`. Restoring a backup onto a *different*
+server requires transferring the archive there first — that transfer step, and a
+dedicated cross-server restore flow, remain a Phase 2 gap (tracked alongside
+cross-server migration; see `SYSTEM.md` §21).
+
+To restore manually (e.g. the control plane itself is unreachable): SSH to the VPS,
+the archive is at the `archive_path` your `backups` row (or the original `backup.run`
+task detail) recorded, verify its SHA-256 matches, then either re-run the same restore
+via a direct `backup.restore` task dispatch or extract/restore by hand as a last
+resort.
 
 ## 4. Monitoring and alerting
 
