@@ -174,6 +174,12 @@
           <button onclick="openNewSiteModal()">+ New site</button>
         </div>
         <div id="sitesList" class="muted">No sites yet.</div>
+
+        <div class="section-title" style="display:flex;justify-content:space-between;align-items:center">
+          <span>Backups</span>
+          <button onclick="openNewBackupModal()">+ New backup</button>
+        </div>
+        <div id="backupsList" class="muted">No backups yet.</div>
       </div>
     </div>
 
@@ -425,12 +431,18 @@ async function createServer() {
 
 async function openServerDetail(id) {
   state.selectedServerId = id;
+  state.sites = [];
   showTab('serverDetail');
   document.getElementById('taskResult').classList.add('hidden');
   await renderServerDetail(id);
   try {
-    const sites = await api(API + '/servers/' + id + '/sites');
-    renderSites(sites || []);
+    const sites = await api(API + '/servers/' + id + '/sites') || [];
+    state.sites = sites;
+    renderSites(sites);
+  } catch (e) {}
+  try {
+    const backups = await api(API + '/servers/' + id + '/backups') || [];
+    renderBackups(backups);
   } catch (e) {}
 }
 
@@ -440,6 +452,145 @@ function renderSites(sites) {
   el.innerHTML = '<table><thead><tr><th>Domain</th><th>Type</th><th>PHP</th><th>Status</th></tr></thead><tbody>' +
     sites.map(s => `<tr><td>${escapeHtml(s.Domain)}</td><td>${escapeHtml(s.AppType)}</td><td>${escapeHtml(s.PHPVersion||'—')}</td><td>${escapeHtml(s.Status)}</td></tr>`).join('') +
     '</tbody></table>';
+}
+
+function humanBytes(n) {
+  if (!n) return '0 B';
+  const units = ['B','KB','MB','GB','TB'];
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return n.toFixed(i === 0 ? 0 : 1) + ' ' + units[i];
+}
+
+function renderBackups(backups) {
+  state.backups = backups;
+  const el = document.getElementById('backupsList');
+  if (!backups.length) { el.textContent = 'No backups yet.'; return; }
+  el.innerHTML = '<table><thead><tr><th>Scope</th><th>Archive</th><th>Size</th><th>Created</th><th></th></tr></thead><tbody>' +
+    backups.map(b => `<tr>
+      <td>${escapeHtml(b.Scope)}</td>
+      <td class="muted">${escapeHtml((b.Path||'').split('/').pop())}</td>
+      <td class="muted">${humanBytes(b.SizeBytes)}</td>
+      <td class="muted">${new Date(b.CreatedAt).toLocaleString()}</td>
+      <td><button onclick="openRestoreBackupModal('${b.ID}')">Restore&hellip;</button></td>
+    </tr>`).join('') +
+    '</tbody></table>';
+}
+
+function siteOptionsHtml() {
+  if (!state.sites || !state.sites.length) return '<option value="">(no sites on this server yet)</option>';
+  return state.sites.map(s => `<option value="${s.ID}">${escapeHtml(s.Domain)}</option>`).join('');
+}
+
+function backupScopeFieldsHtml(prefix) {
+  return `
+    <div class="field" id="${prefix}DbField">
+      <label>Database name</label>
+      <input id="${prefix}DbName" placeholder="e.g. app_prod">
+    </div>
+    <div class="field" id="${prefix}SiteField">
+      <label>Site</label>
+      <select id="${prefix}SiteId">${siteOptionsHtml()}</select>
+    </div>`;
+}
+
+function toggleScopeFields(prefix, scope) {
+  const dbField = document.getElementById(prefix + 'DbField');
+  const siteField = document.getElementById(prefix + 'SiteField');
+  dbField.classList.toggle('hidden', scope === 'files');
+  siteField.classList.toggle('hidden', scope === 'db');
+}
+
+function openNewBackupModal() {
+  const root = document.getElementById('modalRoot');
+  root.innerHTML = `
+    <div class="modal-backdrop" onclick="if(event.target===this) closeModal()">
+      <div class="modal">
+        <h2>New backup</h2>
+        <div class="field">
+          <label>Scope</label>
+          <select id="newBackupScope" onchange="toggleScopeFields('newBackup', this.value)">
+            <option value="full">Full (database + files)</option>
+            <option value="db">Database only</option>
+            <option value="files">Files only</option>
+          </select>
+        </div>
+        ${backupScopeFieldsHtml('newBackup')}
+        <button class="primary" style="width:100%" onclick="createBackup()">Create backup</button>
+        <div class="error" id="newBackupError"></div>
+        <p class="muted" id="newBackupStatus"></p>
+      </div>
+    </div>`;
+}
+
+async function createBackup() {
+  const scope = document.getElementById('newBackupScope').value;
+  const dbName = document.getElementById('newBackupDbName').value.trim();
+  const siteId = document.getElementById('newBackupSiteId').value;
+  const err = document.getElementById('newBackupError');
+  const status = document.getElementById('newBackupStatus');
+  err.textContent = '';
+  status.textContent = 'Backing up... this can take a while for large sites/databases.';
+  try {
+    const body = { scope };
+    if (scope !== 'files') body.db_name = dbName;
+    if (scope !== 'db') body.site_id = siteId;
+    await api(API + '/servers/' + state.selectedServerId + '/backups', { method: 'POST', body: JSON.stringify(body) });
+    status.textContent = '';
+    closeModal();
+    const backups = await api(API + '/servers/' + state.selectedServerId + '/backups') || [];
+    renderBackups(backups);
+  } catch (e) {
+    status.textContent = '';
+    err.textContent = e.message;
+  }
+}
+
+function openRestoreBackupModal(backupId) {
+  const backup = (state.backups || []).find(b => b.ID === backupId);
+  if (!backup) return;
+  const root = document.getElementById('modalRoot');
+  const needsDb = backup.Scope === 'db' || backup.Scope === 'full';
+  const needsSite = backup.Scope === 'files' || backup.Scope === 'full';
+  root.innerHTML = `
+    <div class="modal-backdrop" onclick="if(event.target===this) closeModal()">
+      <div class="modal">
+        <h2>Restore backup</h2>
+        <p class="muted">Scope: ${escapeHtml(backup.Scope)}. The current database and/or site contents will be
+          checkpointed by the agent before anything is overwritten, but this still replaces live data — double check
+          the target below.</p>
+        ${needsDb ? `<div class="field"><label>Restore into database</label><input id="restoreDbName" placeholder="e.g. app_prod"></div>` : ''}
+        ${needsSite ? `<div class="field"><label>Restore into site</label><select id="restoreSiteId">${siteOptionsHtml()}</select></div>` : ''}
+        <button class="danger" style="width:100%" onclick="restoreBackup('${backupId}')">Restore now</button>
+        <div class="error" id="restoreBackupError"></div>
+        <p class="muted" id="restoreBackupStatus"></p>
+      </div>
+    </div>`;
+}
+
+async function restoreBackup(backupId) {
+  const backup = (state.backups || []).find(b => b.ID === backupId);
+  if (!backup) return;
+  const err = document.getElementById('restoreBackupError');
+  const status = document.getElementById('restoreBackupStatus');
+  err.textContent = '';
+  if (!confirm('This will overwrite the target database/site contents (a pre-restore checkpoint is kept). Continue?')) return;
+  status.textContent = 'Restoring...';
+  try {
+    const body = {};
+    const dbEl = document.getElementById('restoreDbName');
+    const siteEl = document.getElementById('restoreSiteId');
+    if (dbEl) body.db_name = dbEl.value.trim();
+    if (siteEl) body.site_id = siteEl.value;
+    await api(API + '/servers/' + state.selectedServerId + '/backups/' + backupId + '/restore', {
+      method: 'POST', body: JSON.stringify(body)
+    });
+    status.textContent = '';
+    closeModal();
+  } catch (e) {
+    status.textContent = '';
+    err.textContent = e.message;
+  }
 }
 
 async function renderServerDetail(id) {

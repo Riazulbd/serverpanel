@@ -2,6 +2,51 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-17 — Backup restore
+
+Closes the single largest functional gap flagged in the prior session's documentation
+pass (`SYSTEM.md` §19/§21): there was a `backup.run` capability but no way to actually
+restore from one.
+
+- **Agent**: added `backup.restore` (`packages/capabilities/backup.go`). Safety
+  properties: the archive path is confined to `backupBaseDir` with the same
+  symlink-escape defense the file manager uses (`resolveBackupPath`); a SHA-256
+  checksum is mandatory and re-verified before extraction, refusing a corrupted or
+  tampered archive outright; before overwriting anything, the current database (if it
+  exists) is checkpointed via a fresh dump and the current site directory is renamed
+  aside rather than deleted; restoring into a different target database/site than the
+  backup was taken from is supported. `backup.run` now writes a `manifest.json` into
+  every archive (which member is the DB dump vs. the files payload) so restore never
+  has to guess an archive's internal layout. See `docs/SECURITY.md` §7 for the full
+  checklist.
+- **Control plane**: `backup.run`/`backup.restore` dispatch was previously only
+  reachable through the generic task-dispatch endpoint, and successful backups were
+  never persisted (the `backups` table existed in the schema but nothing wrote to it).
+  Added dedicated endpoints — `POST/GET /api/v1/servers/{id}/backups` and
+  `POST /api/v1/servers/{id}/backups/{backupId}/restore` — that dispatch and, only on
+  confirmed agent success, persist/read backup records, mirroring the existing
+  `handleCreateSite` pattern. A restore call reads its archive path/checksum from the
+  stored record, never from request input; the request only supplies the *restore
+  target* (`db_name`/`site_id`), which may differ from the backup's origin.
+- **Dashboard**: added a Backups section to the server-detail view — list existing
+  backups (scope, size, created-at), create a new one (scope + target
+  database/site picker), and restore an existing one with an explicit confirmation
+  step, matching the existing Sites section's UI conventions (`apps/controlplane/web/index.html`).
+- **Tests**: 21 new test functions (69 total, up from 48) — `go vet`/`gofmt` clean,
+  `go test ./... -race` clean. Notably a real end-to-end `backup.run` → mutate →
+  `backup.restore` round trip against a real filesystem and a real (test-created)
+  system user, verifying restored content matches the pre-mutation backup and that a
+  pre-restore checkpoint was preserved; a real checksum-mismatch rejection against a
+  deliberately invalid on-disk archive; `resolveBackupPath`'s traversal/symlink-escape/
+  directory-rejection defenses; and full endpoint-validation coverage for both new
+  control-plane routes. Database-scope restore logic is covered at the
+  validation/unit level only — this environment has no MariaDB installed, matching the
+  existing `db.create/delete/list` testing tier (see `docs/TESTING.md` §2).
+- **Docs**: updated `SYSTEM.md`, `API.md`, `SECURITY.md` (new §7), `OPERATIONS.md`,
+  `TESTING.md`, `INSTALLATION.md`, `ARCHITECTURE.md`, and `README.md` to reflect the
+  new capability and its current verification tier, and to flag what's still out of
+  scope (automatic cross-server backup transfer, backup deletion/retention).
+
 ## 2026-08-14 — Automated test suite, doc restructuring
 
 - Added `go test` coverage across `apps/controlplane` and `packages/capabilities`

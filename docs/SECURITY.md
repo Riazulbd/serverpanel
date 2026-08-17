@@ -1,9 +1,10 @@
 # Server Agent Security & Trust Model
 
-> **Status note:** written as the pre-implementation trust-model design. §1–§4 are
-> implemented and were exercised in real integration testing (see `TESTING.md`); §5–§6
-> describe Phase 2 mechanisms (commit-confirm SSH/firewall changes, self-repair) that do
-> not exist in code yet. Each section below is annotated with its current status.
+> **Status note:** written as the pre-implementation trust-model design. §1–§4 and §7
+> are implemented and were exercised in real integration testing (see `TESTING.md`);
+> §5–§6 describe Phase 2 mechanisms (commit-confirm SSH/firewall changes, self-repair)
+> that do not exist in code yet. Each section below is annotated with its current
+> status.
 
 ## 1. Registration flow (bootstrap token → machine identity) — **implemented**
 
@@ -181,3 +182,40 @@ one-click-apply-fix flow yet; a human reading the diagnostic output and dispatch
 explicit capability (e.g. `service.control` restart) is the current repair path, which
 already satisfies "never automatic" — the plain-language suggestion layer on top is
 unbuilt.
+
+## 7. Backup integrity and restore safety — **implemented**
+
+A restore is the one capability whose entire *purpose* is to overwrite live data, so it
+gets its own explicit safety checklist (`packages/capabilities/backup.go`
+`handleBackupRestore`, exercised end-to-end by
+`TestBackupRunThenRestoreRoundTripFilesScope` in `backup_test.go`):
+
+1. **Archive path confinement.** The archive path is resolved through
+   `resolveBackupPath`, which requires it to be a real file strictly inside
+   `backupBaseDir` (`/var/backups/serverpanel`) after resolving symlinks on both sides —
+   the same defense `resolveScopedPath` (`file.go`) applies to the file manager. In
+   practice the control plane never even offers a caller-chosen path: `POST
+   /api/v1/servers/{id}/backups/{backupId}/restore` reads the path from the server's own
+   `backups` table, populated only from a prior `backup.run`'s confirmed result (see
+   `API.md`).
+2. **Mandatory, re-verified checksum.** `backup.restore` requires a `sha256` parameter
+   and independently recomputes the archive's actual checksum before extracting
+   anything; a mismatch aborts the restore with no side effects. This is what stops a
+   restore from ever running against a corrupted, truncated, or tampered archive.
+3. **Pre-restore checkpoints, not deletions.** Before a database is overwritten, its
+   current contents (if the database exists) are dumped to a fresh, separately
+   timestamped file under `backupBaseDir`. Before a site directory is overwritten, the
+   existing directory is renamed aside (`<docroot>.pre-restore.<timestamp>`) rather than
+   removed. Every restore therefore leaves behind exactly what it's about to replace,
+   and both checkpoint paths are returned in the result and written to the audit log —
+   consistent with the platform-wide rule that no capability performs an unrecoverable
+   delete of pre-existing customer data as a side effect of something else.
+4. **All-or-nothing per scope.** The archive's own `manifest.json` (written by
+   `backup.run`) is what `backup.restore` reads to find the DB dump/files payload — an
+   archive missing the member a given scope needs fails outright rather than silently
+   restoring a partial result.
+5. **No shell interpolation of file contents.** The database dump is streamed into the
+   `mysql` client's stdin (`restoreDatabaseDump`) rather than ever being interpolated
+   into a command string; file restoration uses `cp -a <dir>/. <target>/`, a literal
+   argv with no shell involved, so nothing in a backup archive's contents (paths,
+   filenames, SQL) can influence which command runs.

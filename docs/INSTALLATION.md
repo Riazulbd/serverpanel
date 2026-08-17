@@ -106,7 +106,14 @@ verified against a real Ubuntu 24.04 **container** in a prior session (not a VPS
 no public IP/DNS was available). SSL issuance (needs real public DNS),
 `systemctl start/stop/restart` (needs real systemd as PID 1, absent in that
 container), and a true "clean VPS from a cloud provider, over the public internet, top
-to bottom" run have **not** been performed. Do not represent this as VPS-tested until
-that gap is closed — see `TESTING.md` §5 item 2 for the recommended next step
+to bottom" run have **not** been performed. `backup.restore`'s files-scope path (tar
+extraction, manifest handling, checksum gate, pre-restore checkpoint, real chown to a
+real system user) has since been verified end-to-end by an automated test against a
+real filesystem (`TestBackupRunThenRestoreRoundTripFilesScope`, see `TESTING.md` §1) —
+but its **database**-scope path (`mysqldump`/`mysql` against a live MariaDB) has only
+been validated at the input-checking level so far, same as `db.create/delete/list`,
+since this environment has no MariaDB installed. Do not represent this as VPS-tested
+until that gap is closed — see `TESTING.md` §5 item 1 for the recommended next step
 (a reproducible cloud-init VM or CI-runnable container pass covering the full
-install → register → deploy → backup → upgrade → rollback → revoke checklist).
+install → register → deploy → backup → restore → upgrade → rollback → revoke
+checklist).

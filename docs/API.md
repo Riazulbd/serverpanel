@@ -43,6 +43,9 @@ protected route; there is no route that skips it by omission.
 | `POST` | `/api/v1/servers/{id}/tasks` | Dispatch an arbitrary allow-listed capability (see §3) |
 | `GET` | `/api/v1/servers/{id}/sites` | List sites on a server |
 | `POST` | `/api/v1/servers/{id}/sites` | Dispatch `site.create` and persist the resulting site record |
+| `GET` | `/api/v1/servers/{id}/backups` | List backups recorded for a server |
+| `POST` | `/api/v1/servers/{id}/backups` | Dispatch `backup.run` and persist the resulting backup record |
+| `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a previously recorded backup |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -102,6 +105,37 @@ Dispatches `site.create`, and only on the agent reporting success, persists a `s
 row. → `201 {"site": {...siteRecord}, "temp_domain": "<user>.<ip-with-dashes>.sslip.io"}`.
 A dispatch failure or agent-side failure never leaves an orphan site record — the
 row is written after (and only after) the agent confirms success.
+
+### `POST /api/v1/servers/{id}/backups`
+```json
+{"scope": "full", "site_id": "site_...", "db_name": "app_prod"}
+```
+`scope` is one of `db`, `files`, `full`. `db_name` is required for `db`/`full`;
+`site_id` (an existing site on this server, used to resolve its docroot) is required
+for `files`/`full`. Dispatches `backup.run` to the agent and, only on the agent
+reporting success, persists a `backups` row with the archive's real path, size, and
+SHA-256 checksum — never a row for a backup that doesn't actually exist on disk. →
+`201` with the stored `backupRecord`. Agent-side failure → `422`; no connected agent →
+`502`; either way, nothing is persisted.
+
+### `GET /api/v1/servers/{id}/backups`
+→ `200` with an array of `backupRecord` (id, server/site id, scope, path, size, sha256,
+status, created_at), newest first.
+
+### `POST /api/v1/servers/{id}/backups/{backupId}/restore`
+```json
+{"db_name": "app_prod", "site_id": "site_..."}
+```
+The archive path and its SHA-256 checksum are read from the stored `backups` row, not
+from the request — a caller can only ever restore one of this server's own recorded
+backups, never point the agent at an arbitrary path. `db_name` is required when the
+backup's scope is `db`/`full`; `site_id` (the *target* site — may differ from the site
+the backup was taken from, e.g. to restore into a clone) is required when its scope is
+`files`/`full`. Unknown `backupId` → `404`. Agent-side failure (including a checksum
+mismatch the agent itself detects) → `422`. → `200
+{"backup_id": "...", "result": {...parsed backup.restore detail}}`. See `SECURITY.md`
+§7 for the pre-restore checkpoint guarantees this capability makes before it overwrites
+anything.
 
 ### `POST /agents/register`
 ```json

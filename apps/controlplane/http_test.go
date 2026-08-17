@@ -201,6 +201,115 @@ func TestServerCreateListRevokeFlow(t *testing.T) {
 	}
 }
 
+func TestBackupEndpointsValidation(t *testing.T) {
+	secureCookies = false
+	defer func() { secureCookies = true }()
+
+	a := newTestAPIServer(t)
+	h := a.routes()
+
+	doJSON(t, h, "POST", "/api/v1/auth/signup", map[string]string{
+		"Email": "backups@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	rec := doJSON(t, h, "POST", "/api/v1/auth/login", map[string]string{
+		"Email": "backups@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	cookie := sessionCookie(rec)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers", map[string]any{"Name": "web-backups"}, cookie)
+	var created struct {
+		ServerID string `json:"server_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+
+	// Invalid scope is rejected before any dispatch is attempted.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/backups", map[string]string{"scope": "everything"}, cookie)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid scope status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// scope=files without a site_id is rejected before any dispatch.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/backups", map[string]string{"scope": "files"}, cookie)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("missing site_id status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// scope=db without a db_name is rejected before any dispatch.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/backups", map[string]string{"scope": "db"}, cookie)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("missing db_name status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// A validly-shaped request against a server with no live agent
+	// connection fails at dispatch (502), which is what proves the
+	// validation above ran before dispatch was even attempted, and that
+	// this endpoint never persists a backup record it can't back with a
+	// real agent result (see docs/SECURITY.md "no fake success states").
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/backups", map[string]string{"scope": "db", "db_name": "app"}, cookie)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("backup against disconnected server status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	backups := a.store.listBackups(created.ServerID)
+	if len(backups) != 0 {
+		t.Fatalf("expected no backup record to be persisted after a failed dispatch, got %d", len(backups))
+	}
+
+	rec = doJSON(t, h, "GET", "/api/v1/servers/"+created.ServerID+"/backups", nil, cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list backups status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/backups/bkp_doesnotexist/restore", map[string]string{"db_name": "app"}, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("restore unknown backup status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestRestoreBackupRequiresTargetForScope(t *testing.T) {
+	secureCookies = false
+	defer func() { secureCookies = true }()
+
+	a := newTestAPIServer(t)
+	h := a.routes()
+
+	doJSON(t, h, "POST", "/api/v1/auth/signup", map[string]string{
+		"Email": "restore@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	rec := doJSON(t, h, "POST", "/api/v1/auth/login", map[string]string{
+		"Email": "restore@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	cookie := sessionCookie(rec)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers", map[string]any{"Name": "web-restore"}, cookie)
+	var created struct {
+		ServerID string `json:"server_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+
+	backup, err := a.store.createBackup(created.ServerID, "", "full", "/var/backups/serverpanel/app-full-x.tar.gz", 100, "abc")
+	if err != nil {
+		t.Fatalf("createBackup: %v", err)
+	}
+
+	// scope=full requires both db_name and site_id; sending neither is
+	// rejected before dispatch is attempted.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/backups/"+backup.ID+"/restore", map[string]string{}, cookie)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("restore without db_name status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/backups/"+backup.ID+"/restore", map[string]string{"db_name": "app"}, cookie)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("restore without site_id status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/backups/"+backup.ID+"/restore", map[string]string{"db_name": "app", "site_id": "site_doesnotexist"}, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("restore with unknown site_id status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestRegisterEndpointRejectsBadToken(t *testing.T) {
 	a := newTestAPIServer(t)
 	h := a.routes()

@@ -40,22 +40,31 @@ dashboard).
 
 ## 3. Backup and restore
 
-**Backup** (implemented): dispatch the `backup.run` capability
-(`POST /api/v1/servers/{id}/tasks` with `{"capability": "backup.run", "params": {...}}`)
-— see `packages/capabilities/backup.go` for its `scope`/`target` params. It writes a
-checksummed local tar.gz on the VPS itself and records the checksum in its
-`TaskEvent.detail`. The control plane's `backups` table schema exists (`db.go`) but
-nothing currently writes a row into it automatically — wiring `backup.run`'s dispatch
-through a persistence step analogous to `handleCreateSite` (dispatch → parse result →
-insert row) is a small, well-scoped next task.
+**Backup** (implemented): `POST /api/v1/servers/{id}/backups`
+(`{"scope": "db"|"files"|"full", "site_id": "...", "db_name": "..."}`, see `API.md`)
+dispatches `backup.run` and, only on the agent confirming success, persists a row in
+the `backups` table with the archive's real path, size, and SHA-256 checksum. It writes
+a checksummed local tar.gz on the VPS itself, plus an embedded `manifest.json`
+describing its own layout (`packages/capabilities/backup.go`).
 
-**Restore** (not implemented): there is no `backup.restore` capability yet. Until one
-exists, restoring from a `backup.run` archive is a fully manual process: SSH to the
-VPS, locate the tar.gz under wherever `backup.run` wrote it, verify its SHA-256 against
-the value in the task's `detail`, and manually extract/restore the DB dump and/or
-files. **Do not represent backup/restore as a complete, tested feature until a real
-`backup.restore` capability exists and has been exercised end-to-end** — see
-`SYSTEM.md` §19 and §21, and `TESTING.md` §5 item 1 for the recommended next step.
+**Restore** (implemented): `POST /api/v1/servers/{id}/backups/{backupId}/restore`
+(`{"db_name": "...", "site_id": "..."}`) dispatches `backup.restore` using the stored
+backup's path/checksum — the request only supplies the *target* database/site, which
+may differ from where the backup was taken (restoring into a clone or a fresh
+database/site is supported, not just in-place restore). Before overwriting anything,
+the agent checkpoints the current database contents (fresh dump) and moves the current
+site directory aside (`<docroot>.pre-restore.<timestamp>`, never deleted) — both
+checkpoint paths come back in the response and are written to the audit log. See
+`SECURITY.md` §7 for the full safety checklist (checksum gate, path confinement,
+checkpoint-before-overwrite) and `SYSTEM.md` §19 for what's still out of scope
+(fetching a backup archive onto a *different* server automatically, and a "delete old
+backups" capability — both remain Phase 2/3 gaps, not silently done).
+
+Restoring onto the *same* server the backup was taken on is fully self-service through
+the dashboard's Backups section. Restoring onto a *different* server today still needs
+the archive copied there manually first (e.g. `scp`) before dispatching
+`backup.restore` against that server's ID with the copied file's real path/checksum —
+full cross-server migration (automatic transfer) is tracked as a Phase 2 feature.
 
 ## 4. Monitoring and alerting
 

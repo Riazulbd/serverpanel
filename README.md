@@ -41,7 +41,7 @@ authenticated connection.
 **Phase 1 — secure working foundation:** central dashboard, auth + 2FA, secure agent
 install/registration, multi-server connection, monitoring, Nginx/PHP/MariaDB stack
 install, WordPress/PHP/static deployment, system-user isolation, database management,
-SSL, basic file manager, local backups, logs, audit trail, basic diagnostics.
+SSL, basic file manager, local backups + restore, logs, audit trail, basic diagnostics.
 
 **Phase 2 — professional server management:** Git deployment & push-to-deploy, staging
 and cloning, cron/process management, firewall & Fail2Ban management, SSH/SFTP

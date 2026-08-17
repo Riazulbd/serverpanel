@@ -116,18 +116,30 @@ webhook push-to-deploy, deploy keys, or rollback exist in this codebase yet.
 ### Backup and restoration
 | Feature | Status |
 |---|---|
-| DB/file/full backups | ✅ `backup.run` — checksummed local tar.gz |
+| DB/file/full backups | ✅ `backup.run` — checksummed local tar.gz with a manifest
+  describing its own layout (`packages/capabilities/backup.go`) |
 | Scheduling, retention policies | ⬜ not implemented (backups are on-demand only) |
 | Encryption | ⬜ not implemented (local tar.gz is unencrypted; relies on host
   filesystem permissions today) |
-| Backup verification | 🚧 SHA-256 checksum is recorded and returned; the dashboard
-  does not yet re-verify it automatically |
+| Backup verification | ✅ SHA-256 checksum is required and re-verified by the agent
+  before every restore (`handleBackupRestore` refuses a mismatch outright); the
+  dashboard does not yet offer a standalone "verify without restoring" action |
 | Local storage | ✅ |
 | S3-compatible / Amazon S3 / R2 / B2 / Spaces / Wasabi | ⬜ Phase 2 |
-| Restore (same or another server) | ⬜ **not implemented — there is no restore
-  capability yet, only `backup.run`.** This is the most significant gap relative to
-  the "backup and restore model" the product plan calls for; see `OPERATIONS.md`. |
-| Pre-restore checkpoints, progress tracking, failure recovery | ⬜ depends on restore |
+| Restore (same server, same or new database/site) | ✅ `backup.restore` — restores
+  into a caller-chosen target database/site, which may differ from the one the backup
+  was taken from (e.g. restoring into a clone). Restoring onto a *different server*
+  needs the backup archive copied there first (no remote-fetch step yet — see below). |
+| Restore (fetch a backup onto a different server automatically) | ⬜ not implemented —
+  today the archive would have to be copied to the target server out of band before
+  `backup.restore` could use it there; see "Cross-server migration" (Phase 2) |
+| Pre-restore checkpoints | ✅ before overwriting, the agent dumps the current target
+  database (if it exists) and moves the current site directory aside (never deletes
+  it) — both checkpoint paths are returned in the restore result and recorded in the
+  audit log |
+| Progress tracking, failure recovery | ✅ `Progress` callbacks report each restore
+  step; a checksum mismatch, missing manifest, or missing archive member fails the
+  whole restore before anything is touched, not partway through |
 
 ### Security and monitoring
 See `SECURITY.md` for the detailed, section-by-section implemented-vs-planned
@@ -145,11 +157,11 @@ Phase boundaries and full milestone/estimate tables are in `product-plan.md` §6
 is the condensed status:
 
 - **Phase 1 — secure working foundation:** ~90% of the *capability* surface exists and
-  is tested per-capability (see the tables above); the biggest real gaps are backup
-  **restore**, an automated test suite (now added, see `TESTING.md`), SSL auto-renewal,
-  and agent cert auto-rotation. Not "GA-ready" yet, but the architecture and security
-  primitives it depends on (mTLS, allow-listed capabilities, per-app isolation, audit
-  log) are real and proven, not stubs.
+  is tested per-capability (see the tables above); backup restore is now implemented
+  (`backup.restore`, see §19) — the remaining real gaps are SSL auto-renewal and agent
+  cert auto-rotation. Not "GA-ready" yet, but the architecture and security primitives
+  it depends on (mTLS, allow-listed capabilities, per-app isolation, audit log) are
+  real and proven, not stubs.
 - **Phase 2 — professional server management:** not started. Git deployment,
   cron/process management, SSH/firewall management UI, remote backups, cross-server
   migration all remain ⬜.
@@ -233,7 +245,8 @@ EXISTS`, applied on every `openDB` call — idempotent, no separate migration to
 | `revoked_certs` | cert serial → server, revoked-at (checked on every gateway handshake) |
 | `audit_log` | append-only: seq, timestamp, server, actor, action, detail |
 | `sites` | id, server, domain, system user, docroot, app type, PHP version, status |
-| `backups` | id, server, site, scope, path, size, sha256, status, created_at |
+| `backups` | id, server, site (optional), scope, path, size, sha256, status, created_at
+  — one row per confirmed-successful `backup.run`; see §19 for the restore model |
 
 No ORM — every query is a small, explicit SQL statement in `store.go`. All secrets
 (session tokens, bootstrap tokens) are stored only as SHA-256 hashes; passwords use
@@ -243,8 +256,9 @@ bcrypt (cost 12); nothing is stored in plaintext.
 
 Full list with request/response shapes in `API.md`. Summary: `/api/v1/auth/*`
 (signup/login/logout/TOTP enroll+verify/MFA challenge/me), `/api/v1/servers*` (CRUD,
-revoke, task dispatch, sites, audit), `/agents/register` (the one unauthenticated
-agent-facing endpoint, secured by the bootstrap token itself), `/healthz`.
+revoke, task dispatch, sites, backups + restore, audit), `/agents/register` (the one
+unauthenticated agent-facing endpoint, secured by the bootstrap token itself),
+`/healthz`.
 
 ## 10. Background jobs
 
@@ -278,9 +292,8 @@ Current capability list: `system.ping`, `service.control`, `diagnostics.basic`,
 `stack.install`, `site.create`, `site.set_php_version`, `site.set_status`,
 `app.wordpress_install`, `ssl.issue_letsencrypt`, `ssl.install_custom`, `db.create`,
 `db.delete`, `db.list`, `file.list`, `file.read`, `file.write`, `file.delete`,
-`backup.run`, `logs.tail`. Notably absent (by design, until reviewed and added):
-`backup.restore`, `git.deploy`, `cron.upsert`, `ssh.*`, `firewall.*`,
-`agent.self_update`.
+`backup.run`, `backup.restore`, `logs.tail`. Notably absent (by design, until reviewed
+and added): `git.deploy`, `cron.upsert`, `ssh.*`, `firewall.*`, `agent.self_update`.
 
 ## 13. Installation and deployment
 
@@ -343,12 +356,34 @@ defenses on the file manager (`resolveScopedPath`).
 
 ## 19. Backup and restore model
 
-**Backup**: implemented (`backup.run` — local, checksummed tar.gz of DB and/or files).
-**Restore**: **not implemented**. This is the single largest functional gap in the
-Phase 1 feature set relative to what the product plan calls for, and should be the
-next priority after this documentation pass — see `OPERATIONS.md` §Backup and restore
-for the concrete plan (a `backup.restore` capability mirroring `backup.run`'s
-validation approach, plus a pre-restore checkpoint step).
+**Backup**: implemented (`backup.run` — local, checksummed tar.gz of DB and/or files,
+with an embedded `manifest.json` describing which archive member is the DB dump vs.
+the files payload, so restore never has to guess an archive's internal layout).
+
+**Restore**: implemented (`backup.restore`). Safety properties, all enforced
+server-side by the agent, not just the dashboard:
+
+1. The archive path is resolved to a real file strictly inside `backupBaseDir`
+   (`resolveBackupPath`, mirroring `file.go`'s `resolveScopedPath` symlink-escape
+   defense) — the control plane only ever passes a path it itself recorded from a
+   prior `backup.run` result, never one taken from request input.
+2. A SHA-256 checksum is mandatory and is re-verified against the archive's actual
+   contents before anything is touched; a mismatch aborts the restore outright.
+3. Before overwriting a live database, its current contents are dumped to a
+   timestamped checkpoint file under `backupBaseDir` (skipped only if the target
+   database doesn't exist yet). Before overwriting a live site directory, the existing
+   directory is renamed aside (`<docroot>.pre-restore.<timestamp>`), never deleted.
+   Both checkpoint paths are returned in the result and written to the audit log.
+4. Restoring into a *different* database name or site than the backup was taken from
+   is supported (not just in-place restore) — the control plane's
+   `POST .../backups/{id}/restore` endpoint takes the target `db_name`/`site_id`
+   independently of the stored backup record.
+
+What restore does **not** do yet: fetch/copy a backup archive onto a *different*
+server automatically (cross-server migration is still Phase 2 — see `SYSTEM.md` §2),
+and there's no "delete a backup" capability yet (old backups accumulate under
+`backupBaseDir` until cleaned up manually) — deliberately not built as an unrestricted
+recursive delete without a dedicated allow-listed capability behind it.
 
 ## 20. Monitoring and alerting
 
@@ -359,7 +394,11 @@ all ⬜, scoped to Phase 2 per `product-plan.md` §9.
 
 ## 21. Known limitations
 
-- No backup **restore** capability (see §19).
+- No "delete a backup" capability or automatic retention/cleanup — old backup
+  archives and pre-restore checkpoints accumulate under `backupBaseDir` until removed
+  manually (see §19).
+- No way to restore a backup onto a *different* server without copying the archive
+  there out of band first (see §19; full cross-server migration is Phase 2).
 - No on-disk agent task journal — a task in flight when the agent process restarts is
   lost, not resumed (see `ARCHITECTURE.md` §4 "As built").
 - No agent certificate auto-renewal before its 30-day expiry (see `SECURITY.md` §2).

@@ -102,6 +102,7 @@ e.g.:
 | `cron.upsert` | `{schedule, command_id, user}` | `command_id` maps to a pre-registered, reviewed command template — not a free-text shell string |
 | `firewall.apply_rules` | `{rules: [...]}` | Validated, dry-run diffed, applied via the commit-confirm flow (see security doc) |
 | `backup.run` | `{scope: "db"\|"files"\|"full", target}` | Streams progress events back over the same channel |
+| `backup.restore` | `{scope, path, sha256, db_name, site_root, owner_user}` | Checksum re-verified before extraction; checkpoints the current DB/site before overwriting (see `SECURITY.md` §7) — implemented, unlike the other still-illustrative rows in this table |
 
 Every capability call is logged (request + result) into the append-only audit log.
 Capabilities are versioned so the control plane can detect an agent that doesn't yet
