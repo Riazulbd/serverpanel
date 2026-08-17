@@ -245,3 +245,54 @@ func TestCreateAndListSites(t *testing.T) {
 		t.Fatalf("domain = %q, want example.sslip.io", sites[0].Domain)
 	}
 }
+
+func TestCreateListGetAndRestoreBackup(t *testing.T) {
+	st := newTestStore(t)
+	id, _, err := st.createServer("web-7", "", nil, time.Hour, "admin@example.com")
+	if err != nil {
+		t.Fatalf("createServer: %v", err)
+	}
+
+	rec, err := st.createBackup(id, "site_1", "files", "/var/backups/serverpanel/x.tar.gz", 1024, "deadbeef", "backup", "/home/sites/x", "")
+	if err != nil {
+		t.Fatalf("createBackup: %v", err)
+	}
+	if !rec.RestoredAt.IsZero() {
+		t.Fatalf("newly created backup should not have a restored_at yet, got %v", rec.RestoredAt)
+	}
+
+	list := st.listBackups(id)
+	if len(list) != 1 {
+		t.Fatalf("listBackups returned %d, want 1", len(list))
+	}
+	if list[0].SHA256 != "deadbeef" || list[0].Kind != "backup" {
+		t.Fatalf("unexpected backup record: %+v", list[0])
+	}
+
+	got, ok := st.getBackup(id, rec.ID)
+	if !ok {
+		t.Fatal("getBackup: not found")
+	}
+	if got.Path != rec.Path {
+		t.Fatalf("getBackup path = %q, want %q", got.Path, rec.Path)
+	}
+
+	st.markBackupRestored(rec.ID)
+	got, _ = st.getBackup(id, rec.ID)
+	if got.RestoredAt.IsZero() {
+		t.Fatal("expected restored_at to be set after markBackupRestored")
+	}
+}
+
+func TestGetBackupScopesToServer(t *testing.T) {
+	st := newTestStore(t)
+	id1, _, _ := st.createServer("web-8", "", nil, time.Hour, "admin@example.com")
+	id2, _, _ := st.createServer("web-9", "", nil, time.Hour, "admin@example.com")
+	rec, err := st.createBackup(id1, "", "db", "/var/backups/serverpanel/y.tar.gz", 512, "abc123", "backup", "", "app_db")
+	if err != nil {
+		t.Fatalf("createBackup: %v", err)
+	}
+	if _, ok := st.getBackup(id2, rec.ID); ok {
+		t.Fatal("expected a backup created for one server not to be retrievable under another server's ID")
+	}
+}

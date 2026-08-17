@@ -40,22 +40,28 @@ dashboard).
 
 ## 3. Backup and restore
 
-**Backup** (implemented): dispatch the `backup.run` capability
-(`POST /api/v1/servers/{id}/tasks` with `{"capability": "backup.run", "params": {...}}`)
-— see `packages/capabilities/backup.go` for its `scope`/`target` params. It writes a
-checksummed local tar.gz on the VPS itself and records the checksum in its
-`TaskEvent.detail`. The control plane's `backups` table schema exists (`db.go`) but
-nothing currently writes a row into it automatically — wiring `backup.run`'s dispatch
-through a persistence step analogous to `handleCreateSite` (dispatch → parse result →
-insert row) is a small, well-scoped next task.
+**Backup** (implemented): `POST /api/v1/servers/{id}/backups` with
+`{"scope": "files|db|full", "site_root": "...", "db_name": "..."}` dispatches
+`backup.run`, and only once the agent confirms a completed, checksummed archive,
+persists a `backups` row (`apps/controlplane/backups.go` `handleCreateBackup`). It
+writes a checksummed local tar.gz on the VPS itself under
+`/var/backups/serverpanel` (`packages/capabilities/backup.go`).
 
-**Restore** (not implemented): there is no `backup.restore` capability yet. Until one
-exists, restoring from a `backup.run` archive is a fully manual process: SSH to the
-VPS, locate the tar.gz under wherever `backup.run` wrote it, verify its SHA-256 against
-the value in the task's `detail`, and manually extract/restore the DB dump and/or
-files. **Do not represent backup/restore as a complete, tested feature until a real
-`backup.restore` capability exists and has been exercised end-to-end** — see
-`SYSTEM.md` §19 and §21, and `TESTING.md` §5 item 1 for the recommended next step.
+**Restore** (implemented): `POST /api/v1/servers/{id}/backups/{backupID}/restore` — no
+request body; the control plane reads the stored backup's archive path, checksum,
+scope, `site_root`, and `db_name` from its own `backups` row and dispatches
+`backup.restore` with those values. The agent independently re-verifies the archive
+path (must be under its own `backupBaseDir`) and re-checksums the archive before doing
+anything, then takes a fresh checkpoint backup of the current live state (recorded as
+its own `backups` row, `Kind: "checkpoint"`) before restoring the database (`mysql`
+import) and/or swapping the site's files directory into place. See `SYSTEM.md` §19 for
+the full step-by-step and `TESTING.md` for what's covered by the automated suite vs.
+still needing manual verification against a real Ubuntu host with MariaDB installed
+(the automated suite covers the `files`-scope path end to end; `db`/`full` need a real
+MariaDB instance this environment doesn't have).
+
+Restoring onto a server other than the one holding the archive is not yet
+implemented — see `SYSTEM.md` §21.
 
 ## 4. Monitoring and alerting
 

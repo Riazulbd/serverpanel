@@ -385,6 +385,93 @@ func (s *store) createSite(serverID, domain, systemUser, docroot, appType, phpVe
 	return rec, nil
 }
 
+type backupRecord struct {
+	ID         string
+	ServerID   string
+	SiteID     string
+	Scope      string
+	Path       string
+	SizeBytes  int64
+	SHA256     string
+	Status     string
+	Kind       string // "backup" (on-demand/scheduled) or "checkpoint" (auto-taken just before a restore)
+	SiteRoot   string
+	DBName     string
+	CreatedAt  time.Time
+	RestoredAt time.Time
+}
+
+// createBackup persists a completed backup.run (or pre-restore checkpoint)
+// result. It is only ever called after the agent has confirmed the archive
+// exists and reported its checksum — there is no "pending" backup row,
+// matching "never implement a fake success state" from docs/product-plan.md.
+func (s *store) createBackup(serverID, siteID, scope, path string, sizeBytes int64, sha256 string, kind, siteRoot, dbName string) (*backupRecord, error) {
+	rec := &backupRecord{
+		ID: randID("bkp"), ServerID: serverID, SiteID: siteID, Scope: scope, Path: path,
+		SizeBytes: sizeBytes, SHA256: sha256, Status: "completed", Kind: kind,
+		SiteRoot: siteRoot, DBName: dbName, CreatedAt: time.Now().UTC(),
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO backups (id, server_id, site_id, scope, path, size_bytes, sha256, status, created_at, site_root, db_name, kind, restored_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '')`,
+		rec.ID, rec.ServerID, rec.SiteID, rec.Scope, rec.Path, rec.SizeBytes, rec.SHA256, rec.Status,
+		rec.CreatedAt.Format(time.RFC3339Nano), rec.SiteRoot, rec.DBName, rec.Kind,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return rec, nil
+}
+
+func (s *store) listBackups(serverID string) []*backupRecord {
+	rows, err := s.db.Query(
+		`SELECT id, server_id, site_id, scope, path, size_bytes, sha256, status, created_at, site_root, db_name, kind, restored_at
+		 FROM backups WHERE server_id = ? ORDER BY created_at DESC`, serverID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var out []*backupRecord
+	for rows.Next() {
+		rec, err := scanBackup(rows)
+		if err != nil {
+			continue
+		}
+		out = append(out, rec)
+	}
+	return out
+}
+
+func (s *store) getBackup(serverID, backupID string) (*backupRecord, bool) {
+	row := s.db.QueryRow(
+		`SELECT id, server_id, site_id, scope, path, size_bytes, sha256, status, created_at, site_root, db_name, kind, restored_at
+		 FROM backups WHERE server_id = ? AND id = ?`, serverID, backupID)
+	rec, err := scanBackup(row)
+	if err != nil {
+		return nil, false
+	}
+	return rec, true
+}
+
+func (s *store) markBackupRestored(backupID string) {
+	s.db.Exec(`UPDATE backups SET restored_at = ? WHERE id = ?`, time.Now().UTC().Format(time.RFC3339Nano), backupID)
+}
+
+func scanBackup(row rowScanner) (*backupRecord, error) {
+	var rec backupRecord
+	var createdAt, restoredAt string
+	if err := row.Scan(&rec.ID, &rec.ServerID, &rec.SiteID, &rec.Scope, &rec.Path, &rec.SizeBytes, &rec.SHA256,
+		&rec.Status, &createdAt, &rec.SiteRoot, &rec.DBName, &rec.Kind, &restoredAt); err != nil {
+		return nil, err
+	}
+	rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+	if restoredAt != "" {
+		rec.RestoredAt, _ = time.Parse(time.RFC3339Nano, restoredAt)
+	}
+	return &rec, nil
+}
+
 func randID(prefix string) string {
 	n, _ := rand.Int(rand.Reader, big.NewInt(1<<62))
 	return fmt.Sprintf("%s_%x", prefix, n)

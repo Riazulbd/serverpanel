@@ -43,6 +43,9 @@ protected route; there is no route that skips it by omission.
 | `POST` | `/api/v1/servers/{id}/tasks` | Dispatch an arbitrary allow-listed capability (see §3) |
 | `GET` | `/api/v1/servers/{id}/sites` | List sites on a server |
 | `POST` | `/api/v1/servers/{id}/sites` | Dispatch `site.create` and persist the resulting site record |
+| `GET` | `/api/v1/servers/{id}/backups` | List backups (and pre-restore checkpoints) for a server |
+| `POST` | `/api/v1/servers/{id}/backups` | Dispatch `backup.run` and persist the resulting backup record |
+| `POST` | `/api/v1/servers/{id}/backups/{backupID}/restore` | Dispatch `backup.restore` for a previously recorded backup |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -102,6 +105,37 @@ Dispatches `site.create`, and only on the agent reporting success, persists a `s
 row. → `201 {"site": {...siteRecord}, "temp_domain": "<user>.<ip-with-dashes>.sslip.io"}`.
 A dispatch failure or agent-side failure never leaves an orphan site record — the
 row is written after (and only after) the agent confirms success.
+
+### `POST /api/v1/servers/{id}/backups`
+```json
+{"scope": "files", "site_id": "site_abc123", "site_root": "/home/sites/site_abc123", "db_name": ""}
+```
+`scope` is one of `db`, `files`, `full`; `site_root` is required for `files`/`full`,
+`db_name` for `db`/`full`. Dispatches `backup.run`, and only on the agent reporting a
+completed, checksummed archive, persists a `backups` row. → `201` with the stored
+`backupRecord` (`ID`, `Scope`, `Path`, `SizeBytes`, `SHA256`, `Status`, `Kind` —
+`"backup"` for this endpoint, `CreatedAt`). A dispatch failure or agent-side failure
+never leaves an orphan backup record, same pattern as site creation.
+
+### `GET /api/v1/servers/{id}/backups`
+→ `200` array of `backupRecord`, newest first — both ordinary backups (`Kind:
+"backup"`) and pre-restore checkpoints (`Kind: "checkpoint"`, see below).
+
+### `POST /api/v1/servers/{id}/backups/{backupID}/restore`
+No request body — every value the agent needs (`scope`, `site_root`, `db_name`,
+`archive_path`, `expected_sha256`) is read from the control plane's own stored
+`backups` row for `backupID`, never taken from the request. This is deliberate: a
+caller can only ever trigger a restore of an archive this control plane already knows
+about and already checksummed, and the agent independently re-verifies the path (must
+be under its own `backupBaseDir`) and checksum again before touching anything live
+(`packages/capabilities/backup.go`). Before overwriting anything, the agent takes its
+own fresh backup of whatever is currently live and returns it as
+`pre_restore_checkpoint`; the control plane persists that as a second `backups` row
+(`Kind: "checkpoint"`) so a bad restore is itself always recoverable from the same
+list. → `200 {"restored_from": {...backupRecord}, "pre_restore_checkpoint":
+{...backupRecord}}`. Unknown `backupID` → `404`. Agent-side failure (checksum
+mismatch, missing archive, `mysql`/`tar` failure) → `502`/`422` with the agent's error
+message; nothing is marked restored in that case.
 
 ### `POST /agents/register`
 ```json

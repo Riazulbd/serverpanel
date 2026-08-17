@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -29,7 +30,35 @@ func openDB(path string) (*sql.DB, error) {
 		db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
+	if err := migrateSchema(db); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return db, nil
+}
+
+// migrateSchema applies additive, backward-compatible column changes to
+// tables that already existed before those columns were introduced. There
+// is no separate migration-versioning table yet (Phase 1 pragmatism, see
+// docs/SYSTEM.md §8) — each statement here is idempotent by construction:
+// SQLite's "duplicate column name" error on an already-migrated database
+// is expected and swallowed, anything else is not.
+func migrateSchema(db *sql.DB) error {
+	stmts := []string{
+		`ALTER TABLE backups ADD COLUMN site_root TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE backups ADD COLUMN db_name TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE backups ADD COLUMN kind TEXT NOT NULL DEFAULT 'backup'`,
+		`ALTER TABLE backups ADD COLUMN restored_at TEXT NOT NULL DEFAULT ''`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			if strings.Contains(err.Error(), "duplicate column name") {
+				continue
+			}
+			return fmt.Errorf("migrate: %s: %w", stmt, err)
+		}
+	}
+	return nil
 }
 
 const schema = `

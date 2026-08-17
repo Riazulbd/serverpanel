@@ -121,6 +121,42 @@ Properties this guarantees:
   allow-list is the enforcement point, not process privilege), but full defense in
   depth per this section's original intent is still open.
 
+## 4a. Backup restore safety — **implemented**
+
+`backup.restore` (`packages/capabilities/backup.go`) is the one capability that
+deliberately overwrites live data, so it carries its own layered checks rather than
+relying on the control plane alone to have sent a sane request:
+
+- **Archive confinement**: `archive_path` must resolve (after `filepath.Clean`) under
+  the agent's own `backupBaseDir` (`/var/backups/serverpanel`) — the only place this
+  agent itself ever writes a backup. A path-traversal attempt
+  (`/var/backups/serverpanel/../../etc/passwd`) is rejected even though it
+  string-prefix-matches `backupBaseDir` before cleaning; the check runs on the
+  *cleaned* path.
+- **Checksum re-verification**: the agent recomputes the archive's SHA-256 and
+  compares it against the caller-supplied `expected_sha256` before extracting
+  anything. A mismatch — corruption, or a swapped/tampered file — aborts before any
+  live data is touched. The control plane always supplies the checksum from its own
+  stored `backups` row (never from the HTTP request body — see `API.md`), but the
+  agent checks it again independently rather than trusting that.
+- **Mandatory pre-restore checkpoint**: before restoring anything, the agent takes a
+  fresh backup of whatever is currently live, using the exact same code path
+  `backup.run` uses. If that checkpoint fails, the restore is refused outright — a
+  restore can never leave the operator with neither the new data nor a way back to
+  the old data.
+- **No shell involved in the destructive steps**: the database import pipes the dump
+  into `mysql <dbname>` via `cmd.Stdin`, never a shell string; the files swap uses
+  `os.Rename`/`os.RemoveAll` plus an argv-only `cp -a` fallback for the cross-
+  filesystem case, never a shell glob or wildcard expansion over caller-influenced
+  paths.
+
+The control-plane-side endpoint (`POST
+/api/v1/servers/{id}/backups/{backupID}/restore`) takes no restore parameters in its
+request body at all — every value the agent receives comes from the control plane's
+own database row for `backupID`, so even a fully compromised HTTP client can only ever
+trigger a restore of an archive this control plane already created and already
+checksummed, never an arbitrary path or an attacker-supplied checksum.
+
 ## 5. Safe SSH / firewall changes ("commit-confirm") — **not yet implemented (Phase 2)**
 
 Any change that could lock the user out of SSH or break connectivity (SSH port change,
