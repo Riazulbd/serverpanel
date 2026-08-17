@@ -150,4 +150,17 @@ CREATE TABLE IF NOT EXISTS backups (
 	status     TEXT NOT NULL,
 	created_at TEXT NOT NULL
 );
+
+-- Databases created through the control plane (see apps/controlplane/databases.go).
+-- Deliberately has no password column: db.create's generated owner_password is
+-- returned to the caller exactly once in the API response and never persisted
+-- here, the same secret-handling pattern createServer uses for bootstrap tokens.
+CREATE TABLE IF NOT EXISTS databases (
+	id         TEXT PRIMARY KEY,
+	server_id  TEXT NOT NULL REFERENCES servers(id),
+	name       TEXT NOT NULL,
+	owner_user TEXT NOT NULL,
+	status     TEXT NOT NULL DEFAULT 'active',
+	created_at TEXT NOT NULL
+);
 `

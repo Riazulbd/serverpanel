@@ -2,6 +2,38 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-17 — Database management: control-plane persistence and dashboard UI (DB-005)
+
+- Closed the gap the previous entry's parity matrix explicitly flagged as the next
+  candidate: `db.create`/`db.delete` (agent capabilities that already existed) now
+  have a control-plane-side home, following the exact dispatch-then-persist-on-success
+  pattern `backups` established. Added a `databases` table (id, server_id, name,
+  owner_user, status, created_at — no password column) and three endpoints:
+  `GET`/`POST /api/v1/servers/{id}/databases`, `DELETE .../databases/{dbId}`.
+- The owner password for a new database is generated server-side with `crypto/rand`
+  (never accepted from the client), dispatched to `db.create`, and returned to the
+  caller exactly once in the API response — the same one-time-secret handling
+  `POST /api/v1/servers` already uses for bootstrap tokens. It is never written to the
+  `databases` table, never logged, and never retrievable a second time.
+- Added a "Databases" panel to the server-detail view in the dashboard: list, a
+  create-database modal that displays the generated password once (with an explicit
+  "save it now" warning), and delete with a destructive-action confirmation dialog.
+- Both the name and owner_user fields are validated against the same identifier
+  allow-list regex the agent-side capability already enforces (`^[a-z][a-z0-9_]{0,30}$`)
+  — duplicated deliberately at the HTTP layer for an early 400 before any dispatch,
+  the same defense-in-depth pattern `handleCreateBackup`'s scope validation uses.
+- Added 2 new store tests (`TestDatabaseCreateListGetDeleteRoundTrip`, including
+  cross-server scoping) and 1 new HTTP test
+  (`TestDatabaseEndpointsValidateBeforeDispatch`, covering the 400-before-dispatch,
+  404-on-unknown-id, and 502-with-no-agent-connected paths). Manually verified against
+  a running control plane via the raw API (create/list/delete against a
+  not-yet-connected server exercises every code path except the agent's own SQL,
+  which was already verified against a real MariaDB in a prior session). Full suite
+  passes, `go vet`/`gofmt` clean.
+- Updated `SYSTEM.md` (new "Database management" feature section — this project's
+  feature list previously had no such section at all), `API.md`, and
+  `docs/SERVERAVATAR_PARITY.md` (DB-005 merged into DB-001's detail block).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the
