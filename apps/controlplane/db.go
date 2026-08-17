@@ -29,7 +29,68 @@ func openDB(path string) (*sql.DB, error) {
 		db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
+	if err := migrateSchema(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate schema: %w", err)
+	}
 	return db, nil
+}
+
+// migrateSchema adds columns that were introduced after a table's initial
+// CREATE TABLE IF NOT EXISTS — that statement only ever creates a brand new
+// table, so a database file from before a column was added needs an
+// explicit, idempotent ALTER TABLE here. This is deliberately a small,
+// hand-written list rather than a migration framework: additive-only
+// (never drops/renames a column, never touches existing data), which is all
+// this project's schema evolution has needed so far — see db.go's package
+// doc comment on Postgres being the eventual production store.
+func migrateSchema(db *sql.DB) error {
+	migrations := []struct {
+		table, column, ddl string
+	}{
+		{"backups", "db_name", `ALTER TABLE backups ADD COLUMN db_name TEXT NOT NULL DEFAULT ''`},
+	}
+	for _, m := range migrations {
+		has, err := columnExists(db, m.table, m.column)
+		if err != nil {
+			return fmt.Errorf("check column %s.%s: %w", m.table, m.column, err)
+		}
+		if has {
+			continue
+		}
+		if _, err := db.Exec(m.ddl); err != nil {
+			return fmt.Errorf("add column %s.%s: %w", m.table, m.column, err)
+		}
+	}
+	return nil
+}
+
+// columnExists uses PRAGMA table_info rather than a schema string match, so
+// it can't be fooled by column ordering or formatting differences. table is
+// always one of this file's own fixed constants (see migrateSchema), never
+// caller-supplied, so building the PRAGMA statement with fmt.Sprintf here
+// is safe — SQLite's PRAGMA syntax doesn't accept a bound parameter for the
+// table name anyway.
+func columnExists(db *sql.DB, table, column string) (bool, error) {
+	rows, err := db.Query(fmt.Sprintf(`PRAGMA table_info(%s)`, table))
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notNull, pk int
+		var dfltValue sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dfltValue, &pk); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 const schema = `
@@ -106,6 +167,7 @@ CREATE TABLE IF NOT EXISTS backups (
 	size_bytes INTEGER NOT NULL DEFAULT 0,
 	sha256     TEXT NOT NULL DEFAULT '',
 	status     TEXT NOT NULL,
-	created_at TEXT NOT NULL
+	created_at TEXT NOT NULL,
+	db_name    TEXT NOT NULL DEFAULT ''
 );
 `

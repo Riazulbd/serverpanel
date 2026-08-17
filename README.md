@@ -34,6 +34,11 @@ authenticated connection.
   upgrade/rollback, troubleshooting.
 - [`docs/INSTALLATION.md`](docs/INSTALLATION.md) — local dev setup and a clean-Ubuntu
   production install walkthrough.
+- [`docs/SERVERAVATAR_PARITY.md`](docs/SERVERAVATAR_PARITY.md) — feature-level parity
+  tracker against ServerAvatar's documented capabilities (functional reference only —
+  no ServerAvatar code, copy, or assets are used; see "Non-goals" below).
+- [`docs/SERVERAVATAR_DOC_INVENTORY.md`](docs/SERVERAVATAR_DOC_INVENTORY.md) — tracks
+  what has (and hasn't yet) been reviewed from ServerAvatar's documentation site.
 - [`CHANGELOG.md`](CHANGELOG.md) — dated log of what changed and why.
 
 ## Development priority

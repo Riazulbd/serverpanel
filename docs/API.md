@@ -43,6 +43,9 @@ protected route; there is no route that skips it by omission.
 | `POST` | `/api/v1/servers/{id}/tasks` | Dispatch an arbitrary allow-listed capability (see §3) |
 | `GET` | `/api/v1/servers/{id}/sites` | List sites on a server |
 | `POST` | `/api/v1/servers/{id}/sites` | Dispatch `site.create` and persist the resulting site record |
+| `GET` | `/api/v1/servers/{id}/backups` | List backups recorded for a server |
+| `POST` | `/api/v1/servers/{id}/backups` | Dispatch `backup.run` and persist the resulting backup record |
+| `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` using the checksum recorded at backup time |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -102,6 +105,34 @@ Dispatches `site.create`, and only on the agent reporting success, persists a `s
 row. → `201 {"site": {...siteRecord}, "temp_domain": "<user>.<ip-with-dashes>.sslip.io"}`.
 A dispatch failure or agent-side failure never leaves an orphan site record — the
 row is written after (and only after) the agent confirms success.
+
+### `POST /api/v1/servers/{id}/backups`
+```json
+{"scope": "full", "site_id": "site_...", "db_name": "wp_db"}
+```
+`scope` is one of `db`, `files`, `full`. `site_id` is required for `files`/`full`
+(resolved to the site's isolated home directory, `/home/sites/<system_user>`, never
+the caller-supplied path); `db_name` is required for `db`/`full`. Dispatches
+`backup.run` to the agent (20-minute timeout — long-running, unlike the 120s
+interactive-task bound) and, only on success, persists a `backups` row with the
+archive path, size, and SHA-256 the agent reported. → `201` with the `backupRecord`
+JSON. A dispatch or agent-side failure never leaves an orphan row, same rule as site
+creation.
+
+### `GET /api/v1/servers/{id}/backups`
+→ `200` with the array of `backupRecord`s for that server, newest first.
+
+### `POST /api/v1/servers/{id}/backups/{backupId}/restore`
+No request body. Looks up the backup record, resolves its site (if the scope needs
+one), and dispatches `backup.restore` with `backup_path` and `expected_sha256` taken
+from the control plane's own database — **never from the request** — so a caller can't
+point restore at an arbitrary path or bypass the checksum check by supplying their own.
+The agent creates a pre-restore checkpoint of current state before touching anything;
+see `packages/capabilities/backup.go`'s `handleBackupRestore` doc comment and
+`SYSTEM.md` §19 for the full restore model and its documented limitations. → `200`
+with the `TaskEvent` JSON on any terminal outcome; `404` if the backup (or the server
+it's attached to) doesn't match; `502` for a transport-level failure (agent not
+connected).
 
 ### `POST /agents/register`
 ```json

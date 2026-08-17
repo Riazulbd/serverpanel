@@ -2,6 +2,50 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-17 — Backup restore capability and control-plane persistence
+
+- Added the `backup.restore` agent capability (`packages/capabilities/backup.go`),
+  closing the single largest functional gap flagged in the previous session's
+  documentation pass (`SYSTEM.md` §19/§21): restore was previously not implemented at
+  all, only `backup.run`. Restore verifies the archive's SHA-256 against the checksum
+  recorded at backup time before touching anything, takes a fresh pre-restore
+  checkpoint backup of current live state first (aborting untouched if that checkpoint
+  fails), extracts to a scratch directory and validates it can locate the expected
+  dump/site content, then restores the database (`mysql <db_name> < dump.sql`) and/or
+  files (`cp -a` over the live site directory, re-applying ownership). Backup-archive
+  creation was refactored into a shared `performBackup` helper used by both
+  `backup.run` and the restore checkpoint, so there is exactly one code path that
+  writes an archive.
+- Wired the control plane to actually use the `backups` table that already existed in
+  the schema but had no store methods, no API route, and nothing writing to it:
+  `store.createBackup/listBackups/getBackup` (`apps/controlplane/store.go`), and three
+  new endpoints (`apps/controlplane/backups.go`) — `POST`/`GET
+  /api/v1/servers/{id}/backups` and `POST /api/v1/servers/{id}/backups/{backupId}/
+  restore`. Restore's `expected_sha256`/`backup_path` are read from the control
+  plane's own database, never accepted from the request body, so the checksum check
+  can't be bypassed by a caller supplying its own value.
+- Added an additive, idempotent schema-migration mechanism (`migrateSchema` in
+  `apps/controlplane/db.go`, using `PRAGMA table_info` to check for a column before
+  `ALTER TABLE ADD COLUMN`) for the new `backups.db_name` column, since `CREATE TABLE
+  IF NOT EXISTS` alone doesn't add a column to a database file created before that
+  column existed. Covered by a test that recreates the pre-migration table shape and
+  confirms `openDB` migrates it in place.
+- Added 16 new test functions: `packages/capabilities/backup_test.go` (validation,
+  checksum-mismatch rejection, path-traversal/backupBaseDir-escape rejection, and a
+  real end-to-end files-scope backup→mutate→restore→verify round trip against actual
+  `tar`/`cp`/`chown`) and additions to `apps/controlplane/store_test.go`/`http_test.go`
+  (backup persistence round trip, the schema-migration test above, and HTTP-level
+  request validation for the new endpoints, including confirming a failed dispatch
+  never leaves an orphan `backups` row). `db`/`full` scope (which need a real
+  `mysqldump`/`mysql`) remain manually-verified-only, same limitation `db.create/
+  delete/list` already had — no MariaDB instance is available in this environment; see
+  `TESTING.md` §2.
+- Updated `docs/SYSTEM.md`, `docs/API.md`, `docs/ARCHITECTURE.md`,
+  `docs/OPERATIONS.md`, and `docs/TESTING.md` to reflect the new capability, endpoints,
+  test counts, and the restore implementation's documented limitations (same-server
+  only; file restore is create/overwrite, not delete-then-replace, to avoid ever
+  recursive-deleting a live site directory as a side effect; no dashboard UI yet).
+
 ## 2026-08-14 — Automated test suite, doc restructuring
 
 - Added `go test` coverage across `apps/controlplane` and `packages/capabilities`

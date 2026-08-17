@@ -40,22 +40,30 @@ dashboard).
 
 ## 3. Backup and restore
 
-**Backup** (implemented): dispatch the `backup.run` capability
-(`POST /api/v1/servers/{id}/tasks` with `{"capability": "backup.run", "params": {...}}`)
-— see `packages/capabilities/backup.go` for its `scope`/`target` params. It writes a
-checksummed local tar.gz on the VPS itself and records the checksum in its
-`TaskEvent.detail`. The control plane's `backups` table schema exists (`db.go`) but
-nothing currently writes a row into it automatically — wiring `backup.run`'s dispatch
-through a persistence step analogous to `handleCreateSite` (dispatch → parse result →
-insert row) is a small, well-scoped next task.
+**Backup** (implemented): `POST /api/v1/servers/{id}/backups` with
+`{"scope": "db"|"files"|"full", "site_id": "...", "db_name": "..."}` dispatches
+`backup.run` and, only on success, persists a `backups` row (`apps/controlplane/
+backups.go handleCreateBackup`) with the archive path, size, and SHA-256 the agent
+reported. `GET /api/v1/servers/{id}/backups` lists what's recorded for a server. The
+archive itself is a checksummed local tar.gz written under `/var/backups/serverpanel`
+on the VPS — nothing is uploaded off-box yet (remote/S3-compatible storage remains
+Phase 2, see `SYSTEM.md` §2).
 
-**Restore** (not implemented): there is no `backup.restore` capability yet. Until one
-exists, restoring from a `backup.run` archive is a fully manual process: SSH to the
-VPS, locate the tar.gz under wherever `backup.run` wrote it, verify its SHA-256 against
-the value in the task's `detail`, and manually extract/restore the DB dump and/or
-files. **Do not represent backup/restore as a complete, tested feature until a real
-`backup.restore` capability exists and has been exercised end-to-end** — see
-`SYSTEM.md` §19 and §21, and `TESTING.md` §5 item 1 for the recommended next step.
+**Restore** (implemented): `POST /api/v1/servers/{id}/backups/{backupId}/restore`
+(no body) dispatches `backup.restore` using the `path`/`sha256` the control plane
+already has on file for that backup — the request can't supply its own checksum or
+path, which is what makes the agent's "refuse to restore an unverified archive" check
+actually mean something end to end. Before touching the live database or site
+directory, the agent takes a fresh checkpoint backup of current state; if that
+checkpoint fails, the restore aborts having touched nothing. See
+`packages/capabilities/backup.go`'s `handleBackupRestore` doc comment and `SYSTEM.md`
+§19 for the exact sequence and its documented limitations (same-server only,
+create/overwrite file semantics, no dashboard UI yet — API/agent only).
+
+**Recommended next steps**, in priority order: a dashboard page for triggering
+backups/restores and viewing history (the API/agent layers are done, nothing in
+`apps/controlplane/web/index.html` calls them yet); scheduled/recurring backups with
+retention policy; remote storage adapters (S3-compatible); cross-server restore.
 
 ## 4. Monitoring and alerting
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -225,6 +226,101 @@ func TestAuditLogAppendsEntries(t *testing.T) {
 	}
 	if !strings.Contains(entries[0].Detail, "name=") {
 		t.Fatalf("detail = %q, missing expected content", entries[0].Detail)
+	}
+}
+
+func TestCreateAndListBackups(t *testing.T) {
+	st := newTestStore(t)
+	serverID, _, err := st.createServer("web-7", "", nil, time.Hour, "admin@example.com")
+	if err != nil {
+		t.Fatalf("createServer: %v", err)
+	}
+	site, err := st.createSite(serverID, "example.sslip.io", "sp_abc123", "/home/sites/sp_abc123/public", "wordpress", "8.3")
+	if err != nil {
+		t.Fatalf("createSite: %v", err)
+	}
+
+	rec, err := st.createBackup(serverID, site.ID, "full", "/var/backups/serverpanel/x.tar.gz", 1024, "deadbeef", "wp_db")
+	if err != nil {
+		t.Fatalf("createBackup: %v", err)
+	}
+	if rec.ID == "" {
+		t.Fatal("expected createBackup to assign an ID")
+	}
+
+	list := st.listBackups(serverID)
+	if len(list) != 1 {
+		t.Fatalf("listBackups returned %d, want 1", len(list))
+	}
+	if list[0].DBName != "wp_db" || list[0].SHA256 != "deadbeef" {
+		t.Fatalf("listed backup = %+v, want db_name=wp_db sha256=deadbeef", list[0])
+	}
+
+	got, ok := st.getBackup(rec.ID)
+	if !ok {
+		t.Fatal("expected getBackup to find the created backup")
+	}
+	if got.Path != rec.Path || got.Scope != "full" {
+		t.Fatalf("getBackup = %+v, want it to match the created record", got)
+	}
+}
+
+func TestGetBackupUnknownIDNotFound(t *testing.T) {
+	st := newTestStore(t)
+	if _, ok := st.getBackup("bkp_doesnotexist"); ok {
+		t.Fatal("expected an unknown backup ID to be not-found")
+	}
+}
+
+// TestMigrateSchemaAddsMissingColumnToPreExistingTable simulates a database
+// file created before the backups.db_name column existed: a fresh DB with
+// the column definition stripped out of the CREATE TABLE. openDB (via
+// migrateSchema) must add the column in place rather than requiring the
+// operator to hand-run an ALTER TABLE — see db.go's migrateSchema doc
+// comment on this being additive-only schema evolution.
+func TestMigrateSchemaAddsMissingColumnToPreExistingTable(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "legacy.db")
+	db, err := openDB(dbPath)
+	if err != nil {
+		t.Fatalf("openDB: %v", err)
+	}
+	// Recreate the pre-migration shape of the table directly, bypassing the
+	// current schema string, to simulate a database that predates db_name.
+	if _, err := db.Exec(`DROP TABLE backups`); err != nil {
+		t.Fatalf("drop backups: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TABLE backups (
+		id TEXT PRIMARY KEY, server_id TEXT NOT NULL, site_id TEXT NOT NULL DEFAULT '',
+		scope TEXT NOT NULL, path TEXT NOT NULL, size_bytes INTEGER NOT NULL DEFAULT 0,
+		sha256 TEXT NOT NULL DEFAULT '', status TEXT NOT NULL, created_at TEXT NOT NULL
+	)`); err != nil {
+		t.Fatalf("create legacy backups table: %v", err)
+	}
+	db.Close()
+
+	// Re-opening (the real code path every process restart goes through)
+	// must migrate the existing table in place.
+	db2, err := openDB(dbPath)
+	if err != nil {
+		t.Fatalf("re-open after simulated legacy schema: %v", err)
+	}
+	defer db2.Close()
+
+	has, err := columnExists(db2, "backups", "db_name")
+	if err != nil {
+		t.Fatalf("columnExists: %v", err)
+	}
+	if !has {
+		t.Fatal("expected migrateSchema to add the missing db_name column")
+	}
+
+	st := newStore(db2)
+	serverID, _, err := st.createServer("web-legacy", "", nil, time.Hour, "admin@example.com")
+	if err != nil {
+		t.Fatalf("createServer: %v", err)
+	}
+	if _, err := st.createBackup(serverID, "", "db", "/var/backups/serverpanel/y.tar.gz", 10, "abc", "mydb"); err != nil {
+		t.Fatalf("createBackup after migration: %v", err)
 	}
 }
 
