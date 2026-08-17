@@ -201,6 +201,88 @@ func TestServerCreateListRevokeFlow(t *testing.T) {
 	}
 }
 
+func TestBackupEndpointsValidateBeforeDispatch(t *testing.T) {
+	secureCookies = false
+	defer func() { secureCookies = true }()
+
+	a := newTestAPIServer(t)
+	h := a.routes()
+
+	doJSON(t, h, "POST", "/api/v1/auth/signup", map[string]string{
+		"Email": "backups@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	rec := doJSON(t, h, "POST", "/api/v1/auth/login", map[string]string{
+		"Email": "backups@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	cookie := sessionCookie(rec)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers", map[string]any{"Name": "web-2"}, cookie)
+	var created struct {
+		ServerID string `json:"server_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+
+	// No such site: must 404 before ever attempting to dispatch to an agent.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/sites/site_missing/backups",
+		map[string]any{"scope": "files"}, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("backup for unknown site status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	site, err := a.store.createSite(created.ServerID, "example.sslip.io", "sp_abc123", "/home/sites/sp_abc123/public", "static", "")
+	if err != nil {
+		t.Fatalf("createSite: %v", err)
+	}
+
+	// Invalid scope: must 400 before dispatch.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/sites/"+site.ID+"/backups",
+		map[string]any{"scope": "everything"}, cookie)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid scope status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// db scope without db_name: must 400 before dispatch.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/sites/"+site.ID+"/backups",
+		map[string]any{"scope": "db"}, cookie)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("db scope without db_name status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// No connected agent: a validly-shaped request reaches dispatch and
+	// fails there (502), proving validation isn't rejecting valid input.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/sites/"+site.ID+"/backups",
+		map[string]any{"scope": "files"}, cookie)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("backup with no connected agent status = %d, want 502, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// Restoring an unknown backup id must 404 before dispatch.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/backups/backup_missing/restore", nil, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("restore unknown backup status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// A files-scope backup with no resolvable site must 400 before dispatch.
+	backup, err := a.store.createBackup(created.ServerID, "site_deleted", "files", "/var/backups/serverpanel/x.tar.gz", 10, "abc")
+	if err != nil {
+		t.Fatalf("createBackup: %v", err)
+	}
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/backups/"+backup.ID+"/restore", nil, cookie)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("restore with unresolvable site status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	rec = doJSON(t, h, "GET", "/api/v1/servers/"+created.ServerID+"/backups", nil, cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list backups status = %d", rec.Code)
+	}
+	var list []backupRecord
+	json.Unmarshal(rec.Body.Bytes(), &list)
+	if len(list) != 1 {
+		t.Fatalf("expected 1 backup record, got %d", len(list))
+	}
+}
+
 func TestRegisterEndpointRejectsBadToken(t *testing.T) {
 	a := newTestAPIServer(t)
 	h := a.routes()

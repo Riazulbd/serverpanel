@@ -120,14 +120,23 @@ webhook push-to-deploy, deploy keys, or rollback exist in this codebase yet.
 | Scheduling, retention policies | ⬜ not implemented (backups are on-demand only) |
 | Encryption | ⬜ not implemented (local tar.gz is unencrypted; relies on host
   filesystem permissions today) |
-| Backup verification | 🚧 SHA-256 checksum is recorded and returned; the dashboard
-  does not yet re-verify it automatically |
+| Backup verification | 🚧 SHA-256 checksum is recorded at backup time and
+  re-verified by the agent before every restore (`backup.restore` refuses to run on a
+  checksum mismatch); the dashboard does not yet run a *standalone* periodic
+  re-verification pass independent of an actual restore |
 | Local storage | ✅ |
 | S3-compatible / Amazon S3 / R2 / B2 / Spaces / Wasabi | ⬜ Phase 2 |
-| Restore (same or another server) | ⬜ **not implemented — there is no restore
-  capability yet, only `backup.run`.** This is the most significant gap relative to
-  the "backup and restore model" the product plan calls for; see `OPERATIONS.md`. |
-| Pre-restore checkpoints, progress tracking, failure recovery | ⬜ depends on restore |
+| Restore (same server) | ✅ `backup.restore` — checksum-verified, db and/or files,
+  with a mandatory pre-restore checkpoint before any existing files are overwritten;
+  the checkpoint is itself persisted as a `backups` record. Wired through
+  `POST /api/v1/servers/{id}/backups/{backupId}/restore`. |
+| Restore (to another server) | ⬜ not implemented — `backup.restore` only runs against
+  the server that owns the backup path; cross-server restore requires transferring the
+  archive first (Phase 2, alongside cross-server migration) |
+| Pre-restore checkpoints | ✅ automatic, checksummed, recorded as a `backups` row |
+| Restore progress tracking, failure recovery | 🚧 synchronous today (the HTTP request
+  blocks until the agent task completes, capped at 10 minutes); no background job with
+  incremental progress yet — see `OPERATIONS.md` |
 
 ### Security and monitoring
 See `SECURITY.md` for the detailed, section-by-section implemented-vs-planned
@@ -145,9 +154,12 @@ Phase boundaries and full milestone/estimate tables are in `product-plan.md` §6
 is the condensed status:
 
 - **Phase 1 — secure working foundation:** ~90% of the *capability* surface exists and
-  is tested per-capability (see the tables above); the biggest real gaps are backup
-  **restore**, an automated test suite (now added, see `TESTING.md`), SSL auto-renewal,
-  and agent cert auto-rotation. Not "GA-ready" yet, but the architecture and security
+  is tested per-capability (see the tables above); backup **restore** now has an
+  implementation (`backup.restore` + the control-plane endpoints/persistence around
+  it); the remaining real gaps are SSL auto-renewal, agent cert auto-rotation, and a
+  background job model for long-running operations (today's dispatch is
+  request/response, capped at a fixed timeout). Not "GA-ready" yet, but the architecture
+  and security
   primitives it depends on (mTLS, allow-listed capabilities, per-app isolation, audit
   log) are real and proven, not stubs.
 - **Phase 2 — professional server management:** not started. Git deployment,
@@ -278,8 +290,8 @@ Current capability list: `system.ping`, `service.control`, `diagnostics.basic`,
 `stack.install`, `site.create`, `site.set_php_version`, `site.set_status`,
 `app.wordpress_install`, `ssl.issue_letsencrypt`, `ssl.install_custom`, `db.create`,
 `db.delete`, `db.list`, `file.list`, `file.read`, `file.write`, `file.delete`,
-`backup.run`, `logs.tail`. Notably absent (by design, until reviewed and added):
-`backup.restore`, `git.deploy`, `cron.upsert`, `ssh.*`, `firewall.*`,
+`backup.run`, `backup.restore`, `logs.tail`. Notably absent (by design, until
+reviewed and added): `git.deploy`, `cron.upsert`, `ssh.*`, `firewall.*`,
 `agent.self_update`.
 
 ## 13. Installation and deployment
@@ -343,12 +355,36 @@ defenses on the file manager (`resolveScopedPath`).
 
 ## 19. Backup and restore model
 
-**Backup**: implemented (`backup.run` — local, checksummed tar.gz of DB and/or files).
-**Restore**: **not implemented**. This is the single largest functional gap in the
-Phase 1 feature set relative to what the product plan calls for, and should be the
-next priority after this documentation pass — see `OPERATIONS.md` §Backup and restore
-for the concrete plan (a `backup.restore` capability mirroring `backup.run`'s
-validation approach, plus a pre-restore checkpoint step).
+**Backup**: implemented (`backup.run` — local, checksummed tar.gz of DB and/or files),
+persisted as a `backups` row via `POST /api/v1/servers/{id}/sites/{siteId}/backups`.
+
+**Restore**: implemented (`backup.restore`, `packages/capabilities/backup.go`), wired
+through `POST /api/v1/servers/{id}/backups/{backupId}/restore`. Restore:
+1. re-verifies the archive's SHA-256 against the checksum recorded at backup time
+   (never trusts a caller-supplied checksum — the control plane always sends the
+   value it stored, not one from the restore request body) and refuses to proceed on
+   a mismatch;
+2. resolves the archive path through the same symlink-safe containment check
+   (`resolveBackupArchivePath`) that `file.go`'s file manager uses, so a restore
+   request can't be pointed at an arbitrary filesystem path;
+3. for a files/full restore, takes an automatic checksummed pre-restore checkpoint
+   of the site's current state under `backupBaseDir` *before* touching anything —
+   if the checkpoint step itself fails, the restore aborts before any existing file
+   is removed — and the control plane persists that checkpoint as its own `backups`
+   row so a bad restore is itself immediately restorable;
+4. for a db/full restore, locates the dump inside the extracted archive by filename
+   (`findFileByName`) rather than assuming a fixed layout, since `backup.run` embeds
+   it under a random per-run temp path, then pipes it into `mysql <dbname>`.
+
+Known limitations, stated plainly rather than left implicit: restore is synchronous
+(the HTTP handler blocks on the agent task, capped at a 10-minute context timeout —
+no background job/progress-percentage model yet); it only restores onto the same
+server that owns the backup (cross-server restore needs the archive transferred
+first, tracked under Phase 2's cross-server migration work); and there is no
+scheduled/automatic re-verification of an archive's integrity independent of an
+actual restore. See `packages/capabilities/backup_test.go` and
+`apps/controlplane/http_test.go`'s `TestBackupEndpointsValidateBeforeDispatch` /
+`store_test.go`'s `TestCreateAndListBackups` for the current automated coverage.
 
 ## 20. Monitoring and alerting
 
@@ -359,7 +395,9 @@ all ⬜, scoped to Phase 2 per `product-plan.md` §9.
 
 ## 21. Known limitations
 
-- No backup **restore** capability (see §19).
+- Backup restore only targets the same server that owns the backup — no cross-server
+  restore yet, and restore's db-scope path is untested against a real MariaDB instance
+  in this environment (see §19, `TESTING.md` §2).
 - No on-disk agent task journal — a task in flight when the agent process restarts is
   lost, not resumed (see `ARCHITECTURE.md` §4 "As built").
 - No agent certificate auto-renewal before its 30-day expiry (see `SECURITY.md` §2).
@@ -455,9 +493,12 @@ sizing, and two persistence bugs where a successful operation wasn't actually sa
   UFW), but "no arbitrary shell exec" is enforced by the fixed `Registry` map and
   argv-only `exec.Command` calls, not by process sandboxing (which remains a
   documented future hardening step — `SECURITY.md` §4).
-- **Backup before restore** — `backup.run` shipped in this codebase before any restore
-  capability; flagged clearly (§19, §21) rather than left as a silent gap, since
-  "backups exist" without "restore works" is a false sense of safety if not documented.
+- **Backup before restore, and checkpoint before overwrite** — `backup.run` shipped in
+  this codebase before any restore capability existed; that gap was flagged clearly
+  (§19) rather than left silent, and `backup.restore` (added afterward) carries the
+  same discipline forward one level deeper: it takes its own checksummed pre-restore
+  checkpoint before overwriting any existing site files, so a bad restore doesn't
+  repeat the "one-way operation with no safety net" mistake it exists to fix.
 - **No proprietary Webuzo/ServerAvatar code, branding, or assets** — every protocol,
   UI, and mechanism here is independently designed against open standards (mTLS,
   systemd, ACME/Let's Encrypt, RFC 6238 TOTP).

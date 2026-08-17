@@ -40,22 +40,27 @@ dashboard).
 
 ## 3. Backup and restore
 
-**Backup** (implemented): dispatch the `backup.run` capability
-(`POST /api/v1/servers/{id}/tasks` with `{"capability": "backup.run", "params": {...}}`)
-— see `packages/capabilities/backup.go` for its `scope`/`target` params. It writes a
-checksummed local tar.gz on the VPS itself and records the checksum in its
-`TaskEvent.detail`. The control plane's `backups` table schema exists (`db.go`) but
-nothing currently writes a row into it automatically — wiring `backup.run`'s dispatch
-through a persistence step analogous to `handleCreateSite` (dispatch → parse result →
-insert row) is a small, well-scoped next task.
+**Backup** (implemented): `POST /api/v1/servers/{id}/sites/{siteId}/backups` with
+`{"scope": "db"|"files"|"full", "db_name": "..."}` dispatches `backup.run`
+(`packages/capabilities/backup.go`) and, only on success, persists a row in the
+`backups` table (`store.createBackup`) — dispatch → parse result → insert row, the
+same pattern `handleCreateSite` uses. It writes a checksummed local tar.gz on the VPS
+itself. Lower-level access via the generic
+`POST /api/v1/servers/{id}/tasks {"capability": "backup.run", ...}` still works but
+does not persist a record.
 
-**Restore** (not implemented): there is no `backup.restore` capability yet. Until one
-exists, restoring from a `backup.run` archive is a fully manual process: SSH to the
-VPS, locate the tar.gz under wherever `backup.run` wrote it, verify its SHA-256 against
-the value in the task's `detail`, and manually extract/restore the DB dump and/or
-files. **Do not represent backup/restore as a complete, tested feature until a real
-`backup.restore` capability exists and has been exercised end-to-end** — see
-`SYSTEM.md` §19 and §21, and `TESTING.md` §5 item 1 for the recommended next step.
+**Restore** (implemented): `POST /api/v1/servers/{id}/backups/{backupId}/restore`
+dispatches `backup.restore` against the recorded backup's path and stored checksum
+(never a caller-supplied one). It re-verifies the archive's SHA-256 before touching
+anything, and for a files/full restore takes an automatic checksummed pre-restore
+checkpoint of the site's current state first — persisted as its own `backups` row —
+so a bad restore is itself recoverable. Restoring to a *different* server is not yet
+supported (the agent only restores from a path on its own filesystem); that needs the
+archive transferred to the destination server first, tracked alongside Phase 2's
+cross-server migration work. See `SYSTEM.md` §19 for the full behavior and known
+limitations, and `packages/capabilities/backup_test.go` /
+`apps/controlplane/http_test.go` (`TestBackupEndpointsValidateBeforeDispatch`) for the
+current automated coverage.
 
 ## 4. Monitoring and alerting
 

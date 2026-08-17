@@ -2,6 +2,41 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-17 — Backup restore capability + persisted backup records
+
+- Added the `backup.restore` agent capability (`packages/capabilities/backup.go`),
+  closing the single largest gap called out in the prior session's own documentation
+  (`docs/SYSTEM.md` §19/§28: "`backup.run` shipped before any restore capability").
+  It re-verifies the archive's SHA-256 before touching anything, resolves the archive
+  path through the same symlink-safe containment check the file manager uses
+  (`resolveBackupArchivePath`), locates the DB dump inside the extracted archive by
+  filename regardless of the random per-run temp path `backup.run` embeds it under
+  (`findFileByName`), and — for a files/full restore — takes its own checksummed
+  pre-restore checkpoint of the site's current state before any existing file is
+  removed, aborting the whole restore if that checkpoint step itself fails.
+- Wired backups into the control plane end to end: a `backups` table row is now
+  actually persisted (`store.createBackup`/`listBackups`/`getBackup` — the schema
+  existed since Phase 1 but nothing wrote to it), via three new API endpoints —
+  `POST /api/v1/servers/{id}/sites/{siteId}/backups` (dispatch `backup.run`, persist
+  on success), `GET /api/v1/servers/{id}/backups` (list), and
+  `POST /api/v1/servers/{id}/backups/{backupId}/restore` (dispatch `backup.restore`
+  using the *stored* checksum, never one from the request body; a resulting
+  pre-restore checkpoint is persisted as its own backup record so it's immediately
+  restorable itself).
+- Added 8 new capability-level tests (real filesystem/tar operations: backup→corrupt→
+  restore round trip, checksum-mismatch rejection, invalid-scope/missing-checksum/
+  unmanaged-site-root/out-of-bounds-path/missing-archive rejection, nested-dump
+  lookup) and 2 new control-plane tests (backup CRUD against real SQLite, and an HTTP
+  integration test proving every validation error on the new endpoints is rejected
+  *before* any agent dispatch is attempted). `go test ./...` now covers 58 test
+  functions (up from 48), all passing; `go vet`/`gofmt` clean.
+- Updated `docs/SYSTEM.md`, `docs/API.md`, `docs/OPERATIONS.md`, and `docs/TESTING.md`
+  to reflect restore as implemented rather than a documented gap, and to state its
+  remaining honest limitations plainly: restore is synchronous (bounded by a 10-minute
+  context timeout, no background-job progress model yet), same-server only (no
+  cross-server restore), and its db-scope path is untested against a real MariaDB
+  instance in this environment (same constraint `db.go`'s tests already documented).
+
 ## 2026-08-14 — Automated test suite, doc restructuring
 
 - Added `go test` coverage across `apps/controlplane` and `packages/capabilities`

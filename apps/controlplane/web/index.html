@@ -174,6 +174,12 @@
           <button onclick="openNewSiteModal()">+ New site</button>
         </div>
         <div id="sitesList" class="muted">No sites yet.</div>
+
+        <div class="section-title" style="display:flex;justify-content:space-between;align-items:center">
+          <span>Backups</span>
+          <button onclick="openNewBackupModal()">+ Backup now</button>
+        </div>
+        <div id="backupsList" class="muted">No backups yet.</div>
       </div>
     </div>
 
@@ -211,7 +217,7 @@
 
 <script>
 const API = '/api/v1';
-let state = { me: null, servers: [], selectedServerId: null, pollTimer: null };
+let state = { me: null, servers: [], selectedServerId: null, pollTimer: null, sites: [] };
 
 async function api(path, opts) {
   opts = opts || {};
@@ -430,8 +436,10 @@ async function openServerDetail(id) {
   await renderServerDetail(id);
   try {
     const sites = await api(API + '/servers/' + id + '/sites');
-    renderSites(sites || []);
+    state.sites = sites || [];
+    renderSites(state.sites);
   } catch (e) {}
+  await loadBackups(id);
 }
 
 function renderSites(sites) {
@@ -440,6 +448,118 @@ function renderSites(sites) {
   el.innerHTML = '<table><thead><tr><th>Domain</th><th>Type</th><th>PHP</th><th>Status</th></tr></thead><tbody>' +
     sites.map(s => `<tr><td>${escapeHtml(s.Domain)}</td><td>${escapeHtml(s.AppType)}</td><td>${escapeHtml(s.PHPVersion||'—')}</td><td>${escapeHtml(s.Status)}</td></tr>`).join('') +
     '</tbody></table>';
+}
+
+async function loadBackups(id) {
+  try {
+    const backups = await api(API + '/servers/' + id + '/backups');
+    renderBackups(backups || []);
+  } catch (e) {}
+}
+
+function siteLabel(siteId) {
+  const site = state.sites.find(s => s.ID === siteId);
+  return site ? site.Domain : (siteId || '—');
+}
+
+function renderBackups(backups) {
+  const el = document.getElementById('backupsList');
+  if (!backups.length) { el.textContent = 'No backups yet.'; return; }
+  el.innerHTML = '<table><thead><tr><th>Created</th><th>Site</th><th>Scope</th><th>Size</th><th>Status</th><th></th></tr></thead><tbody>' +
+    backups.map(b => `<tr>
+      <td>${escapeHtml(new Date(b.CreatedAt).toLocaleString())}</td>
+      <td>${escapeHtml(siteLabel(b.SiteID))}</td>
+      <td>${escapeHtml(b.Scope)}</td>
+      <td>${formatBytes(b.SizeBytes)}</td>
+      <td>${escapeHtml(b.Status)}</td>
+      <td><button onclick="restoreBackup('${b.ID}')">Restore</button></td>
+    </tr>`).join('') +
+    '</tbody></table>';
+}
+
+function formatBytes(n) {
+  if (!n) return '—';
+  const units = ['B','KB','MB','GB'];
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return n.toFixed(1) + ' ' + units[i];
+}
+
+function openNewBackupModal() {
+  if (!state.sites.length) { alert('Create a site first — backups are taken per site.'); return; }
+  const root = document.getElementById('modalRoot');
+  root.innerHTML = `
+    <div class="modal-backdrop" onclick="if(event.target===this) closeModalOnly()">
+      <div class="modal">
+        <h2>Backup now</h2>
+        <div class="field">
+          <label>Site</label>
+          <select id="newBackupSiteId">
+            ${state.sites.map(s => `<option value="${s.ID}">${escapeHtml(s.Domain)}</option>`).join('')}
+          </select>
+        </div>
+        <div class="field">
+          <label>Scope</label>
+          <select id="newBackupScope" onchange="toggleBackupDBField()">
+            <option value="files">Files only</option>
+            <option value="db">Database only</option>
+            <option value="full">Files + database</option>
+          </select>
+        </div>
+        <div class="field hidden" id="newBackupDBField">
+          <label>Database name</label>
+          <input id="newBackupDBName" placeholder="e.g. myapp_wp">
+        </div>
+        <button class="primary" style="width:100%" onclick="createBackup()">Start backup</button>
+        <div class="error" id="newBackupError"></div>
+        <p class="muted" id="newBackupStatus"></p>
+      </div>
+    </div>`;
+}
+
+function toggleBackupDBField() {
+  const scope = document.getElementById('newBackupScope').value;
+  document.getElementById('newBackupDBField').classList.toggle('hidden', scope === 'files');
+}
+
+function closeModalOnly() { document.getElementById('modalRoot').innerHTML = ''; }
+
+async function createBackup() {
+  const siteId = document.getElementById('newBackupSiteId').value;
+  const scope = document.getElementById('newBackupScope').value;
+  const dbName = document.getElementById('newBackupDBName') ? document.getElementById('newBackupDBName').value.trim() : '';
+  const err = document.getElementById('newBackupError');
+  const status = document.getElementById('newBackupStatus');
+  err.textContent = '';
+  status.textContent = 'Running backup on the agent... this can take a while for large sites.';
+  try {
+    await api(API + '/servers/' + state.selectedServerId + '/sites/' + siteId + '/backups', {
+      method: 'POST', body: JSON.stringify({scope, db_name: dbName})
+    });
+    status.textContent = 'Backup completed.';
+    await loadBackups(state.selectedServerId);
+  } catch (e) {
+    status.textContent = '';
+    err.textContent = e.message;
+  }
+}
+
+async function restoreBackup(backupId) {
+  if (!confirm('Restore this backup? Existing files on the server will be replaced (a safety checkpoint is taken automatically first).')) return;
+  const box = document.getElementById('taskResult');
+  box.className = 'task-result running';
+  box.textContent = 'Restoring backup ' + backupId + '...';
+  box.classList.remove('hidden');
+  try {
+    const res = await api(API + '/servers/' + state.selectedServerId + '/backups/' + backupId + '/restore', {method: 'POST'});
+    box.className = 'task-result ok';
+    box.textContent = 'Restore completed — database_restored=' + res.database_restored + ', files_restored=' + res.files_restored +
+      (res.pre_restore_checkpoint ? ' (pre-restore checkpoint saved as a new backup)' : '');
+    await loadBackups(state.selectedServerId);
+  } catch (e) {
+    box.className = 'task-result fail';
+    box.textContent = 'Restore failed: ' + e.message;
+  }
 }
 
 async function renderServerDetail(id) {

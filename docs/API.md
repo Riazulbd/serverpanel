@@ -43,6 +43,9 @@ protected route; there is no route that skips it by omission.
 | `POST` | `/api/v1/servers/{id}/tasks` | Dispatch an arbitrary allow-listed capability (see §3) |
 | `GET` | `/api/v1/servers/{id}/sites` | List sites on a server |
 | `POST` | `/api/v1/servers/{id}/sites` | Dispatch `site.create` and persist the resulting site record |
+| `GET` | `/api/v1/servers/{id}/backups` | List backup records on a server |
+| `POST` | `/api/v1/servers/{id}/sites/{siteId}/backups` | Dispatch `backup.run` for a site and persist the resulting backup record |
+| `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a recorded backup |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -102,6 +105,29 @@ Dispatches `site.create`, and only on the agent reporting success, persists a `s
 row. → `201 {"site": {...siteRecord}, "temp_domain": "<user>.<ip-with-dashes>.sslip.io"}`.
 A dispatch failure or agent-side failure never leaves an orphan site record — the
 row is written after (and only after) the agent confirms success.
+
+### `POST /api/v1/servers/{id}/sites/{siteId}/backups`
+```json
+{"scope": "full", "db_name": "myapp"}
+```
+`scope` is one of `db`, `files`, `full`; `db_name` is required for `db`/`full`. Dispatches
+`backup.run` with `site_root` derived from the site's docroot (never taken from the
+request), and only on success persists a `backups` row. → `201 {...backupRecord}`.
+Validation errors (unknown site, bad scope, missing `db_name`) return before any agent
+dispatch is attempted, so an invalid request never reaches the agent.
+
+### `POST /api/v1/servers/{id}/backups/{backupId}/restore`
+```json
+{"site_id": "site_...", "db_name": "myapp"}
+```
+`site_id` defaults to the site the backup was originally taken from if omitted; it is
+required (and must resolve to a known site) whenever the backup's `scope` is `files` or
+`full`, since the agent needs the site's current system user to restore ownership
+correctly. The `sha256` sent to the agent for integrity verification always comes from
+the stored `backups` row, never from the request body. → `200
+{"database_restored": bool, "files_restored": bool, "pre_restore_checkpoint": {...backupRecord} | null}`.
+When a files/full restore takes a pre-restore checkpoint, it is persisted as its own
+`backups` row (returned as `pre_restore_checkpoint`) and immediately restorable itself.
 
 ### `POST /agents/register`
 ```json
