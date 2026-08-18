@@ -114,6 +114,25 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | Application logs / advanced log viewer | 🚧 `logs.tail` (redacted) exists; no
   filtering/search UI yet |
 
+### Database management
+| Feature | Status |
+|---|---|
+| MySQL/MariaDB database + scoped owner user (create/delete/list) | ✅ `db.create`/
+  `db.delete`/`db.list` — identifier allow-list regex, grants always scoped to exactly
+  one database, never global |
+| Control-plane persistence + dashboard UI | ✅ `databases` row persisted only after
+  the agent confirms `db.create` succeeded (same dispatch-then-persist-on-success
+  pattern as sites/backups); dedicated "Databases" panel per server, one-time owner-
+  password reveal on creation, soft-deleted (not hard-deleted) on removal |
+| Database name/owner collision protection | ✅ `POST .../databases` returns `409` if
+  a database with that name is already recorded on the server, before ever
+  dispatching — `CREATE DATABASE IF NOT EXISTS` alone would otherwise let a second
+  site silently attach to another site's existing database |
+| MongoDB support | ⬜ not implemented |
+| phpMyAdmin / DB admin UI integration | ⬜ not implemented |
+| Database process/query monitoring | ⬜ not implemented |
+| Multiple users per database, remote-host/IP grants | ⬜ not implemented |
+
 ### Git deployment
 All ⬜ — explicitly scoped to Phase 2 (`product-plan.md` §9). No Git deployment,
 webhook push-to-deploy, deploy keys, or rollback exist in this codebase yet.
@@ -253,17 +272,22 @@ EXISTS`, applied on every `openDB` call — idempotent, no separate migration to
 | `audit_log` | append-only: seq, timestamp, server, actor, action, detail |
 | `sites` | id, server, domain, system user, docroot, app type, PHP version, status |
 | `backups` | id, server, site, scope, path, size, sha256, status, created_at |
+| `databases` | id, server, site (optional), name, owner_user, status, created_at |
 
 No ORM — every query is a small, explicit SQL statement in `store.go`. All secrets
 (session tokens, bootstrap tokens) are stored only as SHA-256 hashes; passwords use
-bcrypt (cost 12); nothing is stored in plaintext.
+bcrypt (cost 12); nothing is stored in plaintext. Database owner passwords are
+generated server-side with `crypto/rand` and returned to the caller exactly once in
+the `POST .../databases` response — like bootstrap tokens, never persisted anywhere,
+including in this table.
 
 ## 9. API endpoints
 
 Full list with request/response shapes in `API.md`. Summary: `/api/v1/auth/*`
 (signup/login/logout/TOTP enroll+verify/MFA challenge/me), `/api/v1/servers*` (CRUD,
-revoke, task dispatch, sites, audit), `/agents/register` (the one unauthenticated
-agent-facing endpoint, secured by the bootstrap token itself), `/healthz`.
+revoke, task dispatch, sites, backups, databases, audit), `/agents/register` (the one
+unauthenticated agent-facing endpoint, secured by the bootstrap token itself),
+`/healthz`.
 
 ## 10. Background jobs
 

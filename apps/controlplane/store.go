@@ -485,6 +485,108 @@ func scanBackup(row rowScanner) (*backupRecord, error) {
 	return &rec, nil
 }
 
+type databaseRecord struct {
+	ID        string
+	ServerID  string
+	SiteID    string
+	Name      string
+	OwnerUser string
+	Status    string
+	CreatedAt time.Time
+}
+
+// createDatabase persists a database record. Like createBackup, this is
+// only ever called after db.create has already succeeded on the agent
+// (see databases.go handleCreateDatabase) — the databases table records
+// databases that actually exist on the server, never in-flight or failed
+// attempts.
+func (s *store) createDatabase(serverID, siteID, name, ownerUser string) (*databaseRecord, error) {
+	rec := &databaseRecord{
+		ID: randID("db"), ServerID: serverID, SiteID: siteID, Name: name,
+		OwnerUser: ownerUser, Status: "active", CreatedAt: time.Now().UTC(),
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO databases (id, server_id, site_id, name, owner_user, status, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		rec.ID, rec.ServerID, rec.SiteID, rec.Name, rec.OwnerUser, rec.Status, rec.CreatedAt.Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return nil, err
+	}
+	return rec, nil
+}
+
+// listDatabases returns the non-deleted databases recorded for one server,
+// newest first.
+func (s *store) listDatabases(serverID string) []*databaseRecord {
+	rows, err := s.db.Query(
+		`SELECT id, server_id, site_id, name, owner_user, status, created_at
+		 FROM databases WHERE server_id = ? AND status != 'deleted' ORDER BY created_at DESC`, serverID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var out []*databaseRecord
+	for rows.Next() {
+		rec, err := scanDatabase(rows)
+		if err != nil {
+			continue
+		}
+		out = append(out, rec)
+	}
+	return out
+}
+
+// getDatabase looks up one database scoped to serverID, for the same
+// cross-tenant-addressing reason getSite/getBackup are scoped to serverID.
+func (s *store) getDatabase(serverID, dbID string) (*databaseRecord, bool) {
+	row := s.db.QueryRow(
+		`SELECT id, server_id, site_id, name, owner_user, status, created_at
+		 FROM databases WHERE id = ? AND server_id = ?`, dbID, serverID)
+	rec, err := scanDatabase(row)
+	if err != nil {
+		return nil, false
+	}
+	return rec, true
+}
+
+// databaseNameExists reports whether a non-deleted database with this name
+// is already recorded on this server. MariaDB's CREATE DATABASE IF NOT
+// EXISTS would otherwise let a second site silently attach to (and, via its
+// own GRANT, gain access to) another site's existing database without any
+// error — this check is what turns that into an explicit 409 instead.
+func (s *store) databaseNameExists(serverID, name string) bool {
+	var count int
+	s.db.QueryRow(`SELECT COUNT(*) FROM databases WHERE server_id = ? AND name = ? AND status != 'deleted'`, serverID, name).Scan(&count)
+	return count > 0
+}
+
+// markDatabaseDeleted soft-deletes a database record after db.delete has
+// succeeded on the agent — kept (not hard-deleted) so the audit trail and
+// id remain resolvable, matching how servers use a status field instead of
+// row deletion for revocation.
+func (s *store) markDatabaseDeleted(serverID, dbID string) error {
+	res, err := s.db.Exec(`UPDATE databases SET status = 'deleted' WHERE id = ? AND server_id = ?`, dbID, serverID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("database not found")
+	}
+	return nil
+}
+
+func scanDatabase(row rowScanner) (*databaseRecord, error) {
+	var rec databaseRecord
+	var createdAt string
+	if err := row.Scan(&rec.ID, &rec.ServerID, &rec.SiteID, &rec.Name, &rec.OwnerUser, &rec.Status, &createdAt); err != nil {
+		return nil, err
+	}
+	rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+	return &rec, nil
+}
+
 func randID(prefix string) string {
 	n, _ := rand.Int(rand.Reader, big.NewInt(1<<62))
 	return fmt.Sprintf("%s_%x", prefix, n)

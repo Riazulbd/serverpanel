@@ -287,6 +287,86 @@ func TestCreateBackupRejectsInvalidScope(t *testing.T) {
 	}
 }
 
+func TestDatabaseEndpoints(t *testing.T) {
+	secureCookies = false
+	defer func() { secureCookies = true }()
+
+	a := newTestAPIServer(t)
+	h := a.routes()
+
+	doJSON(t, h, "POST", "/api/v1/auth/signup", map[string]string{
+		"Email": "ops3@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	rec := doJSON(t, h, "POST", "/api/v1/auth/login", map[string]string{
+		"Email": "ops3@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	cookie := sessionCookie(rec)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers", map[string]any{"Name": "web-11"}, cookie)
+	var created struct {
+		ServerID string `json:"server_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+
+	// Missing required fields is a validation error, not a dispatch attempt.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/databases",
+		map[string]any{"name": "app_db"}, cookie)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("create database without owner_user: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// A site_id that doesn't exist on this server is a 404 before dispatch.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/databases",
+		map[string]any{"name": "app_db", "owner_user": "app_owner", "site_id": "site_nonexistent"}, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("create database with nonexistent site_id: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// A well-formed request against a server with no connected agent fails
+	// as a gateway/dispatch error, not a validation error — proving
+	// validation happens before dispatch (same shape as the backup test).
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/databases",
+		map[string]any{"name": "app_db", "owner_user": "app_owner"}, cookie)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("create database with no agent connected: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// Simulate a database that was already recorded (as if a prior
+	// db.create dispatch had succeeded) and confirm the name-collision
+	// check rejects a second create for the same name before ever
+	// attempting to dispatch.
+	if _, err := a.store.createDatabase(created.ServerID, "", "app_db", "app_owner"); err != nil {
+		t.Fatalf("createDatabase: %v", err)
+	}
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/databases",
+		map[string]any{"name": "app_db", "owner_user": "someone_else"}, cookie)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("create database with a colliding name: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	rec = doJSON(t, h, "GET", "/api/v1/servers/"+created.ServerID+"/databases", nil, cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list databases: status = %d", rec.Code)
+	}
+	var list []databaseRecord
+	json.Unmarshal(rec.Body.Bytes(), &list)
+	if len(list) != 1 || list[0].Name != "app_db" {
+		t.Fatalf("list databases = %+v, want one entry named app_db", list)
+	}
+
+	rec = doJSON(t, h, "DELETE", "/api/v1/servers/"+created.ServerID+"/databases/db_nonexistent", nil, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("delete nonexistent database: status = %d, want 404", rec.Code)
+	}
+
+	// Deleting a real (recorded) database with no agent connected fails as
+	// a gateway error, same reasoning as the create case above.
+	rec = doJSON(t, h, "DELETE", "/api/v1/servers/"+created.ServerID+"/databases/"+list[0].ID, nil, cookie)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("delete database with no agent connected: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestRegisterEndpointRejectsBadToken(t *testing.T) {
 	a := newTestAPIServer(t)
 	h := a.routes()

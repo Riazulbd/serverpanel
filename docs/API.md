@@ -46,6 +46,9 @@ protected route; there is no route that skips it by omission.
 | `GET` | `/api/v1/servers/{id}/sites/{siteId}/backups` | List backups for a site, newest first |
 | `POST` | `/api/v1/servers/{id}/sites/{siteId}/backups` | Dispatch `backup.run` and persist the resulting backup record |
 | `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a previously recorded backup |
+| `GET` | `/api/v1/servers/{id}/databases` | List databases recorded on a server, newest first |
+| `POST` | `/api/v1/servers/{id}/databases` | Dispatch `db.create` and persist the resulting database record |
+| `DELETE` | `/api/v1/servers/{id}/databases/{dbId}` | Dispatch `db.delete` and mark the database record deleted |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -137,6 +140,34 @@ isn't connected; `422` if `backup.restore` itself failed on the agent (the agent
 error message explains why, and any checkpoint already taken is named in it so it's
 never a silent loss).
 
+### `POST /api/v1/servers/{id}/databases`
+```json
+{"name": "app_db", "owner_user": "app_owner", "site_id": ""}
+```
+`site_id` is optional (a database need not belong to a site). If given, it must resolve
+to a real site on this same server (`404` otherwise). If a non-deleted database with
+this `name` is already recorded on the server, → `409` before any dispatch happens —
+`CREATE DATABASE IF NOT EXISTS` is otherwise silently idempotent and would let a second
+request quietly reuse another site's database. The owner password is never accepted
+from the caller: it's generated server-side with `crypto/rand` (24 bytes, hex-encoded),
+dispatched to `db.create`, and returned to the caller exactly once — like a bootstrap
+token, it is never stored and can't be retrieved again after this response. →
+`201 {"database": {...databaseRecord}, "owner_password": "<48 hex chars>"}`. `400` for
+a missing `name`/`owner_user`; `502` if the agent isn't connected; `422` if `db.create`
+itself failed on the agent (e.g. an invalid identifier — see `SYSTEM.md` §12).
+
+### `GET /api/v1/servers/{id}/databases`
+→ `200` with an array of `databaseRecord` (`ID`, `ServerID`, `SiteID`, `Name`,
+`OwnerUser`, `Status`, `CreatedAt`), newest first, excluding soft-deleted rows.
+
+### `DELETE /api/v1/servers/{id}/databases/{dbId}`
+No request body — the database's own recorded `name`/`owner_user` are read from the
+`databases` table and passed to `db.delete` verbatim (which also drops the owner MySQL
+user). Only on the agent reporting success is the record marked `status = 'deleted'`
+(soft delete, so the id and audit trail remain resolvable). → `200 {"status": "deleted"}`.
+`404` if the database doesn't exist on that server; `502` if the agent isn't connected;
+`422` if `db.delete` itself failed on the agent.
+
 ### `POST /agents/register`
 ```json
 {"token": "<bootstrap token>", "csr_pem": "<PEM-encoded CSR>"}
@@ -179,6 +210,24 @@ The full allow-listed capability names `packages/capabilities.Default()` registe
 `site.set_status`, `app.wordpress_install`, `ssl.issue_letsencrypt`,
 `ssl.install_custom`, `db.create`, `db.delete`, `db.list`, `file.list`, `file.read`,
 `file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`.
+
+### `db.create` / `db.delete` / `db.list`
+```json
+{"name": "app_db", "owner_user": "app_owner", "owner_password": "..."}
+```
+`name` and `owner_user` must match `^[a-z][a-z0-9_]{0,30}$` (MySQL has no placeholder
+syntax for identifiers, so this allow-list — checked before any query is built — is
+what stands in for parameterization); `owner_password` must be at least 16 characters.
+Creates the database (`CREATE DATABASE IF NOT EXISTS`, `utf8mb4`/`utf8mb4_unicode_ci`)
+and a MySQL user scoped to exactly that one database (`GRANT ALL PRIVILEGES ON
+`name`.* TO ...` — never a global grant). All three return structured JSON:
+`db.create`/`db.delete` → `{"name": "...", "owner_user": "..."}`; `db.list` →
+`{"databases": ["...", ...]}` (system schemas filtered out). These are normally
+reached through the dedicated `/api/v1/servers/{id}/databases` endpoints (§2), which
+persist/soft-delete a `databases` row around the dispatch; `db.list` has no dedicated
+endpoint (the control plane's own `databases` table is the source of truth for what
+the dashboard displays) but remains dispatchable via `POST .../tasks` for manual
+reconciliation against what MariaDB itself reports.
 
 ### `backup.restore`
 ```json

@@ -2,6 +2,58 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-18 — Database management: control-plane persistence and dashboard UI
+
+- **Closed DB-005** (`docs/SERVERAVATAR_PARITY.md`), the top-priority documented
+  database-management gap: `db.create`/`db.delete`/`db.list`
+  (`packages/capabilities/db.go`) already worked against a real MariaDB, but their
+  results only ever existed as a plain human-readable string, and nothing on the
+  control-plane side recorded that a database now existed — there was no `databases`
+  table, no dedicated API, and no dashboard UI (the exact same shape of gap `backup.run`
+  had before `backup.restore` closed it in the 2026-08-17 entry above).
+- `db.create`/`db.delete`/`db.list` now return structured JSON (`dbCreateResult`/
+  `dbDeleteResult`/`dbListResult`) instead of a formatted string, so the control plane
+  can parse and persist the outcome instead of scraping text.
+- New `databases` table (`apps/controlplane/db.go`) and store methods
+  (`createDatabase`/`listDatabases`/`getDatabase`/`databaseNameExists`/
+  `markDatabaseDeleted`, `apps/controlplane/store.go`), following the same
+  dispatch-then-persist-on-success pattern as sites and backups. Deletion is a soft
+  delete (`status = 'deleted'`, filtered out of listings) rather than a row delete, so
+  the id and audit trail stay resolvable.
+- New endpoints (`apps/controlplane/databases.go`): `POST`/`GET
+  /api/v1/servers/{id}/databases`, `DELETE /api/v1/servers/{id}/databases/{dbId}`.
+  `POST` generates the owner password server-side with `crypto/rand` (never accepted
+  from the client) and returns it exactly once in the response — the same one-time-
+  reveal pattern a bootstrap install token already used — and rejects a database-name
+  collision with `409` *before* dispatching, since `CREATE DATABASE IF NOT EXISTS`
+  would otherwise silently let a second site's request reuse (and, via its own
+  `GRANT`, gain access to) a database another site already owns.
+- New "Databases" panel per server in the dashboard (`apps/controlplane/web/index.html`):
+  a table of recorded databases, a "+ New database" modal (name, owner username,
+  optional site association), a one-time password-reveal box on creation, and a
+  per-row delete with a destructive-action confirmation dialog.
+- Added 9 new tests: 6 capability-layer validation tests
+  (`packages/capabilities/db_test.go` — invalid name/owner/password rejected before any
+  MariaDB connection is attempted, plus the `identifierRe` accept/reject boundary at
+  its exact length limit) and 3 control-plane tests (`TestDatabaseCreateListGetRoundTrip`,
+  `TestDatabaseNameExists` in `store_test.go`; `TestDatabaseEndpoints` in `http_test.go`
+  — missing-field validation, nonexistent-site 404, name-collision 409 before dispatch,
+  no-agent-connected 502, list, delete-nonexistent 404, all proven to happen in the
+  right order relative to dispatch). `go build ./...`, `go vet ./...`, `gofmt -l .`, and
+  `go test ./...` all clean (70 test functions total, up from 61).
+- Updated `docs/SYSTEM.md` (new "Database management" table, `databases` schema row,
+  API endpoint summary), `docs/API.md` (new endpoint docs, `db.create`/`db.delete`/
+  `db.list` capability reference), `docs/TESTING.md` (coverage counts), and
+  `docs/SERVERAVATAR_PARITY.md` (DB-001 moved from "no control-plane persistence yet" to
+  reflecting what DB-005 now provides; DB-005 itself moved `NOT_STARTED` → `COMPLETE`
+  with a full detail block; MongoDB support (DB-002), DB admin UI (DB-003), and
+  process/query monitoring (DB-004) remain the tracked remaining gaps in this category).
+- The real agent-side `db.create`/`db.delete` MariaDB calls this new layer dispatches to
+  remain `BLOCKED_EXTERNAL` for end-to-end verification in this environment (no MariaDB
+  here) — same documented limitation as DB-001/BAK-001 before it; everything above them
+  (persistence, API, UI, and their validation/authorization boundaries) is implemented
+  and tested.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the
