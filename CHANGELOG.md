@@ -2,6 +2,59 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-18 — Agent certificate auto-renewal
+
+- **Implemented agent certificate auto-renewal**, closing the security/correctness gap
+  flagged in `SECURITY.md` §2 and `SYSTEM.md`'s known limitations: agent mTLS client
+  certificates were issued with a fixed 30-day TTL and no rotation path, so an agent
+  left running past that window would silently become unable to reconnect and require
+  a fresh bootstrap token to recover — a real availability risk for any fleet left
+  unattended for a month.
+- New `renew_request`/`renew_response` message pair in the existing gateway wire
+  protocol (`packages/proto/proto.go`), sent over the agent's already-open,
+  already-authenticated mTLS session — deliberately not a new HTTP endpoint or
+  credential type. `apps/agent/renew.go` checks the agent's own certificate's real
+  `NotAfter` (parsed from the certificate itself, not a trusted side value) every 6
+  hours and requests renewal once within 7 days of expiry, giving several retries'
+  worth of margin before a genuinely missed window forces manual re-registration.
+  `gateway.handleRenew` (`apps/controlplane/gateway.go`) signs the replacement using
+  `serverID` already derived from the connection's verified peer certificate — never
+  from the renewal request's CSR — so renewal can't be used to claim a different
+  server's identity, matching how `handleRegister` already works.
+- Renewal deliberately does **not** revoke the certificate it replaces
+  (`store.renewCert`, new and distinct from `store.revokeServer`): revoking
+  immediately would risk a permanent lockout if the agent's disk write of the new
+  cert/key ever fails (full disk, killed process) after the old one is invalidated.
+  The superseded certificate now just expires on its own original schedule instead —
+  a small overlap-validity window traded for "a failed renewal is always recoverable
+  on the next 6-hour check," consistent with this project's existing
+  recoverable-over-irreversible bias (see the pre-restore-checkpoint design in the
+  previous entry).
+- New `agentCertTTL` constant (`apps/controlplane/ca.go`) shared by both the
+  registration and renewal signing paths, replacing a magic `30*24*time.Hour` literal
+  that only registration used to see. `signAgentCSR` now returns the certificate's
+  actual `NotAfter` instead of callers re-deriving it. Added a `cert_not_after` column
+  (idempotent migration, same pattern as the prior `backups.db_name` migration) so the
+  control plane — and now the dashboard's server-detail view — can see when a given
+  agent's identity actually expires, not just its serial.
+- The agent persists a renewed certificate/key with a temp-file-then-rename write for
+  each file (`persistRenewedIdentity`/`atomicWriteFile`), then intentionally closes its
+  connection to force a prompt reconnect on the new certificate — proving the new
+  identity actually works end-to-end rather than leaving it unused for however long the
+  current session happens to stay open.
+- Refactored `gateway.listenAndServe` into `newTLSListener` + `serve` so tests can bind
+  an ephemeral port and drive the real accept loop directly instead of mocking the
+  gateway; this also fixed a latent bug where a closed listener made the accept loop
+  spin in a tight error-logging loop forever instead of returning.
+- Added 2 store-layer tests, 2 new end-to-end `gateway_test.go` tests that dial the
+  real mTLS listener and exercise the actual `renew_request`/`renew_response` wire
+  messages (including one that submits a CSR claiming a different server's identity, to
+  confirm the gateway ignores it), and `apps/agent`'s first test file
+  (`renew_test.go`, 4 tests covering expiry parsing and atomic-write correctness). Full
+  suite: 68 test functions, `go vet`/`gofmt` clean, `go test -race ./...` clean.
+- Updated `SYSTEM.md`, `SECURITY.md`, `API.md`, and `SERVERAVATAR_PARITY.md` (SRV-001)
+  to reflect renewal as implemented and tested.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

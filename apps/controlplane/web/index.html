@@ -583,6 +583,7 @@ async function renderServerDetail(id) {
     ['Load (1m)', hb ? hb.LoadAvg1.toFixed(2) : '—'],
     ['Memory used', hb ? hb.MemUsedPct.toFixed(0) + '%' : '—'],
     ['Disk used', hb ? hb.DiskUsedPct.toFixed(0) + '%' : '—'],
+    ['Cert expires', formatCertExpiry(s.CertNotAfter)],
   ];
   document.getElementById('detailStats').innerHTML = stats.map(([label,value]) =>
     `<div class="stat"><div class="label">${label}</div><div class="value">${value}</div></div>`).join('');
@@ -591,6 +592,17 @@ async function renderServerDetail(id) {
 function formatUptime(secs) {
   const d = Math.floor(secs/86400), h = Math.floor((secs%86400)/3600), m = Math.floor((secs%3600)/60);
   return `${d}d ${h}h ${m}m`;
+}
+
+function formatCertExpiry(notAfter) {
+  if (!notAfter) return '—';
+  const d = new Date(notAfter);
+  if (isNaN(d.getTime())) return '—';
+  const daysLeft = Math.round((d - Date.now()) / 86400000);
+  const when = d.toLocaleDateString(undefined, {year:'numeric', month:'short', day:'numeric'});
+  if (daysLeft < 0) return `${when} (expired — agent cannot reconnect until re-registered)`;
+  if (daysLeft <= 7) return `${when} (${daysLeft}d — renewing automatically)`;
+  return `${when} (${daysLeft}d)`;
 }
 
 async function dispatchQuick(capability, params) {

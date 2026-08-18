@@ -159,6 +159,8 @@ connection carries newline-delimited JSON `Envelope`s in both directions
 {"type": "heartbeat", "heartbeat": {"sent_at": "...", "uptime_secs": 0, "load_avg_1": 0, "mem_used_pct": 0, "disk_used_pct": 0}}
 {"type": "task", "task": {"id": "...", "capability": "...", "params": {}, "issued_at": "..."}}
 {"type": "task_event", "task_event": {"task_id": "...", "status": "queued|running|succeeded|failed|rejected", "message": "...", "detail": "...", "at": "..."}}
+{"type": "renew_request", "renew_request": {"csr_pem": "..."}}
+{"type": "renew_response", "renew_response": {"cert_pem": "..."}}
 {"type": "ack"}
 ```
 
@@ -170,6 +172,16 @@ HTTP handler) until it sees a terminal event for the task ID it sent, or its con
 deadline expires. There is no message type for a free-form command — `capability` must
 be a name in `packages/capabilities`'s fixed registry, or the agent returns `rejected`
 without executing anything.
+
+At any point in an established session the agent may also send a `renew_request`
+(`apps/agent/renew.go`, `gateway.handleRenew`) to replace its own client certificate
+before it expires. `csr_pem`'s requested Subject is ignored — the gateway signs the new
+certificate for the `server_id` it already derived from *this connection's* verified
+peer certificate at handshake time, the same source of truth `handleRegister` uses, so
+renewal can never be used to claim a different server's identity. The gateway does not
+revoke the certificate being replaced (see `docs/SECURITY.md` §2 for why); the response
+carries only the new `cert_pem`, and the agent re-derives its own expiry by parsing that
+certificate rather than trusting a separate field.
 
 ## 4. Capability reference
 

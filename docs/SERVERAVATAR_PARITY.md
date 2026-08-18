@@ -40,19 +40,19 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Documentation page**: Server Management → "Installation (Direct Method)"
 - **Short description**: Connect a VPS to the control plane via a one-time install command.
 - **Expected behavior** (per ServerAvatar's documented workflow): operator creates a server record, gets an install command, runs it on a clean VPS, server appears connected.
-- **Our implementation**: bootstrap-token → mTLS client-certificate exchange (`POST /agents/register`); agent connects outbound to the gateway, no inbound port required.
-- **Frontend**: `web/index.html` "+ New server" modal, server list/detail views.
-- **Backend service**: `apiServer.handleCreateServer`, `agentCA`, `gateway`.
-- **API endpoint(s)**: `POST /api/v1/servers`, `POST /agents/register`.
-- **Agent command**: n/a (registration precedes capability dispatch).
-- **DB tables**: `servers`, `bootstrap_tokens`, `revoked_certs`.
+- **Our implementation**: bootstrap-token → mTLS client-certificate exchange (`POST /agents/register`); agent connects outbound to the gateway, no inbound port required. The issued certificate is short-lived (30 days) and **auto-renews**: the agent checks its own certificate's real expiry every 6 hours and, within 7 days of expiry, requests a fresh one over its existing mTLS session (`renew_request`/`renew_response`, `apps/agent/renew.go` + `gateway.handleRenew`) — no new credential type, no separate endpoint, and the new certificate's identity comes from the already-authenticated connection, never from the renewal request itself. Missing the renewal window entirely still requires a fresh bootstrap token (fail-closed, not silent re-trust).
+- **Frontend**: `web/index.html` "+ New server" modal, server list/detail views (server detail now shows certificate expiry).
+- **Backend service**: `apiServer.handleCreateServer`, `agentCA`, `gateway` (incl. `gateway.handleRenew`).
+- **API endpoint(s)**: `POST /api/v1/servers`, `POST /agents/register`; renewal itself is a gateway wire-protocol message pair, not an HTTP endpoint (see `API.md` §3).
+- **Agent command**: n/a (registration/renewal precede and parallel capability dispatch, not a dispatched capability themselves).
+- **DB tables**: `servers` (incl. `cert_not_after`), `bootstrap_tokens`, `revoked_certs`.
 - **Required permission**: authenticated session (single-user model today — see ORG-001).
-- **Security considerations**: single-use/short-lived hashed bootstrap tokens; certificate identity independently derived from the mTLS handshake, never trusted from agent-asserted data; revocation checked every handshake.
-- **Test coverage**: `apps/controlplane/http_test.go` (`TestServerCreateListRevokeFlow`, `TestRegisterEndpointRejectsBadToken`), `apps/controlplane/store_test.go`.
+- **Security considerations**: single-use/short-lived hashed bootstrap tokens; certificate identity independently derived from the mTLS handshake, never trusted from agent-asserted data (registration *or* renewal); revocation checked every handshake; a renewed certificate does not revoke the one it replaces, by design — see `SECURITY.md` §2 for the recoverability rationale.
+- **Test coverage**: `apps/controlplane/http_test.go` (`TestServerCreateListRevokeFlow`, `TestRegisterEndpointRejectsBadToken`), `apps/controlplane/store_test.go` (incl. `TestRenewCertUpdatesSerialWithoutRevokingThePrevious`), `apps/controlplane/gateway_test.go` (`TestGatewayHandleRenewIssuesFreshCertBoundToSameServerID`, `TestGatewayHandleRenewRejectsInvalidCSR`), `apps/agent/renew_test.go`.
 - **Current status**: `COMPLETE`
-- **Completion date**: 2026-08-14
-- **Known differences**: no agent certificate auto-renewal before 30-day expiry yet.
-- **Reason**: scoped out of the initial secure-foundation pass; tracked in `SYSTEM.md` §21.
+- **Completion date**: 2026-08-18
+- **Known differences**: none remaining for this capability.
+- **Reason**: n/a.
 
 ### SRV-002 — Hosting stack installation (LEMP)
 - **Category**: Server Management

@@ -27,6 +27,7 @@ type identity struct {
 	KeyPEM      []byte
 	CAPEM       []byte
 	GatewayAddr string
+	DataDir     string // where CertPEM/KeyPEM live on disk; renew.go rewrites them here in place
 }
 
 func identityPaths(dataDir string) (cert, key, ca, meta string) {
@@ -61,7 +62,7 @@ func loadIdentity(dataDir string) (*identity, error) {
 	if err := json.Unmarshal(metaBytes, &meta); err != nil {
 		return nil, err
 	}
-	return &identity{ServerID: meta.ServerID, CertPEM: certPEM, KeyPEM: keyPEM, CAPEM: caPEM, GatewayAddr: meta.GatewayAddr}, nil
+	return &identity{ServerID: meta.ServerID, CertPEM: certPEM, KeyPEM: keyPEM, CAPEM: caPEM, GatewayAddr: meta.GatewayAddr, DataDir: dataDir}, nil
 }
 
 // register performs the one-time bootstrap-token-for-certificate exchange
@@ -127,5 +128,5 @@ func register(apiAddr, token, dataDir string) (*identity, error) {
 		return nil, err
 	}
 
-	return &identity{ServerID: rr.ServerID, CertPEM: []byte(rr.CertPEM), KeyPEM: keyPEM, CAPEM: []byte(rr.CAPEM), GatewayAddr: rr.GatewayAddr}, nil
+	return &identity{ServerID: rr.ServerID, CertPEM: []byte(rr.CertPEM), KeyPEM: keyPEM, CAPEM: []byte(rr.CAPEM), GatewayAddr: rr.GatewayAddr, DataDir: dataDir}, nil
 }

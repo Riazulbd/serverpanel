@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -41,13 +42,26 @@ func newGateway(ca *agentCA, st *store) *gateway {
 }
 
 func (g *gateway) listenAndServe(addr string) error {
-	certPEM, keyPEM, err := g.ca.signServerCert([]string{"localhost", "127.0.0.1", "serverpanel-gateway"})
+	ln, err := g.newTLSListener(addr)
 	if err != nil {
 		return err
 	}
+	log.Printf("agent gateway (mTLS) listening on %s", addr)
+	return g.serve(ln)
+}
+
+// newTLSListener builds the mTLS listener without starting the accept loop,
+// so tests can bind an ephemeral port (addr "127.0.0.1:0"), read back the
+// real address from the returned net.Listener, and drive serve in a
+// goroutine — exercising the real wire protocol instead of mocking it.
+func (g *gateway) newTLSListener(addr string) (net.Listener, error) {
+	certPEM, keyPEM, err := g.ca.signServerCert([]string{"localhost", "127.0.0.1", "serverpanel-gateway"})
+	if err != nil {
+		return nil, err
+	}
 	cert, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	cfg := &tls.Config{
@@ -57,15 +71,21 @@ func (g *gateway) listenAndServe(addr string) error {
 		MinVersion:   tls.VersionTLS13,
 	}
 
-	ln, err := tls.Listen("tcp", addr, cfg)
-	if err != nil {
-		return err
-	}
-	log.Printf("agent gateway (mTLS) listening on %s", addr)
+	return tls.Listen("tcp", addr, cfg)
+}
 
+// serve runs the accept loop. It returns cleanly (nil) once ln is closed,
+// rather than spinning in a tight error-log loop forever — the original
+// version of this loop kept calling Accept and logging after the listener
+// was closed, which would busy-loop pinning a CPU core with no way to stop
+// it short of killing the process.
+func (g *gateway) serve(ln net.Listener) error {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				return nil
+			}
 			log.Printf("gateway accept error: %v", err)
 			continue
 		}
@@ -173,7 +193,36 @@ func (g *gateway) handleConn(conn net.Conn) {
 					}
 				}
 			}
+		case proto.MsgRenewRequest:
+			if env.RenewRequest != nil {
+				g.handleRenew(sess, serverID, *env.RenewRequest)
+			}
 		}
+	}
+}
+
+// handleRenew issues a fresh client certificate to replace the one the
+// requesting agent is about to outgrow, so a healthy agent never has to
+// wait for its certificate to actually expire (and become unable to
+// reconnect at all) before rotating. serverID comes from the already
+// -verified peer certificate on this connection (see handleConn above),
+// never from the CSR itself, for the same reason handleRegister ignores
+// the CSR's requested subject: identity is established by the channel, not
+// asserted in-band.
+func (g *gateway) handleRenew(sess *agentSession, serverID string, req proto.RenewRequest) {
+	certPEM, serial, notAfter, err := g.ca.signAgentCSR([]byte(req.CSRPEM), serverID, agentCertTTL)
+	if err != nil {
+		g.store.log(serverID, "", "agent.cert_renewal_failed", err.Error())
+		log.Printf("cert renewal failed for server_id=%s: %v", serverID, err)
+		return
+	}
+	g.store.renewCert(serverID, serial.String(), notAfter)
+
+	sess.mu.Lock()
+	err = sess.enc.Encode(proto.Envelope{Type: proto.MsgRenewResponse, RenewResponse: &proto.RenewResponse{CertPEM: string(certPEM)}})
+	sess.mu.Unlock()
+	if err != nil {
+		log.Printf("failed to send renewed certificate to server_id=%s: %v", serverID, err)
 	}
 }
 

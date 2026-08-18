@@ -36,6 +36,7 @@ type serverRecord struct {
 	Tags          []string
 	Status        serverStatus
 	CertSerial    string
+	CertNotAfter  time.Time
 	CreatedAt     time.Time
 	LastSeen      time.Time
 	AgentVer      string
@@ -167,9 +168,33 @@ func (s *store) revokeToken(serverID, actor string) {
 	s.log(serverID, actor, "bootstrap_token.revoked", "")
 }
 
-func (s *store) markIssuedCert(serverID, serial string) {
-	s.db.Exec(`UPDATE servers SET cert_serial = ?, status = ? WHERE id = ?`, serial, string(statusOffline), serverID)
-	s.log(serverID, "", "agent.registered", fmt.Sprintf("cert_serial=%s", serial))
+func (s *store) markIssuedCert(serverID, serial string, notAfter time.Time) {
+	s.db.Exec(`UPDATE servers SET cert_serial = ?, cert_not_after = ?, status = ? WHERE id = ?`,
+		serial, notAfter.UTC().Format(time.RFC3339Nano), string(statusOffline), serverID)
+	s.log(serverID, "", "agent.registered", fmt.Sprintf("cert_serial=%s not_after=%s", serial, notAfter.UTC().Format(time.RFC3339)))
+}
+
+// renewCert records a certificate issued by gateway.handleRenew to replace
+// a server's current one before it expires. Unlike revokeServer, this does
+// *not* revoke the previous serial: the new certificate is written to the
+// agent's disk over an already-live, already-authenticated connection, but
+// that write happening successfully is not guaranteed (disk full, process
+// killed mid-write, ...). If the old serial were revoked immediately here
+// and the agent's disk write then failed, the agent would be locked out —
+// unable to reconnect with either certificate. Letting the superseded
+// certificate simply expire on its own original schedule keeps a renewal
+// failure recoverable instead of turning it into an outage; the overlap
+// window where both certs are technically valid is the accepted trade-off
+// (documented in docs/SECURITY.md).
+func (s *store) renewCert(serverID, serial string, notAfter time.Time) {
+	rec, ok := s.get(serverID)
+	oldSerial := ""
+	if ok {
+		oldSerial = rec.CertSerial
+	}
+	s.db.Exec(`UPDATE servers SET cert_serial = ?, cert_not_after = ? WHERE id = ?`,
+		serial, notAfter.UTC().Format(time.RFC3339Nano), serverID)
+	s.log(serverID, "", "agent.cert_renewed", fmt.Sprintf("old_serial=%s new_serial=%s not_after=%s", oldSerial, serial, notAfter.UTC().Format(time.RFC3339)))
 }
 
 func (s *store) isRevoked(serial string) bool {
@@ -229,7 +254,7 @@ func (s *store) recordHeartbeat(serverID string, hb heartbeatSnapshot) {
 
 func (s *store) get(serverID string) (*serverRecord, bool) {
 	row := s.db.QueryRow(
-		`SELECT id, name, grp, tags_json, status, cert_serial, created_at, last_seen, agent_version, heartbeat_json
+		`SELECT id, name, grp, tags_json, status, cert_serial, cert_not_after, created_at, last_seen, agent_version, heartbeat_json
 		 FROM servers WHERE id = ?`, serverID)
 	rec, err := scanServer(row)
 	if err != nil {
@@ -240,7 +265,7 @@ func (s *store) get(serverID string) (*serverRecord, bool) {
 
 func (s *store) list() []*serverRecord {
 	rows, err := s.db.Query(
-		`SELECT id, name, grp, tags_json, status, cert_serial, created_at, last_seen, agent_version, heartbeat_json
+		`SELECT id, name, grp, tags_json, status, cert_serial, cert_not_after, created_at, last_seen, agent_version, heartbeat_json
 		 FROM servers ORDER BY created_at DESC`)
 	if err != nil {
 		return nil
@@ -267,10 +292,10 @@ type rowScanner interface {
 func scanServer(row rowScanner) (*serverRecord, error) {
 	var rec serverRecord
 	var tagsJSON string
-	var lastSeen, heartbeatJSON sql.NullString
+	var lastSeen, heartbeatJSON, certNotAfter sql.NullString
 	var createdAt string
 
-	if err := row.Scan(&rec.ID, &rec.Name, &rec.Group, &tagsJSON, &rec.Status, &rec.CertSerial,
+	if err := row.Scan(&rec.ID, &rec.Name, &rec.Group, &tagsJSON, &rec.Status, &rec.CertSerial, &certNotAfter,
 		&createdAt, &lastSeen, &rec.AgentVer, &heartbeatJSON); err != nil {
 		return nil, err
 	}
@@ -279,6 +304,9 @@ func scanServer(row rowScanner) (*serverRecord, error) {
 	rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
 	if lastSeen.Valid {
 		rec.LastSeen, _ = time.Parse(time.RFC3339Nano, lastSeen.String)
+	}
+	if certNotAfter.Valid && certNotAfter.String != "" {
+		rec.CertNotAfter, _ = time.Parse(time.RFC3339Nano, certNotAfter.String)
 	}
 	if heartbeatJSON.Valid && heartbeatJSON.String != "" {
 		var hb heartbeatSnapshot

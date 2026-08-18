@@ -52,8 +52,9 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | User/organization management | 🚧 single-user model only; no orgs/teams yet |
 | Multiple-server management | ✅ create/list/get/revoke, search/filter in UI |
 | Secure agent install/registration | ✅ bootstrap token → mTLS cert exchange |
-| Agent identity, cert rotation, revocation | 🚧 issuance + revocation done; no
-  auto-renewal before expiry yet (see `SECURITY.md` §2) |
+| Agent identity, cert rotation, revocation | ✅ issuance, revocation, and
+  auto-renewal (before the 30-day expiry, over the existing mTLS session, no new
+  credential type) all implemented — see `SECURITY.md` §2 |
 | Server health monitoring | ✅ heartbeat: uptime, load, mem%, disk% |
 | Server groups/tags/metadata | ✅ `group`, `tags[]` on server records |
 | Background job queue | ⬜ task dispatch is synchronous request/response today,
@@ -164,11 +165,13 @@ Phase boundaries and full milestone/estimate tables are in `product-plan.md` §6
 is the condensed status:
 
 - **Phase 1 — secure working foundation:** ~90% of the *capability* surface exists and
-  is tested per-capability (see the tables above); the biggest real gaps are backup
-  **restore**, an automated test suite (now added, see `TESTING.md`), SSL auto-renewal,
-  and agent cert auto-rotation. Not "GA-ready" yet, but the architecture and security
-  primitives it depends on (mTLS, allow-listed capabilities, per-app isolation, audit
-  log) are real and proven, not stubs.
+  is tested per-capability (see the tables above); backup restore, an automated test
+  suite, and agent cert auto-rotation are now done — the remaining real gap is
+  application-level SSL auto-renewal (certbot's own renewal timer isn't wired up by
+  `stack.install` yet, distinct from agent *identity* cert rotation, which is done). Not
+  "GA-ready" yet, but the architecture and security primitives it depends on (mTLS,
+  allow-listed capabilities, per-app isolation, audit log) are real and proven, not
+  stubs.
 - **Phase 2 — professional server management:** not started. Git deployment,
   cron/process management, SSH/firewall management UI, remote backups, cross-server
   migration all remain ⬜.
@@ -247,7 +250,7 @@ EXISTS`, applied on every `openDB` call — idempotent, no separate migration to
 |---|---|
 | `users` | id, email (unique, lowercased), bcrypt password hash, TOTP secret/enabled |
 | `sessions` | SHA-256-hashed session token → user, expiry, `mfa_verified` flag |
-| `servers` | id, name, group, tags (JSON), status, cert serial, last heartbeat (JSON) |
+| `servers` | id, name, group, tags (JSON), status, cert serial, cert expiry, last heartbeat (JSON) |
 | `bootstrap_tokens` | SHA-256-hashed single-use token → server, expiry |
 | `revoked_certs` | cert serial → server, revoked-at (checked on every gateway handshake) |
 | `audit_log` | append-only: seq, timestamp, server, actor, action, detail |
@@ -384,7 +387,6 @@ all ⬜, scoped to Phase 2 per `product-plan.md` §9.
 - No backup scheduling/retention policy — backups are on-demand only.
 - No on-disk agent task journal — a task in flight when the agent process restarts is
   lost, not resumed (see `ARCHITECTURE.md` §4 "As built").
-- No agent certificate auto-renewal before its 30-day expiry (see `SECURITY.md` §2).
 - No agent self-update mechanism (see `SECURITY.md` §3).
 - No background job queue — task dispatch is synchronous and bounded by a 120s HTTP
   timeout; this will not scale past a moderate number of concurrent long-running tasks

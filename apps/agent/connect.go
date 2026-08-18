@@ -70,17 +70,31 @@ func runConnection(ctx context.Context, id *identity, reg capabilities.Registry)
 	}
 	log.Printf("connected to gateway %s as %s", id.GatewayAddr, id.ServerID)
 
+	renewResp := make(chan proto.RenewResponse, 1)
 	go heartbeatLoop(ctx, enc)
+	go renewalLoop(ctx, conn, enc, id, renewResp)
 
 	for {
 		var env proto.Envelope
 		if err := dec.Decode(&env); err != nil {
 			return err
 		}
-		if env.Type != proto.MsgTask || env.Task == nil {
-			continue
+		switch env.Type {
+		case proto.MsgTask:
+			if env.Task != nil {
+				go handleTask(ctx, enc, reg, *env.Task)
+			}
+		case proto.MsgRenewResponse:
+			if env.RenewResponse != nil {
+				select {
+				case renewResp <- *env.RenewResponse:
+				default:
+					// A previous renewal cycle already gave up waiting (see
+					// renewResponseTimeout); this response arrived too late
+					// to matter, and the next cycle will just ask again.
+				}
+			}
 		}
-		go handleTask(ctx, enc, reg, *env.Task)
 	}
 }
 

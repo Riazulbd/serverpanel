@@ -132,7 +132,7 @@ func TestRevokeServerBlocksReuseOfCertSerial(t *testing.T) {
 	if err != nil {
 		t.Fatalf("createServer: %v", err)
 	}
-	st.markIssuedCert(id, "42")
+	st.markIssuedCert(id, "42", time.Now().Add(30*24*time.Hour))
 
 	if st.isRevoked("42") {
 		t.Fatal("cert should not be revoked yet")
@@ -159,13 +159,43 @@ func TestRevokeServerRejectsUnknownServer(t *testing.T) {
 	}
 }
 
+func TestRenewCertUpdatesSerialWithoutRevokingThePrevious(t *testing.T) {
+	st := newTestStore(t)
+	id, _, err := st.createServer("web-5", "", nil, time.Hour, "admin@example.com")
+	if err != nil {
+		t.Fatalf("createServer: %v", err)
+	}
+	firstNotAfter := time.Now().Add(30 * 24 * time.Hour)
+	st.markIssuedCert(id, "10", firstNotAfter)
+
+	secondNotAfter := time.Now().Add(60 * 24 * time.Hour)
+	st.renewCert(id, "11", secondNotAfter)
+
+	rec, ok := st.get(id)
+	if !ok {
+		t.Fatal("server should still exist after renewal")
+	}
+	if rec.CertSerial != "11" {
+		t.Fatalf("CertSerial = %q, want %q", rec.CertSerial, "11")
+	}
+	if !rec.CertNotAfter.Equal(secondNotAfter.Truncate(0)) && rec.CertNotAfter.Sub(secondNotAfter).Abs() > time.Second {
+		t.Fatalf("CertNotAfter = %v, want ~%v", rec.CertNotAfter, secondNotAfter)
+	}
+	// The whole point of renewCert (as opposed to revokeServer) is that the
+	// superseded certificate keeps working until it naturally expires, so a
+	// failed/incomplete renewal on the agent side never locks it out.
+	if st.isRevoked("10") {
+		t.Fatal("previous serial should not be revoked by a renewal")
+	}
+}
+
 func TestSetConnectedPreservesRevokedStatus(t *testing.T) {
 	st := newTestStore(t)
 	id, _, err := st.createServer("web-4", "", nil, time.Hour, "admin@example.com")
 	if err != nil {
 		t.Fatalf("createServer: %v", err)
 	}
-	st.markIssuedCert(id, "7")
+	st.markIssuedCert(id, "7", time.Now().Add(30*24*time.Hour))
 	if err := st.revokeServer(id, "admin@example.com"); err != nil {
 		t.Fatalf("revokeServer: %v", err)
 	}
