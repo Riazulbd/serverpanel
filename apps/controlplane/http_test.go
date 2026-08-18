@@ -287,6 +287,61 @@ func TestCreateBackupRejectsInvalidScope(t *testing.T) {
 	}
 }
 
+func TestDatabaseEndpointsValidateAndRequireAgent(t *testing.T) {
+	secureCookies = false
+	defer func() { secureCookies = true }()
+
+	a := newTestAPIServer(t)
+	h := a.routes()
+
+	doJSON(t, h, "POST", "/api/v1/auth/signup", map[string]string{
+		"Email": "ops3@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	rec := doJSON(t, h, "POST", "/api/v1/auth/login", map[string]string{
+		"Email": "ops3@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	cookie := sessionCookie(rec)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers", map[string]any{"Name": "web-11"}, cookie)
+	var created struct {
+		ServerID string `json:"server_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+
+	// An empty list for a server with no databases yet, not an error.
+	rec = doJSON(t, h, "GET", "/api/v1/servers/"+created.ServerID+"/databases", nil, cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list databases: status = %d, want 200", rec.Code)
+	}
+	if body := rec.Body.String(); body != "null\n" && body != "[]\n" {
+		t.Fatalf("list databases with none created = %q, want an empty list", body)
+	}
+
+	// Invalid identifiers are rejected before dispatch ever happens.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/databases",
+		map[string]any{"name": "Not-Valid!"}, cookie)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("create database with invalid name: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// A well-formed request against a server with no connected agent fails
+	// as a gateway/dispatch error, not a validation error — proving
+	// validation happens before dispatch, same as backups.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/databases",
+		map[string]any{"name": "app_db"}, cookie)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("create database with no agent connected: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// Deleting a database that was never recorded (because creation never
+	// succeeded above) is a 404, not a dispatch attempt against a
+	// nonexistent record.
+	rec = doJSON(t, h, "DELETE", "/api/v1/servers/"+created.ServerID+"/databases/db_nonexistent", nil, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("delete nonexistent database: status = %d, want 404", rec.Code)
+	}
+}
+
 func TestRegisterEndpointRejectsBadToken(t *testing.T) {
 	a := newTestAPIServer(t)
 	h := a.routes()

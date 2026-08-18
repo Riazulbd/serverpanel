@@ -2,6 +2,42 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-18 — Database control-plane persistence and dashboard UI (DB-001)
+
+- Closed the gap the previous entry's parity matrix flagged as "good candidate for the
+  next iteration": the pre-existing `db.create`/`db.delete`/`db.list` agent
+  capabilities were dispatchable only via generic task dispatch, with no durable
+  control-plane record and no dedicated dashboard UI (unlike sites/backups).
+- Added a `databases` table (`server_id`, `name`, `owner_user`, `status`, `created_at`,
+  `UNIQUE(server_id, name)`) and `store` methods `createDatabase`/`listDatabases`/
+  `getDatabase`/`deleteDatabase`, each scoped by server ID the same way
+  `getSite`/`getBackup` are. Deliberately absent from the table: the owner user's
+  password — it never gets a second place to leak from.
+- Added three endpoints (`apps/controlplane/databases.go`) following the same
+  dispatch-then-persist-on-success pattern as `handleCreateSite`/`handleCreateBackup`:
+  `POST`/`GET /api/v1/servers/{id}/databases`, `DELETE .../databases/{dbId}`. Database
+  and owner-user identifiers are re-validated against the same allow-list regex the
+  agent capability already enforces (defense in depth, not a replacement for it). The
+  owner password is generated control-plane-side with `crypto/rand` (48 hex chars),
+  dispatched to the agent, and returned to the caller exactly once — never persisted,
+  never logged, never in the audit-log detail string.
+- Added a "Databases" panel to the server-detail dashboard view: a table of existing
+  databases with a per-row delete (destructive-action confirmation), and a "+ New
+  database" modal that shows the generated password once, with an explicit "shown only
+  once" warning.
+- New tests: `TestDatabaseCreateListDeleteRoundTrip` (store — create/list/get/delete,
+  cross-server scoping, duplicate-name rejection via the `UNIQUE` constraint,
+  double-delete rejection) and `TestDatabaseEndpointsValidateAndRequireAgent` (HTTP —
+  empty list is `200`, not an error; invalid name is `400` before any dispatch happens;
+  a well-formed request against a server with no connected agent is `502`, proving
+  validation precedes dispatch; deleting a database that was never recorded is `404`).
+  Also manually smoke-tested the full HTTP flow (signup → login → create server →
+  list/create-invalid/create-no-agent/delete-nonexistent) against a running control-
+  plane binary. `go build ./...`, `go vet ./...`, and `go test ./...` all pass.
+- Updated `docs/SERVERAVATAR_PARITY.md` (DB-001 moved `PARTIAL` → `COMPLETE`; the
+  separate DB-005 row is folded into DB-001 and removed), `docs/API.md`, and
+  `docs/SYSTEM.md` accordingly.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the
