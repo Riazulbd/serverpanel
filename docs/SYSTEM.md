@@ -80,7 +80,10 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | SSH/SFTP management, SSH-key mgmt, port mgmt, root-login controls | ⬜ Phase 2 |
 | Automatic security updates | ⬜ Phase 2 (`unattended-upgrades` integration) |
 | Service controls | ✅ `service.control`, allow-listed units/actions only |
-| Cron-job management | ⬜ Phase 2 |
+| Cron-job management | 🚧 `cron.list`/`cron.create`/`cron.delete` implemented and
+  unit-tested (marker-tagged crontab lines, scoped to a site's own system user); real
+  `crontab` binary not exercised in this dev environment — see
+  `SERVERAVATAR_PARITY.md` SRV-005 |
 | Process/worker management | ⬜ Phase 2 |
 | Disk-usage analysis, safe cleanup | ⬜ not started |
 | Server diagnostics | 🚧 `diagnostics.basic` (read-only service-state check); no
@@ -297,8 +300,9 @@ Current capability list: `system.ping`, `service.control`, `diagnostics.basic`,
 `stack.install`, `site.create`, `site.set_php_version`, `site.set_status`,
 `app.wordpress_install`, `ssl.issue_letsencrypt`, `ssl.install_custom`, `db.create`,
 `db.delete`, `db.list`, `file.list`, `file.read`, `file.write`, `file.delete`,
-`backup.run`, `backup.restore`, `logs.tail`. Notably absent (by design, until reviewed
-and added): `git.deploy`, `cron.upsert`, `ssh.*`, `firewall.*`, `agent.self_update`.
+`backup.run`, `backup.restore`, `logs.tail`, `cron.list`, `cron.create`,
+`cron.delete`. Notably absent (by design, until reviewed and added): `git.deploy`,
+`ssh.*`, `firewall.*`, `agent.self_update`.
 
 ## 13. Installation and deployment
 

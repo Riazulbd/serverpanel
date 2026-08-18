@@ -33,6 +33,18 @@ func run(ctx context.Context, name string, args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), err
 }
 
+// runStdin executes a fixed argv (never a shell) like run, but feeds stdin
+// content to the process instead of args — used for `crontab -u <user> -`,
+// which reads the new crontab from stdin rather than a command-line
+// argument.
+func runStdin(ctx context.Context, stdin string, name string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Stdin = strings.NewReader(stdin)
+	cmd.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
+	out, err := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out)), err
+}
+
 // isPackageInstalled reports whether an apt package is already installed,
 // which is what makes stack installation idempotent/safely-retryable: a
 // re-run skips every step whose target state already holds.

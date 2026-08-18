@@ -2,6 +2,37 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-18 — Cron job management (SRV-005)
+
+- **Implemented `cron.list`/`cron.create`/`cron.delete`**
+  (`packages/capabilities/cron.go`), the next Phase 2 gap flagged in `SYSTEM.md` §3.
+  Manages a site's own system user's real crontab via `crontab -u <user> -l` (read)
+  and `crontab -u <user> -` (write, content on stdin — never a shell). Every managed
+  entry is tagged with a trailing `# serverpanel:cron:<id>` comment so list/delete can
+  find and address exactly the jobs this control plane created without disturbing
+  anything else already in that crontab; the crontab itself is the source of truth,
+  nothing is duplicated in the database. `system_user` is validated against the exact
+  pattern site creation produces (shared `siteSystemUserRe`, also now used by
+  `site.set_php_version`/`site.set_status` in place of a bare prefix check), schedule
+  fields are restricted to `[0-9*/,-]`, and commands are length-capped and rejected if
+  they contain a newline — closing off crontab-line injection via either parameter.
+- Wired the three capabilities into the control plane
+  (`apps/controlplane/cron.go`): `GET`/`POST /api/v1/servers/{id}/sites/{siteId}/cron`
+  and `DELETE .../cron/{cronId}`, all scoped through the site record so a request can
+  only ever act on the crontab of the system user that site actually owns; job IDs are
+  generated server-side (`randID("cron")`), never trusted from the client. Added a
+  "Cron jobs" panel to the site-detail dashboard view (list, create modal, delete with
+  confirmation).
+- Added 9 new capability-layer tests (schedule/command validation, marker-comment
+  round-trip through `parseCrontab`, comment-safety of the trailing marker under
+  `sh -c`, and system-user/id rejection ahead of any crontab access) and 2 new
+  control-plane tests (site-scoping 404s, validation-before-dispatch ordering). Full
+  suite green, `go vet` clean. The real `crontab` binary isn't available in this dev
+  environment, so the actual read/write-crontab calls are `BLOCKED_EXTERNAL` for
+  live verification — every other layer is covered.
+- Updated `SYSTEM.md`, `API.md`, and `SERVERAVATAR_PARITY.md` (new detailed SRV-005
+  entry, status `TESTING`) to reflect this.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

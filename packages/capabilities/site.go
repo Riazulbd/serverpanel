@@ -12,6 +12,14 @@ import (
 
 var domainRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$`)
 
+// siteSystemUserRe matches exactly the usernames systemUserForDomain
+// produces (see TestSystemUserForDomainIsSafeAndBounded), and is the shared
+// validation every capability that takes a system_user parameter (cron.*,
+// site.set_php_version, site.set_status) uses instead of a bare prefix
+// check, so an out-of-range or malformed value is rejected the same way
+// everywhere.
+var siteSystemUserRe = regexp.MustCompile(`^site_[a-z0-9_]{1,28}$`)
+
 // disabledPHPFunctions is the default deny-list applied to every site's
 // php-fpm pool. Combined with open_basedir, this is the isolation boundary
 // mentioned throughout docs/security-trust-model.md §4: a compromised
@@ -239,7 +247,7 @@ func handleSiteSetPHP(ctx context.Context, params map[string]any, progress Progr
 	if phpVersion != "8.3" {
 		return "", fmt.Errorf("only php_version 8.3 is available in this release")
 	}
-	if sysUser == "" || !strings.HasPrefix(sysUser, "site_") {
+	if !siteSystemUserRe.MatchString(sysUser) {
 		return "", fmt.Errorf("invalid system_user")
 	}
 	return "no-op: only one PHP version is currently offered", nil
@@ -248,7 +256,7 @@ func handleSiteSetPHP(ctx context.Context, params map[string]any, progress Progr
 func handleSiteSetStatus(ctx context.Context, params map[string]any, progress Progress) (string, error) {
 	sysUser, _ := params["system_user"].(string)
 	status, _ := params["status"].(string)
-	if sysUser == "" || !strings.HasPrefix(sysUser, "site_") {
+	if !siteSystemUserRe.MatchString(sysUser) {
 		return "", fmt.Errorf("invalid system_user")
 	}
 	enabledPath := "/etc/nginx/sites-enabled/" + sysUser + ".conf"

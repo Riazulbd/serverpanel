@@ -46,6 +46,9 @@ protected route; there is no route that skips it by omission.
 | `GET` | `/api/v1/servers/{id}/sites/{siteId}/backups` | List backups for a site, newest first |
 | `POST` | `/api/v1/servers/{id}/sites/{siteId}/backups` | Dispatch `backup.run` and persist the resulting backup record |
 | `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a previously recorded backup |
+| `GET` | `/api/v1/servers/{id}/sites/{siteId}/cron` | Dispatch `cron.list` for a site's system user |
+| `POST` | `/api/v1/servers/{id}/sites/{siteId}/cron` | Dispatch `cron.create` for a site's system user |
+| `DELETE` | `/api/v1/servers/{id}/sites/{siteId}/cron/{cronId}` | Dispatch `cron.delete` for a site's system user |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -137,6 +140,28 @@ isn't connected; `422` if `backup.restore` itself failed on the agent (the agent
 error message explains why, and any checkpoint already taken is named in it so it's
 never a silent loss).
 
+### `GET /api/v1/servers/{id}/sites/{siteId}/cron`
+Dispatches `cron.list` with `system_user` taken from the site's own recorded system
+user (never caller-supplied). → `200` with an array of `{"id", "schedule", "command"}`.
+`404` if the site doesn't exist on that server; `502` if the agent isn't connected;
+`422` if `cron.list` itself failed on the agent.
+
+### `POST /api/v1/servers/{id}/sites/{siteId}/cron`
+```json
+{"schedule": "*/5 * * * *", "command": "php /home/sites/site_example/artisan schedule:run"}
+```
+The cron job's `id` is generated server-side (`randID("cron")`) — never accepted from
+the request — and dispatched to `cron.create` along with the site's own system user.
+→ `201` with `{"id", "schedule", "command"}`. `400` if `schedule`/`command` is missing;
+`404` if the site doesn't exist on that server; `502` if the agent isn't connected;
+`422` if `cron.create` itself failed on the agent (e.g. an invalid schedule).
+
+### `DELETE /api/v1/servers/{id}/sites/{siteId}/cron/{cronId}`
+Dispatches `cron.delete` with the site's own system user and the `cronId` from the
+path. → `200 {"status": "deleted"}`. `404` if the site doesn't exist on that server;
+`502` if the agent isn't connected; `422` if `cron.delete` itself failed on the agent
+(e.g. no job with that id).
+
 ### `POST /agents/register`
 ```json
 {"token": "<bootstrap token>", "csr_pem": "<PEM-encoded CSR>"}
@@ -178,7 +203,25 @@ The full allow-listed capability names `packages/capabilities.Default()` registe
 `diagnostics.basic`, `stack.install`, `site.create`, `site.set_php_version`,
 `site.set_status`, `app.wordpress_install`, `ssl.issue_letsencrypt`,
 `ssl.install_custom`, `db.create`, `db.delete`, `db.list`, `file.list`, `file.read`,
-`file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`.
+`file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`, `cron.list`,
+`cron.create`, `cron.delete`.
+
+### `cron.list` / `cron.create` / `cron.delete`
+```json
+{"system_user": "site_example_com"}
+{"system_user": "site_example_com", "id": "cron_1a2b3c", "schedule": "*/5 * * * *", "command": "php artisan schedule:run"}
+{"system_user": "site_example_com", "id": "cron_1a2b3c"}
+```
+Manage cron jobs in `system_user`'s real crontab via `crontab -u <user> -l` (read) and
+`crontab -u <user> -` (write, content on stdin — never a shell). `system_user` must
+match `site_<name>` exactly as `systemUserForDomain` produces it, so a job can only
+ever be attached to a system user this control plane created for a site. Every managed
+line is tagged with a trailing `# serverpanel:cron:<id>` comment; `cron.list`/`cron.delete`
+only ever touch lines carrying that marker, leaving any other content already in that
+crontab untouched. `schedule` must have exactly 5 space-separated fields, each matching
+`[0-9*/,-]+`; `command` must be non-empty, ≤2000 chars, and contain no newline (which
+would otherwise let one job inject an unrelated crontab line). `cron.create` returns the
+created `{"id", "schedule", "command"}`; `cron.list` returns `{"jobs": [...]}`.
 
 ### `backup.restore`
 ```json
