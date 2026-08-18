@@ -200,6 +200,25 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Known differences**: no backup/recovery codes for 2FA, no login-history UI, no IP allowlisting, no API token management yet.
 - **Reason**: those are listed Phase 2 account-security items (`product-plan.md` §9) not yet built.
 
+### APP-016 — Let's Encrypt SSL issuance + automatic renewal
+- **Category**: Application Management → SSL
+- **Documentation page**: Application Management → SSL/HTTPS
+- **Short description**: Issue a free Let's Encrypt certificate for a site's domain and keep it renewed without further action.
+- **Expected behavior**: issuing an SSL certificate is a one-click operation, and it never silently expires — the platform renews it automatically ahead of expiry.
+- **Our implementation**: `ssl.issue_letsencrypt` (unchanged, already implemented — see SYSTEM.md §2) issues via certbot's nginx plugin. This entry's change: `stack.install` (`packages/capabilities/stack.go`) now has two additional idempotent steps — "certbot automatic renewal timer" (`systemctl enable --now certbot.timer`, the certbot package's own twice-daily renewal-check unit, which only actually renews certificates within 30 days of expiry) and "certbot renewal nginx-reload hook" (writes `/etc/letsencrypt/renewal-hooks/deploy/serverpanel-nginx-reload.sh`, which certbot runs after *any* successful renewal regardless of which plugin issued the certificate, reloading nginx so the renewed certificate takes effect without a full restart). Together these mean a certificate issued via `ssl.issue_letsencrypt` now renews itself with no further control-plane action required — closing the specific gap this row previously tracked ("certbot's own renewal timer not yet wired up by `stack.install`").
+- **Frontend**: none added by this change (SSL issuance itself has no dedicated dashboard UI yet — dispatched via the generic task-dispatch action, same as before; tracked separately under APP-015's "Known differences").
+- **Backend service**: `packages/capabilities.phase1LEMPSteps` (the two new `installStep` entries).
+- **API endpoint(s)**: none new — reached through the existing `POST /api/v1/servers/{id}/tasks` with `capability: stack.install`, same as the rest of the stack profile.
+- **Agent command**: `stack.install` (no new capability name; two new steps within it).
+- **DB tables**: none.
+- **Required permission**: authenticated session (same as `stack.install` generally).
+- **Security considerations**: the deploy-hook script is written with fixed, non-caller-influenced content (no template interpolation of any request parameter) and `0755` permissions under certbot's own hooks directory; it only ever runs `systemctl reload nginx`, nothing caller-controlled.
+- **Test coverage**: none automated — both new steps require a real systemd (`systemctl enable --now`) that this sandbox doesn't have, the same category as the rest of `stack.install`'s steps (see `TESTING.md` §2/§3). Not yet manually verified against a real Ubuntu host either (unlike the rest of `stack.install`, which *was* manually verified in a prior session) — this is new code, and that gap is stated here rather than glossed over.
+- **Current status**: `PARTIAL`
+- **Completion date**: n/a
+- **Known differences**: no renewal *failure* alerting yet (see SRV-008/monitoring — alerting in general is `NOT_STARTED`); no dashboard visibility into a certificate's expiry date or renewal history.
+- **Reason**: renewal-failure alerting depends on the alerting subsystem (Phase 2, tracked under SRV-008/INT-004), which doesn't exist yet at all; building certificate-specific alerting ahead of the general alerting subsystem would be built on nothing to plug into.
+
 ---
 
 ## 2. Summary tables — not yet started
@@ -272,7 +291,6 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | APP-013 | Log Monitoring Suite (traffic analytics) | `NOT_STARTED` | |
 | APP-014 | Application-level WAF / AI-bot blocker | `NOT_STARTED` | |
 | APP-015 | Custom SSL upload | `PARTIAL` | `ssl.install_custom` capability exists agent-side; no dedicated dashboard UI |
-| APP-016 | Let's Encrypt SSL + auto-renewal | `PARTIAL` | `ssl.issue_letsencrypt` implemented; certbot's own renewal timer not yet wired up by `stack.install` |
 
 ### Database management — not yet started (DB-*)
 | ID | Feature | Status | Notes |
@@ -314,8 +332,8 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | Status | Count (detailed entries) | Count (summary-table rows) |
 |---|---|---|
 | `COMPLETE` | 4 (SRV-001, BAK-002, ACC-001, DB-005) | 1 (PROV-006) |
-| `PARTIAL` | 3 (SRV-002, APP-001, APP-002, DB-001, BAK-001 — 5 total, see note) | 6 |
-| `NOT_STARTED` | 0 | ~54 |
+| `PARTIAL` | 6 (SRV-002, APP-001, APP-002, DB-001, BAK-001, APP-016 — see note) | 6 |
+| `NOT_STARTED` | 0 | ~53 |
 | `BLOCKED_EXTERNAL` | 0 (sub-scoped within BAK-001/BAK-002's db/full-scope MariaDB verification) | 0 |
 | `INTENTIONALLY_NOT_APPLICABLE` | 0 | 1 |
 
@@ -372,6 +390,12 @@ establish the tracking process and close the single highest-priority gap
 
 ## Change history
 
+- **2026-08-18** (2): expanded APP-016 into a full detail block — `stack.install` now
+  enables/starts `certbot.timer` and installs a renewal deploy-hook that reloads nginx,
+  closing the specific "certbot's own renewal timer not yet wired up" gap this row
+  previously tracked. Stated plainly that this new code is *not yet* manually verified
+  against a real Ubuntu host (unlike the rest of `stack.install`), unlike claiming it as
+  done — still `PARTIAL`, not `COMPLETE`.
 - **2026-08-18**: closed DB-005 (control-plane persistence + dashboard UI for
   databases) — the specific follow-up DB-001's "Known differences" flagged as the next
   candidate. Added a `databases` table, `db.create`/`db.delete` now return structured

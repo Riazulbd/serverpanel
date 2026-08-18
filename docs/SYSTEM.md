@@ -103,8 +103,9 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | Maintenance mode | ⬜ not implemented |
 | Basic auth on a site | ⬜ not implemented |
 | Custom + Let's Encrypt SSL | ✅ `ssl.issue_letsencrypt` (certbot), `ssl.install_custom` |
-| Automatic SSL renewal | ⬜ not implemented (certbot's own renewal timer is not
-  wired up by `stack.install` yet) |
+| Automatic SSL renewal | 🚧 `stack.install` now enables/starts `certbot.timer` and
+  installs a renewal deploy-hook that reloads nginx after any renewal; not verified end
+  to end (needs a real systemd + public DNS — see `TESTING.md` §3) |
 | WordPress auto-login/auto-update | ⬜ not implemented |
 | Application enable/disable | ✅ `site.set_status` |
 | Secure file manager | ✅ `file.list/read/write/delete`, scoped + symlink-safe |
@@ -164,11 +165,13 @@ Phase boundaries and full milestone/estimate tables are in `product-plan.md` §6
 is the condensed status:
 
 - **Phase 1 — secure working foundation:** ~90% of the *capability* surface exists and
-  is tested per-capability (see the tables above); the biggest real gaps are SSL
-  auto-renewal and agent cert auto-rotation (backup restore and database control-plane
-  persistence/UI, both previously listed here, are now done). Not "GA-ready" yet, but
-  the architecture and security primitives it depends on (mTLS, allow-listed
-  capabilities, per-app isolation, audit log) are real and proven, not stubs.
+  is tested per-capability (see the tables above); the biggest real gap remaining is
+  agent cert auto-rotation (backup restore, database control-plane persistence/UI, and
+  SSL auto-renewal wiring, all previously listed here, are now done — though SSL
+  auto-renewal's end-to-end behavior is unverified in any environment this project has
+  run in, see `TESTING.md` §3). Not "GA-ready" yet, but the architecture and security
+  primitives it depends on (mTLS, allow-listed capabilities, per-app isolation, audit
+  log) are real and proven, not stubs.
 - **Phase 2 — professional server management:** not started. Git deployment,
   cron/process management, SSH/firewall management UI, remote backups, cross-server
   migration all remain ⬜.
@@ -386,7 +389,10 @@ all ⬜, scoped to Phase 2 per `product-plan.md` §9.
 - No backup scheduling/retention policy — backups are on-demand only.
 - No on-disk agent task journal — a task in flight when the agent process restarts is
   lost, not resumed (see `ARCHITECTURE.md` §4 "As built").
-- No agent certificate auto-renewal before its 30-day expiry (see `SECURITY.md` §2).
+- No agent certificate auto-renewal before its 30-day expiry (see `SECURITY.md` §2) —
+  note this is the *agent's own mTLS client certificate*, unrelated to the Let's
+  Encrypt site-certificate auto-renewal `stack.install` now wires up (`certbot.timer` +
+  a reload hook).
 - No agent self-update mechanism (see `SECURITY.md` §3).
 - No background job queue — task dispatch is synchronous and bounded by a 120s HTTP
   timeout; this will not scale past a moderate number of concurrent long-running tasks

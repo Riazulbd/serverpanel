@@ -140,6 +140,53 @@ func phase1LEMPSteps() []installStep {
 			},
 		},
 		{
+			Name: "certbot automatic renewal timer",
+			// The certbot Debian/Ubuntu package ships a certbot.timer unit
+			// that runs `certbot renew` (checking all certificates, only
+			// actually renewing ones within 30 days of expiry) twice daily,
+			// but does not reliably start it on every install path — this
+			// step enables and starts it explicitly rather than assuming
+			// the package's postinst already did, closing the "SSL
+			// auto-renewal" gap tracked in SYSTEM.md/SERVERAVATAR_PARITY.md
+			// (APP-016): once a certificate is issued via
+			// ssl.issue_letsencrypt, it renews itself with no further
+			// action from the control plane.
+			Check: func(ctx context.Context) bool {
+				out, _ := run(ctx, "systemctl", "is-active", "certbot.timer")
+				return strings.TrimSpace(out) == "active"
+			},
+			Run: func(ctx context.Context) error {
+				if _, err := run(ctx, "systemctl", "enable", "--now", "certbot.timer"); err != nil {
+					return fmt.Errorf("enable certbot.timer: %w", err)
+				}
+				return nil
+			},
+		},
+		{
+			Name: "certbot renewal nginx-reload hook",
+			// Belt-and-braces alongside the --nginx plugin's own
+			// post-renewal reload: an explicit deploy hook (certbot's
+			// documented mechanism — every script under
+			// renewal-hooks/deploy/ runs after *any* successful renewal,
+			// regardless of which authenticator/installer plugin issued
+			// the certificate) makes the reload-after-renew behavior
+			// explicit and independently verifiable rather than an
+			// assumption about plugin internals.
+			Check: func(ctx context.Context) bool {
+				_, err := os.Stat("/etc/letsencrypt/renewal-hooks/deploy/serverpanel-nginx-reload.sh")
+				return err == nil
+			},
+			Run: func(ctx context.Context) error {
+				if err := os.MkdirAll("/etc/letsencrypt/renewal-hooks/deploy", 0755); err != nil {
+					return err
+				}
+				script := "#!/bin/sh\n# Managed by ServerPanel. Reloads nginx after any certbot renewal so\n" +
+					"# renewed certificates take effect without a full restart/downtime.\n" +
+					"systemctl reload nginx\n"
+				return os.WriteFile("/etc/letsencrypt/renewal-hooks/deploy/serverpanel-nginx-reload.sh", []byte(script), 0755)
+			},
+		},
+		{
 			Name:  "ufw",
 			Check: func(ctx context.Context) bool { return isPackageInstalled(ctx, "ufw") },
 			Run:   func(ctx context.Context) error { _, err := aptInstall(ctx, "ufw"); return err },

@@ -2,6 +2,29 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-18 (2) — Wire up Let's Encrypt automatic renewal
+
+- **Closed the SSL auto-renewal gap** flagged in `SYSTEM.md`'s known limitations and
+  `docs/SERVERAVATAR_PARITY.md`'s APP-016: `stack.install`
+  (`packages/capabilities/stack.go`) gained two new idempotent steps — enabling and
+  starting `certbot.timer` (the certbot package's own twice-daily renewal-check systemd
+  unit) and installing a renewal deploy-hook script
+  (`/etc/letsencrypt/renewal-hooks/deploy/serverpanel-nginx-reload.sh`) that reloads
+  nginx after any successful renewal, regardless of which certbot plugin issued the
+  certificate. A certificate issued via `ssl.issue_letsencrypt` now renews itself with
+  no further control-plane action.
+- Both steps require a real systemd, which this sandbox doesn't have, so — honestly,
+  per this project's "never claim untested external integrations were tested" rule —
+  they are **not** automated-tested and **not yet manually verified** against a real
+  Ubuntu host either (unlike the rest of `stack.install`, which was manually verified in
+  a prior session). `docs/SERVERAVATAR_PARITY.md`'s new APP-016 detail block states this
+  gap plainly; status remains `PARTIAL`, not `COMPLETE`.
+- Updated `SYSTEM.md` (SSL-renewal row now 🚧, known-limitations bullet clarified to
+  distinguish this from the still-unrelated agent-mTLS-cert-renewal gap),
+  `SERVERAVATAR_PARITY.md` (APP-016 promoted to a full detail block per this project's
+  own tracking workflow), and `TESTING.md` (new steps added to the "not covered by
+  `go test`" and "never verified in any environment" lists).
+
 ## 2026-08-18 — Database control-plane persistence and dashboard UI
 
 - **Closed DB-005** (`docs/SERVERAVATAR_PARITY.md`), the specific next-iteration gap the
