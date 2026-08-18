@@ -114,6 +114,19 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | Application logs / advanced log viewer | 🚧 `logs.tail` (redacted) exists; no
   filtering/search UI yet |
 
+### Database management
+| Feature | Status |
+|---|---|
+| MySQL/MariaDB database + scoped owner user create/delete/list | ✅ `db.create`/
+  `db.delete`/`db.list`, control-plane `databases` table (dispatch-then-persist), a
+  "Databases" panel per site (create/list/delete), one-time password reveal on
+  creation — password itself is never persisted |
+| MongoDB support | ⬜ not implemented |
+| phpMyAdmin / DB admin UI integration | ⬜ not implemented |
+| Database process/query monitoring | ⬜ not implemented |
+| Owner-password reset on an existing database | ⬜ not implemented (currently:
+  delete + recreate) |
+
 ### Git deployment
 All ⬜ — explicitly scoped to Phase 2 (`product-plan.md` §9). No Git deployment,
 webhook push-to-deploy, deploy keys, or rollback exist in this codebase yet.
@@ -398,6 +411,9 @@ all ⬜, scoped to Phase 2 per `product-plan.md` §9.
 - Dashboard mobile responsiveness (320–768px) has not been verified with real browser
   automation in this session — see `TESTING.md` §Known gaps.
 - No CI pipeline / automated vulnerability scanning configured yet.
+- A database's generated owner password is shown exactly once at creation and never
+  persisted — there is no in-place password-reset action yet, so a lost password today
+  means deleting and recreating the database (see `SERVERAVATAR_PARITY.md` DB-001).
 
 ## 22. Performance decisions
 

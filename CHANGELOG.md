@@ -2,6 +2,43 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-18 — Database management: control-plane persistence and dashboard UI
+
+- **Closed the DB-001/DB-005 gap flagged in the previous entry's parity matrix**:
+  `db.create`/`db.delete` (already implemented agent-side) are now wired end-to-end
+  through the control plane, matching the dispatch-then-persist pattern
+  `handleCreateBackup`/`handleCreateSite` already established.
+- New `databases` SQLite table (`server_id`, `site_id`, `name`, `owner_user`, `status`,
+  `created_at` — deliberately **no password column**) and `store.go` methods
+  (`createDatabase`/`listDatabases`/`getDatabase`/`deleteDatabaseRecord`), each scoped
+  by server ID the same way `getBackup`/`getSite` are, so a database record can't be
+  addressed across a server boundary it doesn't belong to.
+- Three new endpoints (`apps/controlplane/databases.go`):
+  `GET`/`POST /api/v1/servers/{id}/sites/{siteId}/databases`,
+  `DELETE /api/v1/servers/{id}/databases/{databaseId}`. Creation generates a random
+  24-character alphanumeric owner password server-side, dispatches `db.create`, and —
+  only on agent success — persists the record; the password itself is returned to the
+  caller exactly once in the HTTP response and is never written to the control plane's
+  own database. Deletion reads the database's `name`/`owner_user` from its own stored
+  record (never free-form client input) before dispatching `db.delete`.
+- Added a "Databases" panel to the site-detail dashboard view: create-database modal
+  (name only), a databases table, a one-time password reveal on creation, and a delete
+  action with a destructive-action confirmation dialog — mirroring the existing
+  "Backups" panel's structure.
+- Added 5 new capability-layer validation tests (`packages/capabilities/db_test.go`:
+  bad database name, bad owner user, short password, for both `db.create` and
+  `db.delete`) and 3 new control-plane tests (`TestDatabaseCreateListGetDeleteRoundTrip`
+  in `store_test.go`; `TestDatabaseEndpointsRequireARealSite`,
+  `TestCreateDatabaseRejectsInvalidName` in `http_test.go` — the latter also confirms no
+  database record is persisted after a failed agent dispatch). Full suite: 69 test
+  functions (up from 61), `go vet`/`gofmt` clean.
+- Updated `SYSTEM.md`, `API.md`, `TESTING.md`, and `SERVERAVATAR_PARITY.md` (DB-001
+  moved `PARTIAL` → `COMPLETE`; the DB-005 summary row folded into it since it was the
+  same feature). The real `CREATE DATABASE`/`CREATE USER`/`GRANT` DDL round trip against
+  a live MariaDB remains manually-verified-only in this environment (no MariaDB here),
+  the same documented limitation BAK-001/BAK-002 already carry for their db/full-scope
+  paths.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the
