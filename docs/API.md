@@ -46,6 +46,11 @@ protected route; there is no route that skips it by omission.
 | `GET` | `/api/v1/servers/{id}/sites/{siteId}/backups` | List backups for a site, newest first |
 | `POST` | `/api/v1/servers/{id}/sites/{siteId}/backups` | Dispatch `backup.run` and persist the resulting backup record |
 | `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a previously recorded backup |
+| `GET` | `/api/v1/servers/{id}/sites/{siteId}/ssl` | Dispatch `ssl.status` and persist the result on the site record |
+| `POST` | `/api/v1/servers/{id}/sites/{siteId}/ssl` | Dispatch `ssl.issue_letsencrypt` for the site's domain (body: `{"email"}`) |
+| `POST` | `/api/v1/servers/{id}/sites/{siteId}/ssl/custom` | Dispatch `ssl.install_custom` (body: `{"cert_pem", "key_pem"}`) |
+| `POST` | `/api/v1/servers/{id}/sites/{siteId}/ssl/renew` | Dispatch `ssl.renew` (force-renew ahead of schedule) |
+| `DELETE` | `/api/v1/servers/{id}/sites/{siteId}/ssl` | Dispatch `ssl.uninstall` and clear the site's persisted SSL status |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -177,8 +182,47 @@ The full allow-listed capability names `packages/capabilities.Default()` registe
 (see `SYSTEM.md` §12 for the allow-list rationale): `system.ping`, `service.control`,
 `diagnostics.basic`, `stack.install`, `site.create`, `site.set_php_version`,
 `site.set_status`, `app.wordpress_install`, `ssl.issue_letsencrypt`,
-`ssl.install_custom`, `db.create`, `db.delete`, `db.list`, `file.list`, `file.read`,
-`file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`.
+`ssl.install_custom`, `ssl.status`, `ssl.renew`, `ssl.uninstall`, `db.create`,
+`db.delete`, `db.list`, `file.list`, `file.read`, `file.write`, `file.delete`,
+`backup.run`, `backup.restore`, `logs.tail`.
+
+### `ssl.status`
+```json
+{"domain": "example.com"}
+```
+Reads whichever certificate is currently installed for `domain` straight off disk (the
+Let's Encrypt live path, then the custom-cert path) via `openssl x509`, and reports
+whether `certbot.timer` is active. Never errors for "no certificate installed" — it
+returns `{"installed": false, "source": "none", ...}` so status checks can be polled
+freely. Result:
+```json
+{"domain": "example.com", "installed": true, "source": "letsencrypt",
+ "issuer": "CN=R3,O=Let's Encrypt,C=US", "not_after": "2030-01-02T15:04:05Z",
+ "days_remaining": 87, "auto_renew_active": true}
+```
+
+### `ssl.renew`
+```json
+{"domain": "example.com"}
+```
+Force-renews one domain's Let's Encrypt certificate ahead of its normal schedule
+(`certbot renew --cert-name <domain>` — never the filter-less form, which would renew
+every certificate on the box). Rejects domains with no installed Let's Encrypt
+certificate (a custom-uploaded certificate must be re-uploaded, not renewed).
+
+### `ssl.uninstall`
+```json
+{"domain": "example.com", "system_user": "site_example_com",
+ "temp_domain": "", "docroot": "/home/sites/site_example_com/public",
+ "app_type": "static", "php_version": ""}
+```
+Removes whichever certificate is installed (`certbot delete` or removing the custom-cert
+directory) and rewrites the site's nginx vhost from scratch via the same
+`writeNginxVhost` function `site.create` uses — reverting to plain HTTP rather than
+trying to selectively strip the SSL block certbot's `--nginx` plugin added. `temp_domain`
+may be left empty; it's then regenerated deterministically from `system_user` and the
+box's own primary IP the same way `site.create` originally derived it, since the control
+plane doesn't currently persist it.
 
 ### `backup.restore`
 ```json

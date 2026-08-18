@@ -334,21 +334,49 @@ func (s *store) auditLog() []auditEntry {
 }
 
 type siteRecord struct {
-	ID         string
-	ServerID   string
-	Domain     string
-	SystemUser string
-	Docroot    string
-	AppType    string
-	PHPVersion string
-	Status     string
-	CreatedAt  time.Time
+	ID           string
+	ServerID     string
+	Domain       string
+	SystemUser   string
+	Docroot      string
+	AppType      string
+	PHPVersion   string
+	Status       string
+	CreatedAt    time.Time
+	SSLStatus    string // "none" | "letsencrypt" | "custom"
+	SSLIssuer    string
+	SSLExpiresAt *time.Time
+	SSLCheckedAt *time.Time
+}
+
+const siteColumns = `id, server_id, domain, system_user, docroot, app_type, php_version, status, created_at,
+	 ssl_status, ssl_issuer, ssl_expires_at, ssl_checked_at`
+
+func scanSite(row interface{ Scan(...any) error }) (*siteRecord, error) {
+	var rec siteRecord
+	var createdAt string
+	var sslExpiresAt, sslCheckedAt sql.NullString
+	if err := row.Scan(&rec.ID, &rec.ServerID, &rec.Domain, &rec.SystemUser, &rec.Docroot,
+		&rec.AppType, &rec.PHPVersion, &rec.Status, &createdAt,
+		&rec.SSLStatus, &rec.SSLIssuer, &sslExpiresAt, &sslCheckedAt); err != nil {
+		return nil, err
+	}
+	rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+	if sslExpiresAt.Valid {
+		if t, err := time.Parse(time.RFC3339Nano, sslExpiresAt.String); err == nil {
+			rec.SSLExpiresAt = &t
+		}
+	}
+	if sslCheckedAt.Valid {
+		if t, err := time.Parse(time.RFC3339Nano, sslCheckedAt.String); err == nil {
+			rec.SSLCheckedAt = &t
+		}
+	}
+	return &rec, nil
 }
 
 func (s *store) listSites(serverID string) []*siteRecord {
-	rows, err := s.db.Query(
-		`SELECT id, server_id, domain, system_user, docroot, app_type, php_version, status, created_at
-		 FROM sites WHERE server_id = ? ORDER BY created_at DESC`, serverID)
+	rows, err := s.db.Query(`SELECT `+siteColumns+` FROM sites WHERE server_id = ? ORDER BY created_at DESC`, serverID)
 	if err != nil {
 		return nil
 	}
@@ -356,14 +384,11 @@ func (s *store) listSites(serverID string) []*siteRecord {
 
 	var out []*siteRecord
 	for rows.Next() {
-		var rec siteRecord
-		var createdAt string
-		if err := rows.Scan(&rec.ID, &rec.ServerID, &rec.Domain, &rec.SystemUser, &rec.Docroot,
-			&rec.AppType, &rec.PHPVersion, &rec.Status, &createdAt); err != nil {
+		rec, err := scanSite(rows)
+		if err != nil {
 			continue
 		}
-		rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
-		out = append(out, &rec)
+		out = append(out, rec)
 	}
 	return out
 }
@@ -372,12 +397,13 @@ func (s *store) createSite(serverID, domain, systemUser, docroot, appType, phpVe
 	rec := &siteRecord{
 		ID: randID("site"), ServerID: serverID, Domain: domain, SystemUser: systemUser,
 		Docroot: docroot, AppType: appType, PHPVersion: phpVersion, Status: "active", CreatedAt: time.Now().UTC(),
+		SSLStatus: "none",
 	}
 	_, err := s.db.Exec(
-		`INSERT INTO sites (id, server_id, domain, system_user, docroot, app_type, php_version, status, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO sites (id, server_id, domain, system_user, docroot, app_type, php_version, status, created_at, ssl_status)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		rec.ID, rec.ServerID, rec.Domain, rec.SystemUser, rec.Docroot, rec.AppType, rec.PHPVersion, rec.Status,
-		rec.CreatedAt.Format(time.RFC3339Nano),
+		rec.CreatedAt.Format(time.RFC3339Nano), rec.SSLStatus,
 	)
 	if err != nil {
 		return nil, err
@@ -390,17 +416,40 @@ func (s *store) createSite(serverID, domain, systemUser, docroot, appType, phpVe
 // backup/restore request for site X on server A can't be redirected at
 // site X's docroot if X actually belongs to server B).
 func (s *store) getSite(serverID, siteID string) (*siteRecord, bool) {
-	row := s.db.QueryRow(
-		`SELECT id, server_id, domain, system_user, docroot, app_type, php_version, status, created_at
-		 FROM sites WHERE id = ? AND server_id = ?`, siteID, serverID)
-	var rec siteRecord
-	var createdAt string
-	if err := row.Scan(&rec.ID, &rec.ServerID, &rec.Domain, &rec.SystemUser, &rec.Docroot,
-		&rec.AppType, &rec.PHPVersion, &rec.Status, &createdAt); err != nil {
+	row := s.db.QueryRow(`SELECT `+siteColumns+` FROM sites WHERE id = ? AND server_id = ?`, siteID, serverID)
+	rec, err := scanSite(row)
+	if err != nil {
 		return nil, false
 	}
-	rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
-	return &rec, true
+	return rec, true
+}
+
+// updateSiteSSL persists the result of an ssl.status (or issue/renew)
+// dispatch. expiresAt is nil when no certificate is installed (status
+// "none"), which is what lets the dashboard distinguish "never checked"
+// from "checked, nothing installed" via ssl_checked_at always being set
+// here regardless of status.
+func (s *store) updateSiteSSL(serverID, siteID, status, issuer string, expiresAt *time.Time) error {
+	var expiresStr sql.NullString
+	if expiresAt != nil {
+		expiresStr = sql.NullString{String: expiresAt.Format(time.RFC3339Nano), Valid: true}
+	}
+	res, err := s.db.Exec(
+		`UPDATE sites SET ssl_status = ?, ssl_issuer = ?, ssl_expires_at = ?, ssl_checked_at = ?
+		 WHERE id = ? AND server_id = ?`,
+		status, issuer, expiresStr, time.Now().UTC().Format(time.RFC3339Nano), siteID, serverID,
+	)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("site not found")
+	}
+	return nil
 }
 
 type backupRecord struct {

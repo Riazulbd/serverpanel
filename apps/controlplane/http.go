@@ -56,6 +56,11 @@ func (a *apiServer) routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/servers/{id}/sites/{siteId}/backups", a.requireAuth(a.handleListBackups))
 	mux.HandleFunc("POST /api/v1/servers/{id}/sites/{siteId}/backups", a.requireAuth(a.handleCreateBackup))
 	mux.HandleFunc("POST /api/v1/servers/{id}/backups/{backupId}/restore", a.requireAuth(a.handleRestoreBackup))
+	mux.HandleFunc("GET /api/v1/servers/{id}/sites/{siteId}/ssl", a.requireAuth(a.handleGetSSLStatus))
+	mux.HandleFunc("POST /api/v1/servers/{id}/sites/{siteId}/ssl", a.requireAuth(a.handleIssueSSL))
+	mux.HandleFunc("POST /api/v1/servers/{id}/sites/{siteId}/ssl/custom", a.requireAuth(a.handleInstallCustomSSL))
+	mux.HandleFunc("POST /api/v1/servers/{id}/sites/{siteId}/ssl/renew", a.requireAuth(a.handleRenewSSL))
+	mux.HandleFunc("DELETE /api/v1/servers/{id}/sites/{siteId}/ssl", a.requireAuth(a.handleUninstallSSL))
 	mux.HandleFunc("GET /api/v1/audit", a.requireAuth(a.handleAudit))
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })

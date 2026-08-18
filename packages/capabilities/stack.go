@@ -140,6 +140,24 @@ func phase1LEMPSteps() []installStep {
 			},
 		},
 		{
+			// The Debian/Ubuntu certbot package ships a systemd timer that
+			// auto-renews everything under /etc/letsencrypt twice a day, but
+			// it isn't guaranteed active on every base image (some minimal
+			// cloud images ship services disabled by default). Explicitly
+			// enabling it here is what makes SSL-014 (auto-renewal) a
+			// property of every install rather than something that happens
+			// to work if the image's defaults line up.
+			Name: "certbot auto-renewal timer",
+			Check: func(ctx context.Context) bool {
+				out, _ := run(ctx, "systemctl", "is-active", "certbot.timer")
+				return out == "active"
+			},
+			Run: func(ctx context.Context) error {
+				_, err := run(ctx, "systemctl", "enable", "--now", "certbot.timer")
+				return err
+			},
+		},
+		{
 			Name:  "ufw",
 			Check: func(ctx context.Context) bool { return isPackageInstalled(ctx, "ufw") },
 			Run:   func(ctx context.Context) error { _, err := aptInstall(ctx, "ufw"); return err },

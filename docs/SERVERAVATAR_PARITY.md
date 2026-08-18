@@ -181,6 +181,25 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Known differences**: no backup/recovery codes for 2FA, no login-history UI, no IP allowlisting, no API token management yet.
 - **Reason**: those are listed Phase 2 account-security items (`product-plan.md` §9) not yet built.
 
+### SSL-001 — SSL lifecycle: issue, install custom, status/expiry, renew, uninstall (covers APP-015/016/017)
+- **Category**: Application management — SSL
+- **Documentation page**: Application Management → "SSL"
+- **Short description**: Issue/install a certificate for a site's domain (Let's Encrypt or customer-supplied), see its live status and expiry, force a renewal ahead of schedule, and remove it (reverting the site to plain HTTP).
+- **Expected behavior**: matches ServerAvatar's SSL panel — one certificate per site, automatic renewal once issued via Let's Encrypt, an at-a-glance expiry/issuer view, and a safe path back to HTTP if a certificate needs to come off.
+- **Our implementation**: `ssl.status` (new) reads whichever certificate is actually installed straight off disk (`/etc/letsencrypt/live/<domain>/fullchain.pem` or the custom-cert path) via `openssl x509 -issuer -enddate` — never certbot's own bookkeeping, which can lag a partially-failed renewal — and also reports whether `certbot.timer` is active. `ssl.renew` (new) force-renews one cert-name via `certbot renew --cert-name <domain>` (never a filter-less `certbot renew`, which would touch every domain on the box). `ssl.uninstall` (new) removes the cert (`certbot delete` or removing the custom cert dir) and regenerates the site's vhost from scratch with `writeNginxVhost` — the same function `site.create` uses — rather than trying to surgically strip the SSL block certbot's `--nginx` plugin added, so the result is never a config `nginx -t` could reject. `stack.install` now has an explicit "certbot auto-renewal timer" step (`systemctl enable --now certbot.timer`) so auto-renewal is guaranteed active on every install, not just true when a base image's package defaults happen to enable it.
+- **Frontend**: site-detail view, new "SSL certificate" section — status badge (source + expiring-soon at ≤30 days), issue/upload-custom modals, Renew/Remove actions, manual refresh.
+- **Backend service**: `apps/controlplane/ssl.go` (`handleGetSSLStatus`, `handleIssueSSL`, `handleInstallCustomSSL`, `handleRenewSSL`, `handleUninstallSSL`); persistence via `store.updateSiteSSL`.
+- **API endpoint(s)**: `GET/POST /api/v1/servers/{id}/sites/{siteId}/ssl`, `POST .../ssl/custom`, `POST .../ssl/renew`, `DELETE .../ssl`.
+- **Agent command(s)**: `ssl.issue_letsencrypt` (pre-existing), `ssl.install_custom` (pre-existing), `ssl.status`, `ssl.renew`, `ssl.uninstall` (all three new).
+- **DB tables/models**: `sites` gained `ssl_status`, `ssl_issuer`, `ssl_expires_at`, `ssl_checked_at` (migration in `db.go`, applied to both fresh and existing databases).
+- **Required permission**: authenticated session; every SSL endpoint resolves the domain and site metadata (system user, docroot, app type, PHP version) from the site's own stored record, scoped to `{serverID, siteID}` from the URL — never accepted as free-form request body fields, so a caller can't redirect an SSL operation at a domain or vhost belonging to a different site.
+- **Security considerations**: private keys are written with `0600` permissions and never logged (unchanged from the pre-existing `ssl.install_custom`); `nginx -t` gates every vhost rewrite before reload, same as `site.create`; uninstall's vhost regeneration is deterministic from stored site metadata, not user input.
+- **Test coverage**: `packages/capabilities/ssl_test.go` (domain/system-user/docroot validation, no-certificate-installed JSON shape, openssl enddate layout parsing for both single- and double-digit days), `apps/controlplane/store_test.go` (`TestUpdateSiteSSLRoundTrip`, `TestUpdateSiteSSLRejectsUnknownSite`), `apps/controlplane/http_test.go` (`TestSSLEndpointsRequireARealSite`, `TestIssueSSLRejectsMissingEmail`). Actual certbot issuance/renewal/deletion against a live domain is not exercised in this environment (no public DNS record, no port 80/443 reachable from the internet) — `BLOCKED_EXTERNAL`.
+- **Current status**: `COMPLETE` for everything reachable without a real publicly-resolvable domain (validation, disk-based status reads, vhost regeneration, persistence, UI); `BLOCKED_EXTERNAL` for a real Let's Encrypt issuance/renewal round trip.
+- **Completion date**: 2026-08-18
+- **Known differences**: expiry/status is refreshed on page load and by an explicit "Refresh status" click, not by a standing background poller — there's no proactive "certificate expiring in N days" push notification yet, since that depends on INT-004 (notification channels), still `NOT_STARTED`. Multi-domain (SAN) certificates are not supported — one certificate per site's primary domain only, matching `site.create`'s current one-domain-per-site model (APP-003, also `NOT_STARTED`).
+- **Reason**: notification channels and multi-domain/alias support are both larger, independently-tracked features; bundling either into this pass would have blocked shipping the SSL lifecycle gap on unrelated work.
+
 ---
 
 ## 2. Summary tables — not yet started
@@ -252,8 +271,9 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | APP-012 | Additional one-click installers (Laravel, Joomla, Mautic, Moodle, PrestaShop, Akaunting, Nextcloud, Statamic, Craft CMS, n8n, Node-RED, Uptime Kuma, NodeBB) | `NOT_STARTED` | WordPress is the only one-click installer today |
 | APP-013 | Log Monitoring Suite (traffic analytics) | `NOT_STARTED` | |
 | APP-014 | Application-level WAF / AI-bot blocker | `NOT_STARTED` | |
-| APP-015 | Custom SSL upload | `PARTIAL` | `ssl.install_custom` capability exists agent-side; no dedicated dashboard UI |
-| APP-016 | Let's Encrypt SSL + auto-renewal | `PARTIAL` | `ssl.issue_letsencrypt` implemented; certbot's own renewal timer not yet wired up by `stack.install` |
+| APP-015 | Custom SSL upload | `COMPLETE` | See SSL-001 detail block in §1 |
+| APP-016 | Let's Encrypt SSL + auto-renewal | `COMPLETE` | See SSL-001 detail block in §1 |
+| APP-017 | SSL status/expiry monitoring, force-renew, uninstall | `COMPLETE` | See SSL-001 detail block in §1 |
 
 ### Database management — not yet started (DB-*)
 | ID | Feature | Status | Notes |
@@ -295,9 +315,9 @@ capability surface (per task-brief §3/§101), not just what's already built.
 
 | Status | Count (detailed entries) | Count (summary-table rows) |
 |---|---|---|
-| `COMPLETE` | 3 (SRV-001, BAK-002, ACC-001) | 1 (PROV-006) |
-| `PARTIAL` | 3 (SRV-002, APP-001, APP-002, DB-001, BAK-001 — 5 total, see note) | 6 |
-| `NOT_STARTED` | 0 | ~55 |
+| `COMPLETE` | 4 (SRV-001, BAK-002, ACC-001, SSL-001) | 4 (PROV-006, APP-015, APP-016, APP-017) |
+| `PARTIAL` | 3 (SRV-002, APP-001, APP-002, DB-001, BAK-001 — 5 total, see note) | 3 (SRV-004, SRV-008, APP-011) |
+| `NOT_STARTED` | 0 | ~48 |
 | `BLOCKED_EXTERNAL` | 0 (sub-scoped within BAK-001/BAK-002's db/full-scope MariaDB verification) | 0 |
 | `INTENTIONALLY_NOT_APPLICABLE` | 0 | 1 |
 
@@ -313,8 +333,22 @@ and `product-plan.md` for the estimates behind it.
 
 ## 4. BLOCKED_EXTERNAL detail
 
-No feature is currently blocked *purely* on missing external credentials in a way that
-would justify a top-level `BLOCKED_EXTERNAL` status (the sub-scoped MariaDB gap in
+- **SSL-001** (SSL lifecycle) — sub-scoped, same pattern as BAK-001/BAK-002 below: every
+  code path reachable in this environment (validation, `ssl.status`'s disk-based cert
+  read, `ssl.uninstall`'s vhost regeneration, persistence, dashboard UI) is implemented
+  and tested. What's `BLOCKED_EXTERNAL` is the actual Let's Encrypt ACME round trip
+  (`certbot --nginx` / `certbot renew` / `certbot delete` against Let's Encrypt's real
+  servers) — that needs a domain with a public DNS A record pointed at a real reachable
+  server with ports 80/443 open, which this development environment doesn't have. What's
+  already tested: `certInfo`'s openssl-output parsing (both single- and double-digit-day
+  date formats), every input-validation rejection path, and the full HTTP/store round
+  trip with a stubbed "no certificate installed" state. Exact remaining test: run
+  `stack.install` + `site.create` + `ssl.issue_letsencrypt` against a real Ubuntu 24.04
+  VPS with a real domain per `INSTALLATION.md`'s real-install checklist, then verify
+  `certbot.timer` performs an actual unattended renewal.
+
+No other feature is currently blocked *purely* on missing external credentials in a way
+that would justify a top-level `BLOCKED_EXTERNAL` status (the sub-scoped MariaDB gap in
 BAK-001/BAK-002 is an environment limitation of *this* session, not a missing
 credential — a real Ubuntu host with MariaDB installed, per `INSTALLATION.md`, resolves
 it without any external account). This section will be populated as provider
@@ -359,3 +393,10 @@ establish the tracking process and close the single highest-priority gap
   BAK-001/BAK-002 reflecting this session's backup-restore implementation. ~60
   capabilities enumerated overall (detailed + summary), the large majority honestly
   `NOT_STARTED`.
+- **2026-08-18**: closed the SSL lifecycle gap `SYSTEM.md` had flagged as the next Phase 1
+  item. Added `ssl.status`/`ssl.renew`/`ssl.uninstall` agent capabilities, wired
+  `certbot.timer` into `stack.install` so auto-renewal is guaranteed rather than
+  incidental, added control-plane persistence (`sites.ssl_*` columns) and
+  `GET/POST/DELETE .../sites/{id}/ssl` endpoints, and a dashboard SSL panel. New SSL-001
+  detail block in §1; APP-015/016/017 moved from `PARTIAL`/no-UI to `COMPLETE` (real
+  Let's Encrypt issuance against a live domain remains `BLOCKED_EXTERNAL`, see §4).

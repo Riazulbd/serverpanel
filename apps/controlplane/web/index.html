@@ -65,6 +65,9 @@
   .badge.connected { background: var(--ok-bg); color: var(--ok); }
   .badge.offline { background: var(--warn-bg); color: var(--warn); }
   .badge.disconnected, .badge.pending { background: var(--gray-bg); color: var(--muted); }
+  .badge.letsencrypt, .badge.custom { background: var(--ok-bg); color: var(--ok); }
+  .badge.expiring-soon { background: var(--warn-bg); color: var(--warn); }
+  .badge.none { background: var(--gray-bg); color: var(--muted); }
   .tag { display: inline-block; background: var(--gray-bg); border-radius: 6px; padding: 1px 8px; margin-right: 4px; font-size: 12px; color: var(--muted); }
   pre.code {
     background: #0f172a; color: #e2e8f0; padding: 14px; border-radius: 8px; overflow-x: auto;
@@ -182,6 +185,13 @@
       <div class="card">
         <h2 id="siteDetailDomain" style="margin:0 0 4px"></h2>
         <p class="muted" id="siteDetailMeta" style="margin:0 0 20px"></p>
+
+        <div class="section-title" style="display:flex;justify-content:space-between;align-items:center">
+          <span>SSL certificate</span>
+          <button onclick="refreshSSL()">Refresh status</button>
+        </div>
+        <div id="sslResult" class="task-result hidden"></div>
+        <div id="sslPanel" class="muted">Checking...</div>
 
         <div class="section-title" style="display:flex;justify-content:space-between;align-items:center">
           <span>Backups</span>
@@ -476,6 +486,7 @@ async function openSiteDetail(siteId) {
       site.AppType + (site.PHPVersion ? (' · PHP ' + site.PHPVersion) : '') + ' · ' + site.Status;
   }
   await refreshBackups();
+  await refreshSSL();
 }
 
 async function refreshBackups() {
@@ -549,6 +560,148 @@ async function createBackup() {
   } catch (e) {
     status.textContent = '';
     err.textContent = e.message;
+  }
+}
+
+function sslEndpoint(suffix) {
+  return API + '/servers/' + state.selectedServerId + '/sites/' + state.selectedSiteId + '/ssl' + (suffix || '');
+}
+
+async function refreshSSL() {
+  const el = document.getElementById('sslPanel');
+  el.textContent = 'Checking...';
+  try {
+    const status = await api(sslEndpoint(''));
+    renderSSL(status);
+  } catch (e) {
+    el.textContent = 'Could not check SSL status: ' + e.message;
+  }
+}
+
+function renderSSL(status) {
+  const el = document.getElementById('sslPanel');
+  if (!status || !status.installed) {
+    el.innerHTML = '<span class="badge none">No certificate</span> ' +
+      '<div class="actions-grid" style="margin-top:12px">' +
+      '<button class="primary" onclick="openIssueSSLModal()">Issue Let\'s Encrypt certificate</button>' +
+      '<button onclick="openCustomSSLModal()">Upload custom certificate</button>' +
+      '</div>';
+    return;
+  }
+  const days = status.days_remaining;
+  const expiringSoon = days <= 30;
+  const badgeClass = expiringSoon ? 'expiring-soon' : (status.source === 'letsencrypt' ? 'letsencrypt' : 'custom');
+  const sourceLabel = status.source === 'letsencrypt' ? "Let's Encrypt" : 'Custom';
+  el.innerHTML =
+    '<span class="badge ' + badgeClass + '">' + escapeHtml(sourceLabel) + '</span> ' +
+    '<span class="muted">expires ' + new Date(status.not_after).toLocaleDateString() + ' (' + days + ' days)' +
+    (status.source === 'letsencrypt' ? (status.auto_renew_active ? ', auto-renew on' : ', auto-renew OFF') : '') +
+    '</span>' +
+    '<div class="actions-grid" style="margin-top:12px">' +
+    (status.source === 'letsencrypt' ? '<button onclick="renewSSL()">Renew now</button>' : '') +
+    '<button class="danger" onclick="uninstallSSL()">Remove certificate</button>' +
+    '</div>';
+}
+
+function sslBusy(msg) {
+  const box = document.getElementById('sslResult');
+  box.className = 'task-result running';
+  box.textContent = msg;
+  box.classList.remove('hidden');
+}
+function sslOk(msg) {
+  const box = document.getElementById('sslResult');
+  box.className = 'task-result ok';
+  box.textContent = msg;
+}
+function sslFail(msg) {
+  const box = document.getElementById('sslResult');
+  box.className = 'task-result fail';
+  box.textContent = msg;
+}
+
+function openIssueSSLModal() {
+  const root = document.getElementById('modalRoot');
+  root.innerHTML = `
+    <div class="modal-backdrop" onclick="if(event.target===this) closeModal()">
+      <div class="modal">
+        <h2>Issue Let's Encrypt certificate</h2>
+        <p class="muted">The domain must already resolve to this server's IP address before Let's Encrypt can validate it.</p>
+        <div class="field"><label>Contact email (for renewal/urgency notices)</label><input id="sslEmail" placeholder="admin@example.com"></div>
+        <button class="primary" style="width:100%" onclick="issueSSL()">Issue certificate</button>
+        <div class="error" id="sslModalError"></div>
+      </div>
+    </div>`;
+}
+
+async function issueSSL() {
+  const email = document.getElementById('sslEmail').value.trim();
+  const err = document.getElementById('sslModalError');
+  err.textContent = '';
+  if (!email) { err.textContent = 'Email is required.'; return; }
+  closeModalNoRefresh();
+  sslBusy('Requesting certificate from Let\'s Encrypt... this can take up to a minute.');
+  try {
+    await api(sslEndpoint(''), {method: 'POST', body: JSON.stringify({email})});
+    sslOk('Certificate issued.');
+    await refreshSSL();
+  } catch (e) {
+    sslFail('Issuance failed: ' + e.message);
+  }
+}
+
+function openCustomSSLModal() {
+  const root = document.getElementById('modalRoot');
+  root.innerHTML = `
+    <div class="modal-backdrop" onclick="if(event.target===this) closeModal()">
+      <div class="modal">
+        <h2>Upload custom certificate</h2>
+        <div class="field"><label>Certificate (PEM, including any intermediate chain)</label><textarea id="sslCertPem" rows="6" style="width:100%;font-family:monospace"></textarea></div>
+        <div class="field"><label>Private key (PEM)</label><textarea id="sslKeyPem" rows="6" style="width:100%;font-family:monospace"></textarea></div>
+        <button class="primary" style="width:100%" onclick="installCustomSSL()">Install certificate</button>
+        <div class="error" id="sslModalError"></div>
+      </div>
+    </div>`;
+}
+
+async function installCustomSSL() {
+  const certPem = document.getElementById('sslCertPem').value.trim();
+  const keyPem = document.getElementById('sslKeyPem').value.trim();
+  const err = document.getElementById('sslModalError');
+  err.textContent = '';
+  if (!certPem || !keyPem) { err.textContent = 'Both certificate and private key are required.'; return; }
+  closeModalNoRefresh();
+  sslBusy('Installing custom certificate...');
+  try {
+    await api(sslEndpoint('/custom'), {method: 'POST', body: JSON.stringify({cert_pem: certPem, key_pem: keyPem})});
+    sslOk('Custom certificate installed.');
+    await refreshSSL();
+  } catch (e) {
+    sslFail('Installation failed: ' + e.message);
+  }
+}
+
+async function renewSSL() {
+  if (!confirm('Force-renew this certificate now, ahead of its normal schedule?')) return;
+  sslBusy('Renewing certificate...');
+  try {
+    await api(sslEndpoint('/renew'), {method: 'POST'});
+    sslOk('Certificate renewed.');
+    await refreshSSL();
+  } catch (e) {
+    sslFail('Renewal failed: ' + e.message);
+  }
+}
+
+async function uninstallSSL() {
+  if (!confirm('Remove this certificate and revert the site to plain HTTP?')) return;
+  sslBusy('Removing certificate...');
+  try {
+    await api(sslEndpoint(''), {method: 'DELETE'});
+    sslOk('Certificate removed.');
+    await refreshSSL();
+  } catch (e) {
+    sslFail('Removal failed: ' + e.message);
   }
 }
 

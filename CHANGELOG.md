@@ -2,6 +2,40 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-18 — SSL lifecycle: status, force-renew, uninstall, guaranteed auto-renewal
+
+- **Added `ssl.status`, `ssl.renew`, `ssl.uninstall`** agent capabilities
+  (`packages/capabilities/ssl.go`), closing the SSL gap `SYSTEM.md` had flagged as the
+  next Phase 1 item. `ssl.status` reads whichever certificate is actually installed
+  straight off disk (`openssl x509 -issuer -enddate` against the Let's Encrypt live path
+  or the custom-cert path — never certbot's own bookkeeping, which can lag a partially
+  failed renewal) and reports issuer/expiry/days-remaining plus whether `certbot.timer`
+  is active. `ssl.renew` force-renews a single cert-name (`certbot renew --cert-name`,
+  never the filter-less form that would touch every domain on the box). `ssl.uninstall`
+  removes the certificate and regenerates the site's vhost from scratch via the same
+  `writeNginxVhost` `site.create` uses, rather than surgically editing what certbot's
+  `--nginx` plugin wrote — so the result can never be a config `nginx -t` rejects.
+- **`stack.install` now explicitly enables `certbot.timer`** (`systemctl enable --now`,
+  idempotent) instead of relying on the package's default state, so auto-renewal is a
+  guaranteed property of every install rather than something that happens to work if a
+  base image's defaults line up.
+- Wired the full lifecycle into the control plane: new `apps/controlplane/ssl.go`
+  (`GET`/`POST /api/v1/servers/{id}/sites/{siteId}/ssl`, `POST .../ssl/custom`,
+  `POST .../ssl/renew`, `DELETE .../ssl`), a `sites.ssl_status`/`ssl_issuer`/
+  `ssl_expires_at`/`ssl_checked_at` migration (idempotent, applies to both fresh and
+  existing databases), and a new "SSL certificate" panel per site in the dashboard
+  (status badge with an expiring-soon threshold, issue/upload-custom modals, renew/
+  remove actions).
+- Added 7 new capability-layer tests (domain/system-user/docroot validation, the
+  no-certificate-installed JSON shape, and both single- and double-digit-day openssl
+  `-enddate` layout parsing — a subtle format that silently mis-parses expiry if gotten
+  wrong) and 4 new control-plane tests (SSL store round trip, unknown-site rejection,
+  HTTP 404/validation boundaries for all five endpoints). Full suite: 73 test functions,
+  `go vet`/`gofmt` clean.
+- Updated `SYSTEM.md` (Phase 1 status) and `docs/SERVERAVATAR_PARITY.md` (new SSL-001
+  detail block; APP-015/016/017 moved to `COMPLETE`, real Let's Encrypt issuance against
+  a live domain recorded as `BLOCKED_EXTERNAL` pending a real reachable server).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

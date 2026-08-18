@@ -239,6 +239,77 @@ func TestBackupEndpointsRequireARealSite(t *testing.T) {
 	}
 }
 
+func TestSSLEndpointsRequireARealSite(t *testing.T) {
+	secureCookies = false
+	defer func() { secureCookies = true }()
+
+	a := newTestAPIServer(t)
+	h := a.routes()
+
+	doJSON(t, h, "POST", "/api/v1/auth/signup", map[string]string{
+		"Email": "ops-ssl@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	rec := doJSON(t, h, "POST", "/api/v1/auth/login", map[string]string{
+		"Email": "ops-ssl@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	cookie := sessionCookie(rec)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers", map[string]any{"Name": "web-ssl"}, cookie)
+	var created struct {
+		ServerID string `json:"server_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+
+	base := "/api/v1/servers/" + created.ServerID + "/sites/site_nonexistent/ssl"
+	for _, tc := range []struct {
+		method, path string
+		body         any
+	}{
+		{"GET", base, nil},
+		{"POST", base, map[string]any{"email": "admin@example.com"}},
+		{"POST", base + "/custom", map[string]any{"cert_pem": "x", "key_pem": "y"}},
+		{"POST", base + "/renew", nil},
+		{"DELETE", base, nil},
+	} {
+		rec := doJSON(t, h, tc.method, tc.path, tc.body, cookie)
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("%s %s: status = %d, want 404", tc.method, tc.path, rec.Code)
+		}
+	}
+}
+
+func TestIssueSSLRejectsMissingEmail(t *testing.T) {
+	secureCookies = false
+	defer func() { secureCookies = true }()
+
+	a := newTestAPIServer(t)
+	h := a.routes()
+
+	doJSON(t, h, "POST", "/api/v1/auth/signup", map[string]string{
+		"Email": "ops-ssl2@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	rec := doJSON(t, h, "POST", "/api/v1/auth/login", map[string]string{
+		"Email": "ops-ssl2@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	cookie := sessionCookie(rec)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers", map[string]any{"Name": "web-ssl2"}, cookie)
+	var created struct {
+		ServerID string `json:"server_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+
+	site, err := a.store.createSite(created.ServerID, "ssl-missing-email.example.com", "site_x", "/home/sites/site_x/public", "static", "")
+	if err != nil {
+		t.Fatalf("createSite: %v", err)
+	}
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/sites/"+site.ID+"/ssl", map[string]any{}, cookie)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("issue SSL without email: status = %d, want 400, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestCreateBackupRejectsInvalidScope(t *testing.T) {
 	secureCookies = false
 	defer func() { secureCookies = true }()

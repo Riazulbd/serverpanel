@@ -263,6 +263,54 @@ func TestGetSiteIsScopedToServerID(t *testing.T) {
 	}
 }
 
+func TestUpdateSiteSSLRoundTrip(t *testing.T) {
+	st := newTestStore(t)
+	serverID, _, _ := st.createServer("web-ssl", "", nil, time.Hour, "admin@example.com")
+	site, err := st.createSite(serverID, "ssl.example.com", "sp_ssl", "/home/sites/sp_ssl/public", "static", "")
+	if err != nil {
+		t.Fatalf("createSite: %v", err)
+	}
+	if site.SSLStatus != "none" {
+		t.Fatalf("new site SSLStatus = %q, want \"none\"", site.SSLStatus)
+	}
+
+	expires := time.Now().UTC().Add(89 * 24 * time.Hour).Truncate(time.Second)
+	if err := st.updateSiteSSL(serverID, site.ID, "letsencrypt", "Let's Encrypt", &expires); err != nil {
+		t.Fatalf("updateSiteSSL: %v", err)
+	}
+
+	got, ok := st.getSite(serverID, site.ID)
+	if !ok {
+		t.Fatal("getSite: site vanished")
+	}
+	if got.SSLStatus != "letsencrypt" || got.SSLIssuer != "Let's Encrypt" {
+		t.Fatalf("SSLStatus/SSLIssuer = %q/%q, want letsencrypt/Let's Encrypt", got.SSLStatus, got.SSLIssuer)
+	}
+	if got.SSLExpiresAt == nil || !got.SSLExpiresAt.Equal(expires) {
+		t.Fatalf("SSLExpiresAt = %v, want %v", got.SSLExpiresAt, expires)
+	}
+	if got.SSLCheckedAt == nil {
+		t.Fatal("SSLCheckedAt should be set after updateSiteSSL")
+	}
+
+	// Uninstalling clears expiry/issuer but keeps ssl_checked_at meaningful.
+	if err := st.updateSiteSSL(serverID, site.ID, "none", "", nil); err != nil {
+		t.Fatalf("updateSiteSSL (uninstall): %v", err)
+	}
+	got, _ = st.getSite(serverID, site.ID)
+	if got.SSLStatus != "none" || got.SSLExpiresAt != nil {
+		t.Fatalf("after uninstall: SSLStatus=%q SSLExpiresAt=%v, want none/nil", got.SSLStatus, got.SSLExpiresAt)
+	}
+}
+
+func TestUpdateSiteSSLRejectsUnknownSite(t *testing.T) {
+	st := newTestStore(t)
+	serverID, _, _ := st.createServer("web-ssl2", "", nil, time.Hour, "admin@example.com")
+	if err := st.updateSiteSSL(serverID, "site_nonexistent", "letsencrypt", "x", nil); err == nil {
+		t.Fatal("expected updateSiteSSL to reject an unknown site id")
+	}
+}
+
 func TestBackupCreateListGetRoundTrip(t *testing.T) {
 	st := newTestStore(t)
 	serverID, _, _ := st.createServer("web-7", "", nil, time.Hour, "admin@example.com")
