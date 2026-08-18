@@ -172,6 +172,16 @@ func (s *store) markIssuedCert(serverID, serial string) {
 	s.log(serverID, "", "agent.registered", fmt.Sprintf("cert_serial=%s", serial))
 }
 
+// markRenewedCert records the new cert serial issued for an already-enrolled
+// server via the in-session renewal flow (see gateway.go handleRenew). It
+// deliberately leaves status untouched — unlike markIssuedCert, the agent
+// stays connected throughout a renewal, so there is no offline transition
+// to record here.
+func (s *store) markRenewedCert(serverID, serial string) {
+	s.db.Exec(`UPDATE servers SET cert_serial = ? WHERE id = ?`, serial, serverID)
+	s.log(serverID, "", "agent.cert_renewed", fmt.Sprintf("cert_serial=%s", serial))
+}
+
 func (s *store) isRevoked(serial string) bool {
 	var n int
 	s.db.QueryRow(`SELECT COUNT(1) FROM revoked_certs WHERE serial = ?`, serial).Scan(&n)

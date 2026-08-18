@@ -54,17 +54,35 @@ Properties this guarantees:
   certificate issued by the internal Agent CA, and the agent verifies the gateway's
   certificate/pinned CA to prevent MITM or connecting to a spoofed endpoint.
   **Implemented as described** — see `apps/controlplane/gateway.go` `handleConn`.
-- Client certs are **short-lived** (e.g. 30–90 days) and **auto-rotated**: before
-  expiry, the agent requests renewal authenticated by its current still-valid cert (no
-  shared long-lived secret is ever reused for renewal). If a renewal window is missed
-  (agent offline past expiry), the agent falls back to a manual re-registration flow
-  requiring a fresh bootstrap token from the dashboard — this is an intentional
-  fail-closed behavior, not silent re-trust.
-  **Not yet implemented**: certs are issued with a fixed 30-day TTL
-  (`apps/controlplane/http.go` `handleRegister`) and there is no renewal
-  capability/endpoint yet — an agent whose cert expires must be manually
-  re-registered with a fresh bootstrap token today. Auto-rotation before expiry is
-  tracked as a known gap in `SYSTEM.md`.
+- Client certs are **short-lived** (30 days) and **auto-rotated**: before expiry, the
+  agent requests renewal authenticated by its current still-valid cert (no shared
+  long-lived secret is ever reused for renewal). If a renewal window is missed (agent
+  offline past expiry), the agent falls back to a manual re-registration flow requiring
+  a fresh bootstrap token from the dashboard — this is an intentional fail-closed
+  behavior, not silent re-trust.
+  **Implemented as described** — a new `MsgRenew`/`MsgRenewed` message pair rides the
+  same already-established mTLS session (`packages/proto/proto.go`); the agent
+  (`apps/agent/renew.go`) checks its current cert's `NotAfter` once an hour (plus once
+  immediately on connect) and, once within 7 days of expiry, generates a fresh
+  ECDSA keypair, sends a CSR over the live connection, and atomically persists the
+  gateway's response to disk before switching its in-memory identity over
+  (`persistRenewedIdentity`, temp-file + rename, so a crash mid-renewal can never leave
+  a half-written cert/key pair). The gateway (`apps/controlplane/gateway.go`
+  `handleRenew`) re-derives `server_id` from the *existing*, already-verified client
+  certificate on the connection — never from the CSR's subject, matching
+  `handleRegister`'s trust model exactly — and signs a new 30-day cert under the same
+  `server_id`. **Deliberate design choice**: the previous certificate is left valid
+  (not proactively revoked) until its own natural expiry, so a crash or lost response
+  between issuance and the agent durably persisting the new cert never permanently
+  bricks the agent's connectivity — the accepted cost is a bounded (≤30-day) overlap
+  window where two certs for the same `server_id` are both valid, not an open-ended
+  one. If the connection drops mid-renewal, the next successful reconnect starts a
+  fresh renewal attempt (see `apps/agent/renew.go` `renewalLoop` doc comment). Covered
+  by `apps/controlplane/gateway_test.go` (full mTLS round-trip: connect with the old
+  cert, renew, verify the new cert's CN/serial/expiry and that the store's
+  `cert_serial` and the old cert's non-revoked status are both correct) and
+  `apps/agent/renew_test.go` (expiry parsing, atomic file replacement, in-memory
+  identity update).
 - The Agent CA's private key is held in a dedicated, tightly access-controlled service
   (e.g. `step-ca` or HSM-backed KMS in later stages), separate from the general
   application database, so a control-plane app-tier compromise doesn't automatically

@@ -18,16 +18,39 @@ const (
 	MsgTask      MessageType = "task"       // gateway -> agent, requests a capability run
 	MsgTaskEvent MessageType = "task_event" // agent -> gateway, progress/result of a task
 	MsgAck       MessageType = "ack"        // either direction, generic acknowledgement
+	MsgRenew     MessageType = "renew"      // agent -> gateway, requests a fresh client cert before the current one expires
+	MsgRenewed   MessageType = "renewed"    // gateway -> agent, carries the newly issued certificate (or a rejection reason)
 )
 
 // Envelope is the outer message wrapper. Exactly one of the typed payload
 // fields is populated, matching Type.
 type Envelope struct {
-	Type      MessageType `json:"type"`
-	Hello     *Hello      `json:"hello,omitempty"`
-	Heartbeat *Heartbeat  `json:"heartbeat,omitempty"`
-	Task      *Task       `json:"task,omitempty"`
-	TaskEvent *TaskEvent  `json:"task_event,omitempty"`
+	Type      MessageType    `json:"type"`
+	Hello     *Hello         `json:"hello,omitempty"`
+	Heartbeat *Heartbeat     `json:"heartbeat,omitempty"`
+	Task      *Task          `json:"task,omitempty"`
+	TaskEvent *TaskEvent     `json:"task_event,omitempty"`
+	Renew     *RenewRequest  `json:"renew,omitempty"`
+	Renewed   *RenewResponse `json:"renewed,omitempty"`
+}
+
+// RenewRequest is sent by an agent over its already-established mTLS
+// session to obtain a fresh client certificate before its current one
+// expires. The gateway derives the server_id from the *existing*,
+// already-verified client certificate on this connection (the same way it
+// does for every other in-session message) — CSRPEM only carries a public
+// key, never an identity claim, matching how the one-time /agents/register
+// bootstrap flow treats a CSR's subject as ignored/untrusted input.
+type RenewRequest struct {
+	CSRPEM string `json:"csr_pem"`
+}
+
+// RenewResponse carries the newly issued certificate back to the agent, or
+// a rejection reason (e.g. the gateway is shutting down the session mid-
+// renewal). The agent must not persist a partially-populated response.
+type RenewResponse struct {
+	CertPEM string `json:"cert_pem,omitempty"`
+	Error   string `json:"error,omitempty"`
 }
 
 // Hello is sent by the agent immediately after the mTLS handshake completes,

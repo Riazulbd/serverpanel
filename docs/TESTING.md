@@ -2,7 +2,7 @@
 
 ## 1. Current automated coverage
 
-`go test ./...` — 61 test functions across two packages, all passing, no `-race`
+`go test ./...` — 66 test functions across three packages, all passing, no `-race`
 failures, `go vet` clean, `gofmt -l` clean:
 
 ```
@@ -15,7 +15,8 @@ go test ./... -race
 
 | Package | Tests | What they cover |
 |---|---|---|
-| `apps/controlplane` | 27 | Auth/session lifecycle (create, MFA-verify, expiry, delete), bcrypt password rules, email normalization/uniqueness, TOTP round-trip/skew/rejection, bootstrap-token single-use/expiry/unknown-token, server create/list/get, revocation (cert-serial blocking + status transitions, including that a stray disconnect can't resurrect a revoked server), heartbeat recording, audit-log append, site create/list, `getSite`'s cross-server scoping, backup create/list/get round trip and its own cross-server scoping, and 6 full HTTP integration tests through `routes()` with `httptest` covering signup→login→protected-route, the full 2FA enroll→logout→login→MFA-challenge→access flow, server create/list/revoke, agent registration with a bad token, the backup endpoints' not-found boundaries, and backup-request validation (bad scope, missing `db_name`, and confirming validation runs before dispatch) |
+| `apps/controlplane` | 28 | Auth/session lifecycle (create, MFA-verify, expiry, delete), bcrypt password rules, email normalization/uniqueness, TOTP round-trip/skew/rejection, bootstrap-token single-use/expiry/unknown-token, server create/list/get, revocation (cert-serial blocking + status transitions, including that a stray disconnect can't resurrect a revoked server), heartbeat recording, audit-log append, site create/list, `getSite`'s cross-server scoping, backup create/list/get round trip and its own cross-server scoping, 6 full HTTP integration tests through `routes()` with `httptest` covering signup→login→protected-route, the full 2FA enroll→logout→login→MFA-challenge→access flow, server create/list/revoke, agent registration with a bad token, the backup endpoints' not-found boundaries, and backup-request validation (bad scope, missing `db_name`, and confirming validation runs before dispatch), and one real mTLS integration test (`gateway_test.go`) that dials `gateway.listenAndServe` directly (no `httptest` — this is a raw TLS listener, not HTTP) as an agent holding a CA-issued cert, completes the `hello`/`ack` handshake, requests an in-session certificate renewal, and asserts the renewed cert's CN/serial/expiry, that the store's `cert_serial` was updated, that the *old* serial was deliberately **not** revoked, and that the still-open connection (authenticated by the old cert) keeps working afterward |
+| `apps/agent` | 4 | Certificate-expiry parsing (`certExpiry`, including a malformed-PEM rejection case), `atomicWriteFile`'s temp-file+rename replacement (no `.tmp` left behind), and `persistRenewedIdentity`'s disk-and-in-memory consistency (`identity.snapshot`) after a renewal |
 | `packages/capabilities` | 34 | Capability dispatch (unknown name rejected, `system.ping` works, nil `Progress` doesn't panic, the registry has a handler for every declared `Cap*` constant), `service.control`'s allow-list boundary (unit, action, and an explicit shell-metacharacter-injection attempt, all rejected before `systemctl` is ever invoked), the file manager's path-traversal and symlink-escape defenses (`resolveScopedPath`), oversized-read/write rejection, refusal to delete the site root itself, a real list+write round trip against a real filesystem, log redaction (token/password query params, `Authorization: Bearer`/`Basic`), `logs.tail`'s input validation, domain-name validation (including injection-shaped inputs), `systemUserForDomain`'s bounding/sanitization, the deterministic php-fpm-pool/socket/vhost path builders, `backup.run`'s scope validation and a real files-backup-and-checksum round trip, and `backup.restore`'s archive-location/checksum validation, a real files backup→corrupt→restore round trip (with a real throwaway system user, verifying both content restoration and pre-restore checkpoint creation), and `extractTarGzSafely`'s rejection of path-traversal entries, absolute-path entries, and oversized archives |
 
 None of this is mocked where a cheap real implementation was possible: sessions/users/
@@ -32,8 +33,14 @@ Capabilities that require real system services this environment can't safely or
 meaningfully fake are **not** exercised by the automated suite:
 `stack.install` (apt/systemd), `app.wordpress_install` (real `wp-cli` + a running
 MariaDB), `ssl.issue_letsencrypt` (real ACME/public DNS), `db.create/delete/list`
-(a running MariaDB), `service.control`'s actual `systemctl` invocation, and the agent's
-registration/connect/reconnect loop against a live gateway. `backup.run`'s and
+(a running MariaDB), and `service.control`'s actual `systemctl` invocation. The mTLS
+transport/renewal protocol itself *is* exercised against a real, live
+`gateway.listenAndServe` (`apps/controlplane/gateway_test.go`) — handshake, `hello`/
+`ack`, and certificate renewal all run over a real TLS socket, not a mock — but the
+actual `apps/agent` binary's `main.go` reconnect/backoff loop and its
+`register`/`renewalLoop` goroutines are not invoked by any automated test (agent-side
+logic is unit-tested piecemeal in `apps/agent/renew_test.go` instead, since `apps/agent`
+is a `main` package the control-plane tests can't import). `backup.run`'s and
 `backup.restore`'s **files** scope are exercised for real (real files, real archive,
 real throwaway system user, real `chown`); their **db**/**full** scope (real
 `mysqldump`/`mysql` against a running MariaDB) is not — this environment doesn't run

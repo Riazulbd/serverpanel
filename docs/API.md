@@ -160,6 +160,8 @@ connection carries newline-delimited JSON `Envelope`s in both directions
 {"type": "task", "task": {"id": "...", "capability": "...", "params": {}, "issued_at": "..."}}
 {"type": "task_event", "task_event": {"task_id": "...", "status": "queued|running|succeeded|failed|rejected", "message": "...", "detail": "...", "at": "..."}}
 {"type": "ack"}
+{"type": "renew", "renew": {"csr_pem": "..."}}
+{"type": "renewed", "renewed": {"cert_pem": "...", "error": ""}}
 ```
 
 Flow: gateway accepts → verifies cert → sends `ack` → agent sends `hello`, then
@@ -170,6 +172,20 @@ HTTP handler) until it sees a terminal event for the task ID it sent, or its con
 deadline expires. There is no message type for a free-form command — `capability` must
 be a name in `packages/capabilities`'s fixed registry, or the agent returns `rejected`
 without executing anything.
+
+**Certificate renewal** (`renew`/`renewed`): once an hour, and once immediately on
+connect, the agent (`apps/agent/renew.go`) checks its current client cert's expiry; once
+within 7 days of the fixed 30-day TTL, it generates a fresh keypair and sends a `renew`
+with a CSR over the *existing, already-authenticated* session — no bootstrap token
+involved. The gateway (`handleRenew` in `apps/controlplane/gateway.go`) re-derives
+`server_id` from the connection's already-verified peer certificate (never from the
+CSR's subject) and signs a new 30-day cert for that same `server_id`, returning it in
+`renewed.cert_pem`, or a reason in `renewed.error` if signing failed. The previous
+certificate is deliberately left un-revoked — it simply expires naturally — so a crash
+between the agent receiving the new cert and durably persisting it to disk never
+permanently locks the agent out (see `SECURITY.md` §2 for the full rationale). If the
+connection drops before a renewal completes, or the gateway rejects it, the next
+successful reconnect's `renewalLoop` retries from scratch.
 
 ## 4. Capability reference
 

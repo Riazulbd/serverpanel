@@ -2,6 +2,43 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-18 — Agent certificate auto-renewal
+
+- **Implemented in-session agent certificate auto-renewal**, closing the top item in
+  the known-limitations list (`SYSTEM.md` §21) and the pre-planned-but-unbuilt design
+  in `SECURITY.md` §2: agent client certs were issued with a fixed 30-day TTL and no
+  renewal path existed, so every agent would silently lose connectivity roughly a
+  month after enrollment, requiring a human to generate a fresh bootstrap token and
+  manually re-register it — a real production correctness/availability defect, not a
+  cosmetic gap.
+- Added a `renew`/`renewed` message pair to the agent↔gateway wire protocol
+  (`packages/proto/proto.go`), riding the *existing* mTLS session rather than adding a
+  new endpoint: the gateway (`apps/controlplane/gateway.go` `handleRenew`) re-derives
+  `server_id` from the connection's already-verified peer certificate — never from the
+  agent-supplied CSR's subject — and signs a fresh 30-day cert under that same
+  `server_id` (`store.markRenewedCert`). The agent (`apps/agent/renew.go`) checks its
+  current cert's expiry once an hour (plus once on connect) and requests renewal once
+  within 7 days of expiring, then durably persists the response via a temp-file+rename
+  before swapping its in-memory identity over, so a crash mid-renewal can never leave a
+  half-written cert/key pair or lose the agent's only working identity.
+- **Deliberate design choice**: the previous certificate is left un-revoked after
+  renewal rather than proactively revoked, so a lost renewal response or a crash before
+  the agent durably persists the new cert can never permanently brick its connectivity
+  — the accepted cost is a bounded (≤30-day) window where two certs for the same
+  `server_id` are simultaneously valid, not an open-ended one.
+- Added `apps/controlplane/gateway_test.go`, the first automated test to dial a real,
+  live `gateway.listenAndServe` mTLS listener directly (not `httptest`, since the
+  gateway is a raw TLS socket, not HTTP): connects as an agent with a CA-issued cert,
+  completes the handshake/ack, requests renewal, and asserts the new cert's CN/serial/
+  expiry, the store's updated `cert_serial`, that the old serial was **not** revoked,
+  and that the still-open old-cert-authenticated connection keeps working afterward.
+  Added `apps/agent/renew_test.go` (expiry parsing, atomic file replacement,
+  in-memory identity consistency) — the first tests for `apps/agent`, previously
+  untested. Full suite: 66 test functions across three packages, `go vet`/`gofmt`/
+  `go test -race` all clean.
+- Updated `SECURITY.md` §2, `API.md` §3, `SYSTEM.md`, `TESTING.md`, and
+  `SERVERAVATAR_PARITY.md` (SRV-001) to reflect renewal as implemented and tested.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

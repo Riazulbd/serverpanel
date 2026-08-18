@@ -173,8 +173,39 @@ func (g *gateway) handleConn(conn net.Conn) {
 					}
 				}
 			}
+		case proto.MsgRenew:
+			if env.Renew != nil {
+				g.handleRenew(sess, serverID, env.Renew)
+			}
 		}
 	}
+}
+
+// handleRenew issues a fresh client certificate for an already-connected,
+// already-authenticated agent (serverID and its cert's trust have already
+// been established by this connection's TLS handshake — see handleConn's
+// isRevoked/store.get checks above — so a RenewRequest's CSR is trusted for
+// its public key only, never for identity, exactly like /agents/register).
+//
+// The previously issued certificate is deliberately left valid rather than
+// revoked here: revoking it immediately would brick the agent permanently
+// (until a brand-new bootstrap token) if the new certificate fails to reach
+// disk (process crash, disk full, killed mid-write). Both certificates
+// simply co-exist until the old one's own 30-day TTL naturally expires —
+// a bounded, already-accepted-risk overlap window, not an open-ended one.
+func (g *gateway) handleRenew(sess *agentSession, serverID string, req *proto.RenewRequest) {
+	certPEM, serial, err := g.ca.signAgentCSR([]byte(req.CSRPEM), serverID, 30*24*time.Hour)
+	resp := proto.RenewResponse{}
+	if err != nil {
+		g.store.log(serverID, "", "agent.renew_failed", err.Error())
+		resp.Error = "could not sign renewed certificate"
+	} else {
+		g.store.markRenewedCert(serverID, serial.String())
+		resp.CertPEM = string(certPEM)
+	}
+	sess.mu.Lock()
+	sess.enc.Encode(proto.Envelope{Type: proto.MsgRenewed, Renewed: &resp})
+	sess.mu.Unlock()
 }
 
 // dispatch sends a task to a connected agent and waits (bounded by ctx) for
