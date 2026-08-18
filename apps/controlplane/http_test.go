@@ -287,6 +287,88 @@ func TestCreateBackupRejectsInvalidScope(t *testing.T) {
 	}
 }
 
+func TestDatabaseEndpointsRequireARealSiteAndValidateInput(t *testing.T) {
+	secureCookies = false
+	defer func() { secureCookies = true }()
+
+	a := newTestAPIServer(t)
+	h := a.routes()
+
+	doJSON(t, h, "POST", "/api/v1/auth/signup", map[string]string{
+		"Email": "ops3@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	rec := doJSON(t, h, "POST", "/api/v1/auth/login", map[string]string{
+		"Email": "ops3@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	cookie := sessionCookie(rec)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers", map[string]any{"Name": "web-13"}, cookie)
+	var created struct {
+		ServerID string `json:"server_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+
+	rec = doJSON(t, h, "GET", "/api/v1/servers/"+created.ServerID+"/sites/site_nonexistent/databases", nil, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("list databases for nonexistent site: status = %d, want 404", rec.Code)
+	}
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/sites/site_nonexistent/databases",
+		map[string]any{"name": "wp_example"}, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("create database for nonexistent site: status = %d, want 404", rec.Code)
+	}
+
+	rec = doJSON(t, h, "DELETE", "/api/v1/servers/"+created.ServerID+"/databases/db_nonexistent", nil, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("delete nonexistent database: status = %d, want 404", rec.Code)
+	}
+
+	site, err := a.store.createSite(created.ServerID, "e.example.com", "sp_e", "/home/sites/sp_e", "wordpress", "8.3")
+	if err != nil {
+		t.Fatalf("createSite: %v", err)
+	}
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/sites/"+site.ID+"/databases",
+		map[string]any{"name": "Not Valid!"}, cookie)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("create database with invalid name: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/sites/"+site.ID+"/databases",
+		map[string]any{"name": ""}, cookie)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("create database with empty name: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// A valid, well-formed request against a site whose server has no
+	// connected agent should fail as a gateway/dispatch error, not a
+	// validation error — proving validation happens before dispatch, the
+	// same property TestCreateBackupRejectsInvalidScope establishes for
+	// backups.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/sites/"+site.ID+"/databases",
+		map[string]any{"name": "wp_example"}, cookie)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("create database with no agent connected: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// A previously-recorded but already-deleted database can't be deleted
+	// again through the API (there is no agent-side db.delete dispatch
+	// possible here since no agent is connected, so this exercises the
+	// store round trip via a direct createDatabase + markDatabaseDeleted).
+	rec2, err := a.store.createDatabase(created.ServerID, site.ID, "wp_example", "wp_example_u1")
+	if err != nil {
+		t.Fatalf("createDatabase: %v", err)
+	}
+	if err := a.store.markDatabaseDeleted(created.ServerID, rec2.ID); err != nil {
+		t.Fatalf("markDatabaseDeleted: %v", err)
+	}
+	rec = doJSON(t, h, "DELETE", "/api/v1/servers/"+created.ServerID+"/databases/"+rec2.ID, nil, cookie)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("delete already-deleted database: status = %d, want 409, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestRegisterEndpointRejectsBadToken(t *testing.T) {
 	a := newTestAPIServer(t)
 	h := a.routes()

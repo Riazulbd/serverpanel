@@ -2,6 +2,41 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-18 — Database persistence and dashboard UI
+
+- **Closed DB-001's flagged gap**: databases created via `db.create` now get a
+  control-plane-persisted record and a per-site "Databases" panel in the dashboard,
+  the same treatment BAK-001/BAK-002 gave backups in the previous entry.
+- `db.create` (`packages/capabilities/db.go`) now returns structured JSON
+  (`{name, owner_user}`) as its task result instead of a free-text message, so the
+  control plane can parse what was actually created rather than trusting the request
+  echoed back unchanged.
+- New `databases` table and `apps/controlplane/databases.go`: `handleCreateDatabase`
+  generates the owner username and a 48-character random password itself
+  (`crypto/rand`, never accepted from the client), dispatches `db.create`, and on
+  success persists a row and returns the plaintext password to the caller exactly
+  once — it is never written to the database, logs, or the audit log, the same
+  shown-once treatment bootstrap tokens get. `handleDeleteDatabase` reads the stored
+  `name`/`owner_user` server-side (never client-supplied) before dispatching
+  `db.delete`, then marks the row `status='deleted'` rather than removing it, keeping
+  the audit trail. Three new endpoints: `GET`/`POST /api/v1/servers/{id}/sites/{siteId}/databases`,
+  `DELETE /api/v1/servers/{id}/databases/{databaseId}`.
+- Dashboard: a "Databases" panel per site — create-database modal (name only), a
+  databases table (name/owner/created), a one-time credentials dialog after creation,
+  and a per-row delete button with a destructive-action confirmation.
+- Added `packages/capabilities/db_test.go` (new file — `db.go` previously had zero
+  automated test coverage): identifier-regex accept/reject cases, and validation-path
+  tests for `handleDBCreate`/`handleDBDelete` that run without a real MariaDB (they
+  exercise the checks that happen before any DB connection is opened). Added
+  `TestDatabaseCreateListGetDeleteRoundTrip` (store, real SQLite) and
+  `TestDatabaseEndpointsRequireARealSiteAndValidateInput` (HTTP layer: 404s, 400s,
+  502 proving validation runs before dispatch, 409 on double-delete).
+- Updated `docs/SERVERAVATAR_PARITY.md`: DB-001 moved `PARTIAL` → `COMPLETE`, merged
+  with the former DB-005 row (removed as a separate entry).
+- The real `CREATE DATABASE`/`CREATE USER`/`GRANT` SQL execution against a live
+  MariaDB remains manually-verified-in-a-prior-session only — this environment has no
+  MariaDB, same documented limitation as BAK-001/BAK-002's db/full-scope path.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

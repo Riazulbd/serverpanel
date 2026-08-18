@@ -3,6 +3,7 @@ package capabilities
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"regexp"
 
@@ -32,6 +33,16 @@ func mariaDBConn() (*sql.DB, error) {
 	// parameter handling, just done in the client library rather than the
 	// server; it is not raw string concatenation of untrusted input.
 	return sql.Open("mysql", "root@unix(/var/run/mysqld/mysqld.sock)/?interpolateParams=true")
+}
+
+// dbResult is what db.create returns as its TaskEvent detail (JSON) — the
+// control plane's handleCreateDatabase (apps/controlplane/databases.go)
+// parses this to persist a databases row, the same dispatch-then-persist
+// pattern site.create/backup.run use rather than trusting the request body
+// alone for what actually got created on the agent.
+type dbResult struct {
+	Name  string `json:"name"`
+	Owner string `json:"owner_user"`
 }
 
 func handleDBCreate(ctx context.Context, params map[string]any, progress Progress) (string, error) {
@@ -75,7 +86,8 @@ func handleDBCreate(ctx context.Context, params map[string]any, progress Progres
 		return "", fmt.Errorf("flush privileges: %w", err)
 	}
 
-	return fmt.Sprintf("database %q created, owned by user %q with grants scoped to that database only", name, owner), nil
+	out, _ := json.Marshal(dbResult{Name: name, Owner: owner})
+	return string(out), nil
 }
 
 func handleDBDelete(ctx context.Context, params map[string]any, progress Progress) (string, error) {
