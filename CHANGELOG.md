@@ -2,6 +2,35 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-18 — SSL auto-renewal, `ssl.status` capability
+
+- **Wired up certbot's own renewal timer**: `stack.install` now has an explicit
+  "certbot auto-renewal timer" step (`systemctl enable --now certbot.timer`),
+  idempotent/check-then-run like every other step in that installer. This was the
+  literal, specifically-named gap flagged in `SERVERAVATAR_PARITY.md`'s APP-016
+  ("certbot's own renewal timer not yet wired up by `stack.install`") — previously the
+  project relied on the certbot Debian package's postinst default rather than
+  guaranteeing it.
+- **New read-only diagnostic capability `ssl.status`** (`packages/capabilities/ssl.go`):
+  given a domain, reports whichever certificate actually exists on disk (checking the
+  Let's Encrypt live directory first, then the custom-upload directory, via
+  `openssl x509 -enddate`) plus whether `certbot.timer` is actually active — real,
+  freshly-observed state, not a cached or assumed value, so "is this certificate going
+  to renew itself" has an actual answer instead of a guess. Refactored
+  `handleSSLInstallCustom`'s hardcoded path into the same `customSSLBaseDir` var
+  `ssl.status` reads from, so both agree on where a custom cert lives.
+  Dashboard: new "SSL" panel on the site-detail page with a "Check status" button.
+- Added 12 new capability-layer tests (`ssl_test.go`): domain validation, no-certificate
+  reporting, Let's-Encrypt-vs-custom path priority (against real self-signed
+  certificates generated with `openssl req`), and `openssl`-enddate-format parsing
+  (including its double-space-padded single-digit-day quirk, verified against Go's
+  `time.Parse`). Full suite: 76 test functions, `go vet`/`gofmt`/`-race` all clean.
+- Updated `SYSTEM.md`, `API.md` §4, `TESTING.md`, and `docs/SERVERAVATAR_PARITY.md`
+  (APP-016) — precisely scoped: the certificate-reading logic is tested against real
+  certificates, but (like every other `systemctl`-based step in this codebase) the
+  actual `systemctl enable` call is unverified against a live systemd, called out
+  explicitly rather than claimed as tested.
+
 ## 2026-08-18 — Agent certificate auto-renewal
 
 - **Implemented agent certificate auto-renewal**, closing the top-priority gap flagged

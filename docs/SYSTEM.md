@@ -103,8 +103,9 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | Maintenance mode | ⬜ not implemented |
 | Basic auth on a site | ⬜ not implemented |
 | Custom + Let's Encrypt SSL | ✅ `ssl.issue_letsencrypt` (certbot), `ssl.install_custom` |
-| Automatic SSL renewal | ⬜ not implemented (certbot's own renewal timer is not
-  wired up by `stack.install` yet) |
+| Automatic SSL renewal | ✅ `stack.install` enables certbot's systemd renewal timer
+  (`certbot.timer`); `ssl.status` reports real on-disk expiry + timer state so this is
+  verifiable, not assumed |
 | WordPress auto-login/auto-update | ⬜ not implemented |
 | Application enable/disable | ✅ `site.set_status` |
 | Secure file manager | ✅ `file.list/read/write/delete`, scoped + symlink-safe |
@@ -165,10 +166,16 @@ is the condensed status:
 
 - **Phase 1 — secure working foundation:** ~90% of the *capability* surface exists and
   is tested per-capability (see the tables above); backup **restore** and agent
-  **certificate auto-rotation** are both now implemented and tested (see `TESTING.md`);
-  the remaining real gap is SSL auto-renewal. Not "GA-ready" yet, but the architecture
-  and security primitives it depends on (mTLS, allow-listed capabilities, per-app
-  isolation, audit log) are real and proven, not stubs.
+  **certificate auto-rotation** are fully implemented and tested end-to-end. **SSL
+  auto-renewal** is implemented (`stack.install` enables certbot's systemd timer;
+  `ssl.status` reports real on-disk expiry + timer state) and its certificate-reading
+  logic is tested against real certificates, but — like every other `systemctl`-based
+  step in this codebase — the actual timer-enable call is unverified against a live
+  systemd (see `TESTING.md` §3). Not "GA-ready" yet — there's no dedicated dashboard UI
+  for every capability (SSL issuance/custom-upload are still dispatch-only, like
+  databases), and organizations/RBAC/billing/Phase 2-3 scope remain — but the
+  architecture and security primitives it depends on (mTLS, allow-listed capabilities,
+  per-app isolation, audit log) are real and proven, not stubs.
 - **Phase 2 — professional server management:** not started. Git deployment,
   cron/process management, SSH/firewall management UI, remote backups, cross-server
   migration all remain ⬜.
@@ -301,8 +308,8 @@ in `packages/capabilities/capabilities_test.go`), not just convention.
 
 Current capability list: `system.ping`, `service.control`, `diagnostics.basic`,
 `stack.install`, `site.create`, `site.set_php_version`, `site.set_status`,
-`app.wordpress_install`, `ssl.issue_letsencrypt`, `ssl.install_custom`, `db.create`,
-`db.delete`, `db.list`, `file.list`, `file.read`, `file.write`, `file.delete`,
+`app.wordpress_install`, `ssl.issue_letsencrypt`, `ssl.install_custom`, `ssl.status`,
+`db.create`, `db.delete`, `db.list`, `file.list`, `file.read`, `file.write`, `file.delete`,
 `backup.run`, `backup.restore`, `logs.tail`. Notably absent (by design, until reviewed
 and added): `git.deploy`, `cron.upsert`, `ssh.*`, `firewall.*`, `agent.self_update`.
 

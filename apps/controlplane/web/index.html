@@ -189,6 +189,12 @@
         </div>
         <div id="backupResult" class="task-result hidden"></div>
         <div id="backupsList" class="muted">No backups yet.</div>
+
+        <div class="section-title" style="display:flex;justify-content:space-between;align-items:center;margin-top:24px">
+          <span>SSL</span>
+          <button onclick="checkSSLStatus()">Check status</button>
+        </div>
+        <div id="sslResult" class="task-result hidden"></div>
       </div>
     </div>
 
@@ -468,6 +474,7 @@ async function openSiteDetail(siteId) {
   const site = (state.sites || []).find(s => s.ID === siteId);
   showTab('siteDetail');
   document.getElementById('backupResult').classList.add('hidden');
+  document.getElementById('sslResult').classList.add('hidden');
   const server = (state.servers || []).find(s => s.ID === state.selectedServerId);
   document.getElementById('siteDetailServerName').textContent = server ? server.Name : 'Server';
   if (site) {
@@ -498,6 +505,38 @@ function renderBackups(backups) {
         <td><button class="danger" onclick="restoreBackup('${b.ID}')">Restore</button></td>
       </tr>`).join('') +
     '</tbody></table>';
+}
+
+async function checkSSLStatus() {
+  const site = (state.sites || []).find(s => s.ID === state.selectedSiteId);
+  const box = document.getElementById('sslResult');
+  if (!site) { return; }
+  box.className = 'task-result running';
+  box.textContent = 'Checking certificate for ' + site.Domain + '...';
+  box.classList.remove('hidden');
+  try {
+    const res = await api(API + '/servers/' + state.selectedServerId + '/tasks', {
+      method: 'POST', body: JSON.stringify({capability: 'ssl.status', params: {domain: site.Domain}})
+    });
+    if (res.status !== 'succeeded') {
+      box.className = 'task-result fail';
+      box.textContent = 'ssl.status: ' + res.status + (res.message ? (' — ' + res.message) : '');
+      return;
+    }
+    const info = JSON.parse(res.detail);
+    box.className = 'task-result ok';
+    if (!info.present) {
+      box.textContent = 'No certificate found for ' + site.Domain + '. Auto-renewal timer: ' +
+        (info.auto_renewal_active ? 'active' : 'inactive') + '.';
+      return;
+    }
+    const issuerLabel = info.issuer === 'letsencrypt' ? "Let's Encrypt" : 'Custom';
+    box.textContent = issuerLabel + ' certificate, expires ' + new Date(info.not_after).toLocaleString() +
+      ' (' + info.days_remaining + ' days) — auto-renewal ' + (info.auto_renewal_active ? 'active' : 'inactive') + '.';
+  } catch (e) {
+    box.className = 'task-result fail';
+    box.textContent = 'ssl.status failed: ' + e.message;
+  }
 }
 
 function formatBytes(n) {

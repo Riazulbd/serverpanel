@@ -191,8 +191,21 @@ The full allow-listed capability names `packages/capabilities.Default()` registe
 (see `SYSTEM.md` §12 for the allow-list rationale): `system.ping`, `service.control`,
 `diagnostics.basic`, `stack.install`, `site.create`, `site.set_php_version`,
 `site.set_status`, `app.wordpress_install`, `ssl.issue_letsencrypt`,
-`ssl.install_custom`, `db.create`, `db.delete`, `db.list`, `file.list`, `file.read`,
-`file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`.
+`ssl.install_custom`, `ssl.status`, `db.create`, `db.delete`, `db.list`, `file.list`,
+`file.read`, `file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`.
+
+### `ssl.status`
+```json
+{"domain": "example.com"}
+```
+Read-only diagnostic — issues, renews, or modifies nothing. Reports whichever
+certificate actually exists on disk for `domain` (checking the Let's Encrypt live
+directory first, then the custom-upload directory) via `openssl x509 -enddate`, plus
+whether certbot's systemd renewal timer (`certbot.timer`, enabled by `stack.install`)
+is currently active. Returns
+`{"domain", "present", "issuer": "letsencrypt|custom", "not_after", "days_remaining", "auto_renewal_active"}`
+— `present: false` with only `auto_renewal_active` populated if no certificate file
+exists yet for that domain.
 
 ### `backup.restore`
 ```json
