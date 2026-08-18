@@ -2,6 +2,52 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-18 — Database control-plane persistence and dashboard UI
+
+- **Closed DB-005** (`docs/SERVERAVATAR_PARITY.md`), the highest-priority documented gap
+  the previous entry's parity pass identified: databases created via `db.create` now
+  get a durable control-plane record and a dashboard panel, the same
+  dispatch-then-persist pattern backups already use.
+- `packages/capabilities/db.go`'s `handleDBCreate` now returns structured JSON
+  (`{"name","owner_user"}`) instead of a human-readable sentence, so the control plane
+  can parse its result the same way it already parses `site.create`'s and
+  `backup.run`'s.
+- New `databases` table (`apps/controlplane/db.go`) and store methods
+  (`createDatabaseRecord`/`listDatabases`/`getDatabaseRecord`/`databaseNameExists`/
+  `deleteDatabaseRecord`, all scoped by server ID the same way sites/backups are).
+  Deliberately has no password column: `handleCreateDatabase`
+  (`apps/controlplane/databases.go`) generates a 48-character random hex password
+  server-side, returns it exactly once in the `POST` response, and never persists it
+  anywhere in control-plane storage — the only durable copy is MariaDB's own hashed
+  credential on the agent's server.
+- Three new endpoints: `GET`/`POST /api/v1/servers/{id}/databases`,
+  `DELETE /api/v1/servers/{id}/databases/{databaseId}`. A duplicate database name for
+  the same server is rejected with `409` before ever dispatching to the agent, so
+  `db.create`'s own `CREATE DATABASE IF NOT EXISTS` idempotency can't silently produce
+  two control-plane records (with two different generated passwords) for one
+  underlying database. Delete reads `name`/`owner_user` from the stored record, never
+  from free-form client input.
+- New "Databases" panel in the server-detail dashboard view (below Sites): a "+ New
+  database" modal that takes only a name, shows the generated owner password exactly
+  once with a clear "won't be shown again" note, a databases table, and a delete
+  action with a destructive-action confirmation.
+- Added 9 new tests: `apps/controlplane/store_test.go`
+  (`TestDatabaseCreateListGetDeleteRoundTrip`, including cross-server-scoping
+  assertions for both `getDatabaseRecord` and `databaseNameExists`);
+  `apps/controlplane/http_test.go` (`TestCreateDatabaseRejectsInvalidName`,
+  `TestDatabaseEndpointsRequireARealDatabase`); a new
+  `packages/capabilities/db_test.go` (`TestHandleDBCreateRejectsInvalidName/
+  InvalidOwner/ShortPassword`, `TestHandleDBDeleteRejectsInvalidName/InvalidOwner`,
+  `TestIdentifierRegexAllowsExpectedNames`) covering the capability's parameter
+  validation, which — like the boundary tests for backups — runs without a live
+  MariaDB. Full suite: 70 test functions, `go vet`/`gofmt` clean.
+- The real `CREATE DATABASE`/`CREATE USER`/`GRANT`/`DROP` round trip against a live
+  MariaDB remains unverified in *this* environment (no MariaDB installed here), same
+  situation as `BAK-001`/`BAK-002`'s db-scope path — manually verified in a prior
+  session against a real Ubuntu 24.04 host; see `docs/TESTING.md`.
+- Updated `SYSTEM.md`, `API.md`, and `SERVERAVATAR_PARITY.md` (DB-001 detail block
+  expanded, DB-005 moved to `COMPLETE`) to reflect this.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

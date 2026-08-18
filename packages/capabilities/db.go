@@ -3,6 +3,7 @@ package capabilities
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"regexp"
 
@@ -75,7 +76,18 @@ func handleDBCreate(ctx context.Context, params map[string]any, progress Progres
 		return "", fmt.Errorf("flush privileges: %w", err)
 	}
 
-	return fmt.Sprintf("database %q created, owned by user %q with grants scoped to that database only", name, owner), nil
+	// Structured JSON, not a human-readable sentence: the control plane
+	// parses this to persist a database record (see apps/controlplane/
+	// databases.go), the same dispatch-then-persist-on-success pattern
+	// site.create's and backup.run's JSON results support.
+	detail, err := json.Marshal(struct {
+		Name      string `json:"name"`
+		OwnerUser string `json:"owner_user"`
+	}{Name: name, OwnerUser: owner})
+	if err != nil {
+		return "", fmt.Errorf("marshal result: %w", err)
+	}
+	return string(detail), nil
 }
 
 func handleDBDelete(ctx context.Context, params map[string]any, progress Progress) (string, error) {
