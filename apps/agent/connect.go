@@ -26,7 +26,7 @@ const agentVersion = "0.1.0-dev"
 // manages (nginx, php-fpm, mariadb, ...) run under systemd independent of
 // this connection — see docs/architecture.md §2 — so a dropped connection
 // here degrades orchestration/observability only, never site serving.
-func runConnection(ctx context.Context, id *identity, reg capabilities.Registry) error {
+func runConnection(ctx context.Context, dataDir string, id *identity, reg capabilities.Registry) error {
 	cert, err := tls.X509KeyPair(id.CertPEM, id.KeyPEM)
 	if err != nil {
 		return err
@@ -72,15 +72,29 @@ func runConnection(ctx context.Context, id *identity, reg capabilities.Registry)
 
 	go heartbeatLoop(ctx, enc)
 
+	renewResultCh := make(chan proto.RenewResponse, 1)
+	renewCtx, cancelRenew := context.WithCancel(ctx)
+	defer cancelRenew()
+	go certRenewalLoop(renewCtx, dataDir, id, enc, renewResultCh, conn)
+
 	for {
 		var env proto.Envelope
 		if err := dec.Decode(&env); err != nil {
 			return err
 		}
-		if env.Type != proto.MsgTask || env.Task == nil {
-			continue
+		switch env.Type {
+		case proto.MsgTask:
+			if env.Task != nil {
+				go handleTask(ctx, enc, reg, *env.Task)
+			}
+		case proto.MsgRenewResponse:
+			if env.RenewResponse != nil {
+				select {
+				case renewResultCh <- *env.RenewResponse:
+				default:
+				}
+			}
 		}
-		go handleTask(ctx, enc, reg, *env.Task)
 	}
 }
 

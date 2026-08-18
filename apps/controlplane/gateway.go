@@ -173,8 +173,38 @@ func (g *gateway) handleConn(conn net.Conn) {
 					}
 				}
 			}
+		case proto.MsgRenewRequest:
+			if env.RenewRequest != nil {
+				resp := g.handleRenew(serverID, env.RenewRequest.CSRPEM)
+				sess.mu.Lock()
+				err := sess.enc.Encode(proto.Envelope{Type: proto.MsgRenewResponse, RenewResponse: &resp})
+				sess.mu.Unlock()
+				if err != nil {
+					return
+				}
+			}
 		}
 	}
+}
+
+// handleRenew issues a fresh client certificate to an already-authenticated
+// agent session ahead of its current certificate's expiry (see
+// apps/agent/renew.go). The new certificate is bound to serverID — the
+// identity this session's original mTLS handshake already verified, taken
+// from the connection, never from the CSR's requested subject — so renewal
+// can never be used to claim a different server's identity. The previous
+// certificate is deliberately left valid (not revoked) here: it keeps
+// working until its own natural expiry, so a renewal racing a reconnect, or
+// a renewal response lost to a network blip, can never lock an agent out.
+func (g *gateway) handleRenew(serverID, csrPEM string) proto.RenewResponse {
+	certPEM, serial, err := g.ca.signAgentCSR([]byte(csrPEM), serverID, agentCertTTL)
+	if err != nil {
+		g.store.log(serverID, "", "agent.cert_renewal_failed", err.Error())
+		return proto.RenewResponse{Error: err.Error()}
+	}
+	g.store.updateCertSerial(serverID, serial.String())
+	g.store.log(serverID, "", "agent.cert_renewed", fmt.Sprintf("serial=%s", serial.String()))
+	return proto.RenewResponse{CertPEM: string(certPEM)}
 }
 
 // dispatch sends a task to a connected agent and waits (bounded by ctx) for

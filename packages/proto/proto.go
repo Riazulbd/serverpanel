@@ -13,21 +13,25 @@ import "time"
 type MessageType string
 
 const (
-	MsgHello     MessageType = "hello"      // agent -> gateway, first message after mTLS connect
-	MsgHeartbeat MessageType = "heartbeat"  // agent -> gateway, periodic health snapshot
-	MsgTask      MessageType = "task"       // gateway -> agent, requests a capability run
-	MsgTaskEvent MessageType = "task_event" // agent -> gateway, progress/result of a task
-	MsgAck       MessageType = "ack"        // either direction, generic acknowledgement
+	MsgHello         MessageType = "hello"          // agent -> gateway, first message after mTLS connect
+	MsgHeartbeat     MessageType = "heartbeat"      // agent -> gateway, periodic health snapshot
+	MsgTask          MessageType = "task"           // gateway -> agent, requests a capability run
+	MsgTaskEvent     MessageType = "task_event"     // agent -> gateway, progress/result of a task
+	MsgAck           MessageType = "ack"            // either direction, generic acknowledgement
+	MsgRenewRequest  MessageType = "renew_request"  // agent -> gateway, requests a fresh client cert ahead of expiry
+	MsgRenewResponse MessageType = "renew_response" // gateway -> agent, result of a renewal request
 )
 
 // Envelope is the outer message wrapper. Exactly one of the typed payload
 // fields is populated, matching Type.
 type Envelope struct {
-	Type      MessageType `json:"type"`
-	Hello     *Hello      `json:"hello,omitempty"`
-	Heartbeat *Heartbeat  `json:"heartbeat,omitempty"`
-	Task      *Task       `json:"task,omitempty"`
-	TaskEvent *TaskEvent  `json:"task_event,omitempty"`
+	Type          MessageType    `json:"type"`
+	Hello         *Hello         `json:"hello,omitempty"`
+	Heartbeat     *Heartbeat     `json:"heartbeat,omitempty"`
+	Task          *Task          `json:"task,omitempty"`
+	TaskEvent     *TaskEvent     `json:"task_event,omitempty"`
+	RenewRequest  *RenewRequest  `json:"renew_request,omitempty"`
+	RenewResponse *RenewResponse `json:"renew_response,omitempty"`
 }
 
 // Hello is sent by the agent immediately after the mTLS handshake completes,
@@ -100,4 +104,22 @@ type RegisterResponse struct {
 	CertPEM     string `json:"cert_pem"`
 	CAPEM       string `json:"ca_pem"`
 	GatewayAddr string `json:"gateway_addr"`
+}
+
+// RenewRequest is sent by an agent nearing its client certificate's expiry,
+// over its already-authenticated mTLS session, asking the gateway to sign a
+// fresh certificate for a newly generated key. The CSR's requested subject
+// is ignored by the gateway: the new certificate is bound to the CommonName
+// of the session's already-verified peer certificate, exactly as at initial
+// registration, so a renewal can never be used to claim a different
+// identity.
+type RenewRequest struct {
+	CSRPEM string `json:"csr_pem"`
+}
+
+// RenewResponse carries the freshly issued certificate, or a non-empty Error
+// if the renewal was rejected.
+type RenewResponse struct {
+	CertPEM string `json:"cert_pem,omitempty"`
+	Error   string `json:"error,omitempty"`
 }

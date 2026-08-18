@@ -2,6 +2,48 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-18 — Agent certificate auto-renewal
+
+- **Implemented agent client-certificate auto-renewal**, closing the security/
+  correctness gap called out in `SECURITY.md` §2 and `SYSTEM.md` §21: previously a
+  30-day agent certificate simply expired with no rotation path, requiring manual
+  re-registration with a fresh bootstrap token to reconnect. An already-connected agent
+  now checks its certificate's expiry roughly once an hour
+  (`certRenewalCheckInterval`, `apps/agent/renew.go`) and, within 7 days of the 30-day
+  TTL (`certRenewalThreshold`), generates a fresh keypair and requests a new
+  certificate over its *already-authenticated* mTLS session — no bootstrap token or
+  other shared secret is ever reused for renewal.
+- Added two new wire-protocol messages (`renew_request`/`renew_response`,
+  `packages/proto/proto.go`) and a gateway handler
+  (`apps/controlplane/gateway.go` `handleRenew`) that signs the new certificate bound
+  to the session's already-verified CommonName — never to whatever the CSR itself
+  requests — so renewal can never be used to claim a different server's identity. The
+  previous certificate is deliberately left valid (not revoked): a lost response or a
+  renewal racing a reconnect is simply retried on the next hourly check, never a
+  lockout.
+- Added `store.updateCertSerial`, distinct from the pre-existing
+  `store.markIssuedCert` used at initial registration: renewal happens mid-session, so
+  it must not reset the server's status back to "offline" the way first-time
+  registration correctly does.
+- On a successful renewal the agent atomically replaces its on-disk cert/key
+  (write-temp-then-rename, `persistRenewedIdentity`) and updates the in-memory
+  identity, then closes the connection so the existing reconnect loop
+  (`apps/agent/main.go`) redials using the new certificate — no process restart
+  required.
+- Fixed a related latent bug while touching the reconnect loop: exponential backoff
+  never reset after a successful, long-lived connection, so it would ratchet toward its
+  30s cap over an agent's lifetime even when every reconnect succeeded immediately (this
+  would otherwise have made the renewal-triggered reconnect look like a failure, too).
+  Backoff now resets to 1s whenever a connection stayed up at least 10s before dropping.
+- Tests: `apps/controlplane/gateway_test.go` (identity binding ignores the CSR's
+  requested CN, invalid-CSR rejection, a live connection's status is untouched by
+  renewal) and `apps/agent/renew_test.go` (expiry-threshold gating, successful
+  persist-and-reconnect-trigger, gateway rejection leaves the identity untouched,
+  atomic file replacement). Full existing suite (`go test ./...`) still passes.
+- Docs updated: `SECURITY.md` §2 (implemented, was "not yet implemented"), `SYSTEM.md`
+  (status table + known-limitations list), `API.md` (new wire messages),
+  `docs/SERVERAVATAR_PARITY.md` SRV-001.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

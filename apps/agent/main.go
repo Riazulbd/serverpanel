@@ -51,10 +51,20 @@ func main() {
 
 	backoff := time.Second
 	for {
-		err := runConnection(ctx, id, reg)
+		connectedAt := time.Now()
+		err := runConnection(ctx, *dataDir, id, reg)
 		if ctx.Err() != nil {
 			log.Println("shutting down")
 			return
+		}
+		// A connection that stayed up for a while (including one closed
+		// deliberately after a successful certificate renewal — see
+		// apps/agent/renew.go) was healthy, not a failure in progress;
+		// treating it as one would otherwise ratchet the backoff toward its
+		// 30s cap over the agent's lifetime even when every reconnect
+		// succeeds immediately.
+		if time.Since(connectedAt) >= 10*time.Second {
+			backoff = time.Second
 		}
 		log.Printf("connection to gateway lost: %v (retrying in %s)", err, backoff)
 		select {
