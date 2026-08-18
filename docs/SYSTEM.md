@@ -59,7 +59,9 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | Background job queue | ⬜ task dispatch is synchronous request/response today,
   not a durable queue (see `ARCHITECTURE.md` §1 "As built") |
 | Audit logs | ✅ append-only, covers every privileged action |
-| Notifications | ⬜ not implemented (no email/Slack/Telegram/Discord/webhook yet) |
+| Notifications | ⬜ not implemented yet. Scope (product decision 2026-08-18): Email,
+  Telegram, and a generic outbound Webhook only — Slack/Discord/Pushover are
+  intentionally out of scope, not deferred |
 | Error handling and recovery | 🚧 agent reconnects with exponential backoff; no
   on-disk task journal yet (a task in flight when the agent restarts is lost) |
 
@@ -131,7 +133,9 @@ webhook push-to-deploy, deploy keys, or rollback exist in this codebase yet.
   automatically before every restore (`backup.restore`'s `expected_sha256` check); the
   dashboard does not yet run a periodic standalone re-verify-without-restoring pass |
 | Local storage | ✅ |
-| S3-compatible / Amazon S3 / R2 / B2 / Spaces / Wasabi | ⬜ Phase 2 |
+| Amazon S3 (remote backup storage) | ⬜ Phase 2. Scope (product decision 2026-08-18):
+  S3 only, not a pluggable multi-provider adapter — R2/B2/Spaces/Wasabi/Google
+  Drive/Dropbox are intentionally out of scope |
 | Restore (same server) | ✅ `backup.restore` — validates the archive is one this agent
   actually created (path + checksum), extracts with Go's `archive/tar` directly (never
   a shelled-out `tar`, so every entry's path is validated before anything is written),
@@ -155,8 +159,10 @@ audit log are implemented; commit-confirm SSH/firewall safety flow, IP allow-lis
 WAF/bot-blocking, alert thresholds, and external notification channels are not.
 
 ### Team and commercial features
-All ⬜ — deliberately Phase 3 (`product-plan.md` §9): organizations/teams/roles,
-white-label, reseller/hosting-packages, billing, public API, plugin architecture.
+Organizations/teams/roles, public API, and plugin architecture: all ⬜ — deliberately
+Phase 3 (`product-plan.md` §9). **White-label, reseller/hosting-packages, and billing
+are out of scope for this product entirely** (product decision 2026-08-18, not a later
+phase) — see `SERVERAVATAR_PARITY.md` §2 "White-label / Reseller" and "Billing".
 
 ## 3. Completed and pending phases
 
@@ -170,9 +176,13 @@ is the condensed status:
   primitives it depends on (mTLS, allow-listed capabilities, per-app isolation, audit
   log) are real and proven, not stubs.
 - **Phase 2 — professional server management:** not started. Git deployment,
-  cron/process management, SSH/firewall management UI, remote backups, cross-server
-  migration all remain ⬜.
-- **Phase 3 — commercial platform:** not started.
+  cron/process management, SSH/firewall management UI, remote backups (Amazon S3
+  only), cross-server migration, and Email/Telegram/Webhook notification channels all
+  remain ⬜.
+- **Phase 3 — commercial platform:** not started; scope narrowed 2026-08-18 to
+  organizations/teams/roles, cloud-provider integrations, additional stack adapters,
+  and public API/plugin system — white-label, reseller, and billing removed from the
+  roadmap entirely (see `product-plan.md` §6, §9).
 
 ## 4. System architecture
 
@@ -373,9 +383,11 @@ first) remains a Phase 2 gap — see §21.
 ## 20. Monitoring and alerting
 
 Heartbeat-based only: uptime/load/mem%/disk% every connection cycle, surfaced in the
-dashboard's server-detail view. No threshold-based alerting, no email/Slack/Telegram/
-Discord/webhook notifications, no SSL-expiration or backup-failure alerts exist yet —
-all ⬜, scoped to Phase 2 per `product-plan.md` §9.
+dashboard's server-detail view. No threshold-based alerting and no notification
+channels exist yet — no SSL-expiration or backup-failure alerts either — all ⬜, scoped
+to Phase 2 per `product-plan.md` §9. Notification-channel scope (product decision
+2026-08-18): Email, Telegram, and a generic outbound Webhook only; Slack, Discord, and
+Pushover are intentionally out of scope, not deferred.
 
 ## 21. Known limitations
 

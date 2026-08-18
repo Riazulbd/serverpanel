@@ -2,6 +2,29 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-18 — Product scope decision: narrow notifications/backups, drop white-label/reseller/billing
+
+Product-owner decision, recorded here and reflected across the planning docs (no code
+changes — none of the affected features had been built yet):
+
+- **Notification channels**: scope narrowed to **Email, Telegram, and a generic
+  outbound Webhook only**. Slack, Discord, and Pushover are intentionally out of scope,
+  not deferred.
+- **Remote backup storage**: scope narrowed to **Amazon S3 only** — not a pluggable
+  multi-provider adapter. R2/B2/Spaces/Wasabi/Google Drive/Dropbox are intentionally
+  out of scope, not deferred.
+- **White-label and reseller/self-hosted panel**: removed from the roadmap entirely.
+  Not a later phase — this product will not have branding/custom-domain white-labeling,
+  an admin/reseller panel, or a customer-facing scoped control panel.
+- **Billing/wallet/subscriptions**: removed from the roadmap entirely. No wallet
+  ledger, plans/entitlements, payment-provider adapters, or invoicing.
+- Updated `product-plan.md` (§6 Phase 2/3 milestone tables, §9 postponed-features list,
+  §10 resolves the pricing/packaging and self-hosted-panel open questions as N/A),
+  `SERVERAVATAR_PARITY.md` (INT-003/INT-004 scoped down; BILL-001..004 and
+  WL-001/002/RS-001..003 moved to `INTENTIONALLY_NOT_APPLICABLE` with the decision
+  recorded as their reason, progress-summary counts updated), `SYSTEM.md`, and
+  `README.md` to match.
+
 ## 2026-08-18 — Agent certificate auto-renewal
 
 - **Implemented in-session agent certificate auto-renewal**, closing the top item in

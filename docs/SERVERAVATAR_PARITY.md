@@ -142,7 +142,7 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Test coverage**: `packages/capabilities/backup_test.go` (`TestHandleBackupRunRejectsBadScope`, `TestHandleBackupRunFilesRoundTripsAndChecksums`); `apps/controlplane/store_test.go` (`TestBackupCreateListGetRoundTrip`); `apps/controlplane/http_test.go` (`TestCreateBackupRejectsInvalidScope`, `TestBackupEndpointsRequireARealSite`). Files scope tested against a real filesystem; db/full scope (real `mysqldump`) not exercised by `go test` in this environment (no MariaDB here) — manually verified in a prior session.
 - **Current status**: `COMPLETE` (files scope, fully automated); `PARTIAL` overall (db/full scope automated-tested only at the validation layer, not a real `mysqldump` round trip in this environment)
 - **Completion date**: 2026-08-17 (files scope); db/full scope's real-MariaDB verification remains `BLOCKED_EXTERNAL` in this environment.
-- **Known differences**: no scheduling/retention policy (on-demand only); no remote storage adapters (S3/R2/B2/Spaces/Wasabi — local disk only); backups are not encrypted at rest (rely on host filesystem permissions).
+- **Known differences**: no scheduling/retention policy (on-demand only); no remote storage adapter yet — local disk only today, and per product decision 2026-08-18 the only remote target planned is Amazon S3 (R2/B2/Spaces/Wasabi/Google Drive/Dropbox are intentionally out of scope, see INT-003); backups are not encrypted at rest (rely on host filesystem permissions).
 - **Reason**: scheduling/retention/remote-storage/encryption are explicitly Phase 2 (`product-plan.md` §9); this pass's scope was closing the restore gap first (see BAK-002), which was the higher-priority documented blocker.
 
 ### BAK-002 — Backup restore
@@ -203,8 +203,8 @@ capability surface (per task-brief §3/§101), not just what's already built.
 |---|---|---|---|---|
 | INT-001 | Git providers (GitHub/GitLab/Bitbucket) | Integrations | `NOT_STARTED` | No `git.deploy` capability yet (deliberately absent from the allow-list — `SYSTEM.md` §12) |
 | INT-002 | Cloudflare | Integrations | `NOT_STARTED` | |
-| INT-003 | Cloud storage (S3-compatible) | Integrations / Backups | `NOT_STARTED` | Needed for BAK-001's remote-storage gap too |
-| INT-004 | Notification channels (Slack/Discord/Telegram/webhook) | Integrations | `NOT_STARTED` | |
+| INT-003 | Cloud storage — **Amazon S3 only** (product decision 2026-08-18) | Integrations / Backups | `NOT_STARTED` | Needed for BAK-001's remote-storage gap too. Scope intentionally narrowed to S3; other object-storage providers (R2/B2/Spaces/Wasabi/Google Drive/Dropbox) are out of scope, not just deferred |
+| INT-004 | Notification channels — **Email, Telegram, generic Webhook only** (product decision 2026-08-18) | Integrations | `NOT_STARTED` | Scope intentionally narrowed; Slack, Discord, and Pushover are out of scope, not just deferred |
 
 ### Cloud provider adapters (PROV-*)
 | ID | Provider | Status |
@@ -217,12 +217,16 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | PROV-006 | Custom VPS / manually connected dedicated server | `COMPLETE` | The bootstrap-token install flow (SRV-001) *is* this — a customer VPS regardless of where it's hosted connects the same way. |
 
 ### Billing (BILL-*)
+
+**Descoped by product decision 2026-08-18: no wallet, billing, or subscription system
+is planned for this product.**
+
 | ID | Feature | Status | Notes |
 |---|---|---|---|
-| BILL-001 | Wallet / credit ledger | `NOT_STARTED` | Deliberately Phase 3 (`product-plan.md` §9) |
-| BILL-002 | Plans / entitlements | `NOT_STARTED` | |
-| BILL-003 | Payment provider adapters (Stripe/PayPal) | `NOT_STARTED` | |
-| BILL-004 | Invoicing / tax configuration | `NOT_STARTED` | |
+| BILL-001 | Wallet / credit ledger | `INTENTIONALLY_NOT_APPLICABLE` | Descoped by product decision 2026-08-18 — no wallet/billing/subscription system is planned for this product, not merely deferred to a later phase |
+| BILL-002 | Plans / entitlements | `INTENTIONALLY_NOT_APPLICABLE` | Same product decision as BILL-001 |
+| BILL-003 | Payment provider adapters (Stripe/PayPal) | `INTENTIONALLY_NOT_APPLICABLE` | Same product decision as BILL-001 |
+| BILL-004 | Invoicing / tax configuration | `INTENTIONALLY_NOT_APPLICABLE` | Same product decision as BILL-001 |
 
 ### Server management — not yet started (SRV-*)
 | ID | Feature | Status | Notes |
@@ -276,13 +280,20 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | WP-008 | Security hardening controls | `NOT_STARTED` |
 
 ### White-label / Reseller (WL-*, RS-*)
+
+**Descoped by product decision 2026-08-18: no white-label or reseller/self-hosted
+panel is planned for this product.** These rows are kept (rather than deleted) only so
+the parity audit against ServerAvatar's documentation stays complete and auditable —
+per task-brief §101, every discovered capability must have an explained status, not be
+silently dropped from the tracker.
+
 | ID | Feature | Status |
 |---|---|---|
-| WL-001 | Branding (name/logo/colors/custom domain) | `NOT_STARTED` |
-| WL-002 | Custom landing/disabled-app pages | `NOT_STARTED` |
-| RS-001 | Admin panel (customers, plans, revenue) | `NOT_STARTED` |
-| RS-002 | Customer-facing scoped control panel | `NOT_STARTED` |
-| RS-003 | Hosting packages / entitlement enforcement | `NOT_STARTED` |
+| WL-001 | Branding (name/logo/colors/custom domain) | `INTENTIONALLY_NOT_APPLICABLE` |
+| WL-002 | Custom landing/disabled-app pages | `INTENTIONALLY_NOT_APPLICABLE` |
+| RS-001 | Admin panel (customers, plans, revenue) | `INTENTIONALLY_NOT_APPLICABLE` |
+| RS-002 | Customer-facing scoped control panel | `INTENTIONALLY_NOT_APPLICABLE` |
+| RS-003 | Hosting packages / entitlement enforcement | `INTENTIONALLY_NOT_APPLICABLE` |
 
 ### Human-delivered / not-a-software-feature (per task-brief §74)
 | ID | Item | Status | Notes |
@@ -297,9 +308,9 @@ capability surface (per task-brief §3/§101), not just what's already built.
 |---|---|---|
 | `COMPLETE` | 3 (SRV-001, BAK-002, ACC-001) | 1 (PROV-006) |
 | `PARTIAL` | 3 (SRV-002, APP-001, APP-002, DB-001, BAK-001 — 5 total, see note) | 6 |
-| `NOT_STARTED` | 0 | ~55 |
+| `NOT_STARTED` | 0 | ~46 |
 | `BLOCKED_EXTERNAL` | 0 (sub-scoped within BAK-001/BAK-002's db/full-scope MariaDB verification) | 0 |
-| `INTENTIONALLY_NOT_APPLICABLE` | 0 | 1 |
+| `INTENTIONALLY_NOT_APPLICABLE` | 0 | 10 (HUMAN-001, plus WL-001/002, RS-001/002/003, BILL-001/002/003/004 descoped 2026-08-18 — see §2 "White-label / Reseller" and "Billing") |
 
 *Note: BAK-001 and BAK-002 are each simultaneously `COMPLETE` for their files-scope path
 and effectively `PARTIAL`/`BLOCKED_EXTERNAL` for their db/full-scope path pending a real

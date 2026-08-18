@@ -158,25 +158,32 @@ three tracks).
 | Process/worker management via systemd (queue workers, restart policies) | 3 |
 | UFW + Fail2Ban management UI, SSH/SFTP management, commit-confirm safety flow | 4 |
 | Automated OS security updates (unattended-upgrades integration + reporting) | 2 |
-| Advanced monitoring/alerts (thresholds, email + dashboard notifications) | 3 |
+| Advanced monitoring/alerts (thresholds; Email + Telegram + generic Webhook notification channels only — product decision 2026-08-18, Slack/Discord/Pushover out of scope) | 3 |
 | Advanced log search UI (filters, top URLs/IPs, suspicious-traffic indicators) | 3 |
-| Remote/object-storage backups (S3-compatible, pluggable provider) | 3 |
+| Remote backups — **Amazon S3 only** (product decision 2026-08-18; not a pluggable multi-provider adapter) | 2 |
 | Cross-server app migration/cloning | 3 |
 | **Phase 2 subtotal** | **~33 eng-weeks** (~3–4 months) |
 
 ### Phase 3 — Commercial platform
 
+> **Product decision (2026-08-18): white-label, reseller/self-hosted panel, and
+> billing/wallet/subscriptions are out of scope for this product entirely** — not
+> deferred, removed from the roadmap. The rows below are struck through and kept only
+> so this document's history stays honest about what was originally scoped and why it
+> changed; see `SERVERAVATAR_PARITY.md` §2 "White-label / Reseller" and "Billing" for
+> the corresponding parity-tracker entries (marked `INTENTIONALLY_NOT_APPLICABLE`).
+
 | Milestone | Est. (eng-weeks) |
 |---|---|
 | Organizations/teams, custom roles, granular (server/app/db) permissions | 5 |
 | Team audit logs, temporary/expiring access | 2 |
-| White-label (branding, custom domain), customer-facing limited panel | 5 |
-| Reseller accounts, hosting packages, usage limits | 4 |
-| Billing/subscriptions | 4 |
+| ~~White-label (branding, custom domain), customer-facing limited panel~~ — descoped 2026-08-18 | ~~5~~ |
+| ~~Reseller accounts, hosting packages, usage limits~~ — descoped 2026-08-18 | ~~4~~ |
+| ~~Billing/subscriptions~~ — descoped 2026-08-18 | ~~4~~ |
 | Cloud-provider integrations (provisioning VPS via provider APIs) | 4 |
 | Additional stack adapters (Node.js, Laravel, n8n, Mautic, OpenLiteSpeed, Apache) | 6+ (per-adapter, incremental) |
 | Public API + plugin system | 5 |
-| **Phase 3 subtotal** | **~35+ eng-weeks**, and open-ended as adapters/integrations grow |
+| **Phase 3 subtotal** | **~16+ eng-weeks** (down from ~35+ after the 2026-08-18 descoping), and open-ended as adapters/integrations grow |
 
 These are effort estimates, not calendar commitments — actual calendar time depends on
 team size, review cadence, and how much security review/pen-testing is built into the
@@ -256,14 +263,21 @@ Phase 1:
 - Firewall/Fail2Ban *management UI* and SSH/SFTP management, automated OS updates
   (Phase 2) — Phase 1 installs and runs Fail2Ban/UFW with safe defaults but doesn't yet
   expose full rule-editing UI.
-- Advanced monitoring/alerting thresholds beyond basic up/down + resource display, and
-  all external notification channels (Slack/Telegram/Discord/webhooks) — Phase 1 is
-  email + in-dashboard only.
-- Remote/object-storage backups — Phase 1 is local-storage only.
+- Advanced monitoring/alerting thresholds beyond basic up/down + resource display —
+  Phase 1 is email + in-dashboard only. Phase 2 adds exactly three external channels —
+  **Email, Telegram, and a generic outbound Webhook** — per product decision
+  2026-08-18; Slack, Discord, and Pushover are intentionally out of scope, not
+  deferred.
+- Remote/object-storage backups — Phase 1 is local-storage only. Phase 2 adds exactly
+  one remote target — **Amazon S3** — per product decision 2026-08-18; this is not a
+  pluggable multi-provider adapter, and R2/B2/Spaces/Wasabi/Google Drive/Dropbox are
+  intentionally out of scope, not deferred.
 - Cross-server application migration/cloning (Phase 2).
 - Teams, roles, granular permissions, temporary access — single-user MVP first.
-- White-label, custom domains/branding, reseller accounts, hosting packages, billing —
-  all Phase 3, deliberately after the security-focused MVP is proven.
+- **White-label, custom domains/branding, reseller accounts, hosting packages, and
+  billing/subscriptions are out of scope for this product entirely** (product decision
+  2026-08-18) — not a later phase, removed from the roadmap. See §6's Phase 3 table
+  note above and `SERVERAVATAR_PARITY.md`.
 - Cloud-provider VPS provisioning integrations — Phase 1 works against any existing
   clean Ubuntu VPS with no provider API.
 - Additional stacks (OpenLiteSpeed, Apache, Node.js, Laravel, n8n, Mautic) and their
@@ -278,11 +292,12 @@ Phase 1:
 
 ## 10. Questions requiring product-owner decisions
 
-1. **Pricing/packaging model** — per-server, per-team-seat, flat tiers, or usage-based?
-   This affects the org/billing data model even though billing itself ships in Phase 3.
-2. **Self-hosted/on-prem control plane offering** — is an enterprise self-hosted control
-   plane in scope eventually, or is this always a hosted SaaS product? Affects how much
-   the control plane must be packaged as installable software vs. purely operated by us.
+1. ~~**Pricing/packaging model**~~ — **resolved 2026-08-18**: not applicable. Billing/
+   subscriptions were descoped from this product entirely (see §6 Phase 3 note, §9),
+   so no org/billing data model is needed.
+2. ~~**Self-hosted/on-prem control plane offering / reseller panel**~~ — **resolved
+   2026-08-18**: not applicable. White-label and reseller/self-hosted-panel
+   functionality were descoped from this product entirely (see §6 Phase 3 note, §9).
 3. **OS/target support beyond Ubuntu 24.04** — which Ubuntu LTS versions and Debian
    version should be prioritized next, and on what timeline?
 4. **"Clean VPS only" vs. import** — should Phase 1 explicitly refuse to install on a

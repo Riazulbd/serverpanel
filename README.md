@@ -45,15 +45,19 @@ SSL, basic file manager, local backups, logs, audit trail, basic diagnostics.
 
 **Phase 2 — professional server management:** Git deployment & push-to-deploy, staging
 and cloning, cron/process management, firewall & Fail2Ban management, SSH/SFTP
-management, automated security updates, advanced monitoring/alerts, remote backups,
-cross-server application migration.
+management, automated security updates, advanced monitoring/alerts with Email/Telegram/
+webhook notification channels, remote backups to Amazon S3, cross-server application
+migration.
 
-**Phase 3 — commercial platform:** teams & granular permissions, white-label customer
-panels, reseller system, cloud-provider integrations, billing/subscriptions, additional
-stack adapters (Node.js, Laravel, n8n, Mautic), public API, plugin system.
+**Phase 3 — commercial platform:** teams & granular permissions, cloud-provider
+integrations, additional stack adapters (Node.js, Laravel, n8n, Mautic), public API,
+plugin system. (White-label, reseller/self-hosted panel, and billing/subscriptions are
+**out of scope for this product entirely** — product decision 2026-08-18, not a later
+phase.)
 
 See `docs/product-plan.md` for the full milestone breakdown and rationale for what is
-deliberately postponed out of the initial security-focused MVP.
+deliberately postponed out of the initial security-focused MVP, and
+`docs/SERVERAVATAR_PARITY.md` for what is out of scope entirely rather than postponed.
 
 ## Non-goals / constraints (by design)
 
