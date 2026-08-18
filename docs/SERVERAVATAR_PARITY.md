@@ -113,19 +113,19 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Category**: Database Management
 - **Documentation page**: Database Management → "Understanding Database Management"
 - **Short description**: Create a MySQL/MariaDB database with a least-privilege owner user.
-- **Our implementation**: `db.create`/`db.delete`/`db.list` — identifier allow-list regex, `CREATE USER`/`GRANT` scoped to exactly one database (never global), Unix-socket root auth (no stored MySQL root password on disk for this path).
-- **Frontend**: not yet surfaced as its own dashboard panel (capability exists and is dispatchable via generic task dispatch; no dedicated "Databases" tab yet).
-- **Backend service**: `gateway.dispatch` → `packages/capabilities.handleDBCreate/Delete/List`.
-- **API endpoint(s)**: `POST /api/v1/servers/{id}/tasks`.
+- **Our implementation**: `db.create`/`db.delete`/`db.list` — identifier allow-list regex, `CREATE USER`/`GRANT` scoped to exactly one database (never global), Unix-socket root auth (no stored MySQL root password on disk for this path). `db.create`/`db.delete` now return structured JSON detail (`dbCreateResult`/`dbDeleteResult` in `packages/capabilities/db.go`) instead of a prose string, which is what let DB-005 persist a control-plane record the same way BAK-001 does for backups.
+- **Frontend**: server-detail "Databases" panel — "New database" modal (name, owner user; a random 16-byte owner password is generated server-side and shown exactly once), databases table with per-row delete.
+- **Backend service**: `apiServer.handleCreateDatabase/handleListDatabases/handleDeleteDatabase` (`apps/controlplane/databases.go`) for the persisted, UI-facing path; `gateway.dispatch` → `packages/capabilities.handleDBCreate/Delete/List` underneath either path.
+- **API endpoint(s)**: `POST /api/v1/servers/{id}/databases`, `GET /api/v1/servers/{id}/databases`, `DELETE /api/v1/servers/{id}/databases/{databaseId}` (control-plane-persisted path); `POST /api/v1/servers/{id}/tasks` (generic dispatch path, e.g. for `db.list`, which is intentionally not persisted — see Known differences).
 - **Agent command**: `db.create`, `db.delete`, `db.list`.
-- **DB tables**: none on the control-plane side yet (no `databases` table — see Known differences).
+- **DB tables**: `databases` (`server_id`, `name`, `owner_user`, `status`, `created_at`; `UNIQUE(server_id, name)`). The owner password is never written here — see Security considerations.
 - **Required permission**: authenticated session.
-- **Security considerations**: identifier allow-list (`^[a-z][a-z0-9_]{0,30}$`) prevents SQL-identifier injection where placeholders can't be used; grants are always single-database-scoped.
-- **Test coverage**: manually verified in a prior session against a real MariaDB; not covered by `go test` (requires a running MariaDB — this environment has none).
-- **Current status**: `PARTIAL`
-- **Completion date**: n/a
-- **Known differences**: MongoDB support, a dedicated dashboard UI, and control-plane persistence of database records (so they show up per-site the way backups now do) don't exist yet.
-- **Reason**: capability-layer work landed before the control-plane persistence/UI layer that backups just got (see BAK-001) — same pattern, not yet applied here. Good candidate for the next iteration.
+- **Security considerations**: identifier allow-list (`^[a-z][a-z0-9_]{0,30}$`) prevents SQL-identifier injection where placeholders can't be used; grants are always single-database-scoped; the owner password is generated server-side with `crypto/rand` (never accepted from the client, closing off weak/reused passwords), returned to the caller exactly once in the create response, and is not persisted in the `databases` table, the audit log, or anywhere else in the control plane — the same "shown once, not stored" handling `createServer` uses for bootstrap tokens; delete dispatches `db.delete` on the agent first and only removes the control-plane record after the agent confirms success, so a failed delete can never leave a stale "still exists" record.
+- **Test coverage**: `packages/capabilities/db_test.go` (`TestHandleDBCreateRejectsInvalidName/Owner/ShortPassword`, `TestHandleDBDeleteRejectsInvalidName` — validation logic that runs before any MariaDB connection); `apps/controlplane/store_test.go` (`TestDatabaseCreateListGetDeleteRoundTrip`); `apps/controlplane/http_test.go` (`TestDatabaseEndpointsRequireARealServerAndValidRequest`). The actual `CREATE DATABASE`/`CREATE USER`/`GRANT`/`DROP` round trip against a real MariaDB is manually verified in a prior session, not exercised by `go test` in this environment (no MariaDB here).
+- **Current status**: `PARTIAL` (persistence/UI/list/delete flow fully implemented and automated-tested at the validation/store/HTTP layers; the real-MariaDB round trip remains manually-verified-only, same gap as BAK-001's db/full scope)
+- **Completion date**: 2026-08-18 (control-plane persistence + dashboard UI); real-MariaDB verification of `db.create`/`db.delete` remains `BLOCKED_EXTERNAL` in this environment.
+- **Known differences**: MongoDB support (DB-002) and a dedicated database-admin UI (phpMyAdmin-equivalent, DB-003) don't exist yet; `db.list` (raw introspection of what's actually on the server) is deliberately not wired into the persisted/UI path — the `databases` table is the source of truth for what this control plane created and can restore/delete, while `db.list` remains available via generic dispatch for out-of-band reconciliation.
+- **Reason**: DB-002/DB-003/DB-004 (MongoDB, admin UI, process/query monitoring) are separate, larger features tracked independently below, not folded into this pass.
 
 ### BAK-001 — On-demand backup (files/db/full)
 - **Category**: Backups
@@ -261,7 +261,8 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | DB-002 | MongoDB support | `NOT_STARTED` | |
 | DB-003 | phpMyAdmin / DB admin UI integration | `NOT_STARTED` | |
 | DB-004 | Database process/query monitoring | `NOT_STARTED` | |
-| DB-005 | Control-plane persistence + dashboard UI for databases (mirroring what BAK-001 just got) | `NOT_STARTED` | See DB-001's "Known differences" |
+
+DB-005 (control-plane persistence + dashboard UI for databases) is now implemented — folded into the DB-001 detail block above rather than tracked as a separate row, since it's the persistence/UI layer for the same capability, not a distinct feature.
 
 ### WordPress Toolkit (WP-*)
 | ID | Feature | Status |
@@ -334,9 +335,10 @@ and "verified end-to-end."
 Per the task brief's completion standard: before this project can be called "done,"
 the doc inventory must be rebuilt (recursive crawl, not just the top-level pass in
 `SERVERAVATAR_DOC_INVENTORY.md`) and every discovered capability re-diffed against this
-file. That has **not** happened yet — this is the first pass, covering enough ground to
-establish the tracking process and close the single highest-priority gap
-(BAK-002/backup restore) that the pre-existing `SYSTEM.md` had already flagged.
+file. That has **not** happened yet — this remains an early pass, having so far
+established the tracking process and closed the two highest-priority gaps the
+pre-existing `SYSTEM.md` had flagged (BAK-002/backup restore, then DB-001's
+persistence/UI gap, i.e. DB-005).
 
 ## 7. Workflow for future sessions
 
@@ -359,3 +361,9 @@ establish the tracking process and close the single highest-priority gap
   BAK-001/BAK-002 reflecting this session's backup-restore implementation. ~60
   capabilities enumerated overall (detailed + summary), the large majority honestly
   `NOT_STARTED`.
+- **2026-08-18**: closed DB-001's known persistence/UI gap (tracked as DB-005): added a
+  `databases` control-plane table, `apps/controlplane/databases.go` (create/list/delete
+  endpoints, dispatch-then-persist-on-success, server-generated one-time owner
+  password), a "Databases" dashboard panel, and structured JSON detail output from
+  `db.create`/`db.delete` so the control plane can parse and persist their results.
+  DB-005 folded into the DB-001 entry rather than kept as a separate row.

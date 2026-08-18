@@ -2,6 +2,36 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-18 — Database control-plane persistence and dashboard UI
+
+- **Closed DB-001's known persistence/UI gap** (tracked as DB-005 in the parity
+  matrix): `db.create`/`db.delete` (`packages/capabilities/db.go`) now return
+  structured JSON detail (`dbCreateResult`/`dbDeleteResult`) instead of a prose
+  string, matching the pattern `backup.run`/`backup.restore` already used — this is
+  what lets the control plane parse and persist what the agent actually did.
+- Added a `databases` table (`apps/controlplane/db.go`) and store methods
+  (`createDatabase`/`listDatabases`/`getDatabase`/`deleteDatabase`, each scoped by
+  server ID the same way `getSite`/`getBackup` are), three new endpoints
+  (`GET`/`POST /api/v1/servers/{id}/databases`, `DELETE
+  /api/v1/servers/{id}/databases/{databaseId}`, `apps/controlplane/databases.go`),
+  and a "Databases" panel per server in the dashboard (create-database modal, table
+  with per-row delete, destructive-action confirmation).
+- The owner password for a new database user is generated server-side with
+  `crypto/rand` (never accepted from the client) and returned to the caller exactly
+  once in the create response — the same "shown once, not stored" handling
+  bootstrap tokens already get — and is never written to the `databases` table or
+  the audit log. Delete only removes the control-plane record after the agent
+  confirms `db.delete` succeeded, so a failed delete can't leave a stale record.
+- Added 6 new tests: 4 capability-layer validation tests
+  (`TestHandleDBCreateRejectsInvalidName/Owner/ShortPassword`,
+  `TestHandleDBDeleteRejectsInvalidName` — exercised without a live MariaDB, since
+  the checks they cover run before any database connection is opened), 1
+  control-plane store round-trip test, and 1 HTTP boundary/validation test. Full
+  suite: 67 test functions, `go vet`/`gofmt` clean.
+- Updated `SYSTEM.md`, `API.md`, and `SERVERAVATAR_PARITY.md` (DB-001's detail block
+  now reflects the persisted/UI path; DB-005 folded into it rather than tracked
+  separately).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

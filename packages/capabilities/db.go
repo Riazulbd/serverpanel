@@ -3,11 +3,31 @@ package capabilities
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"regexp"
+	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 )
+
+// dbCreateResult and dbDeleteResult are the structured detail payloads
+// handleDBCreate/handleDBDelete return, following the same pattern as
+// backupResult/restoreResult (backup.go): a plain human-readable string
+// can't be safely parsed back into fields, so any caller that needs to
+// persist a control-plane-side record of what the agent actually did
+// (see apps/controlplane/databases.go) needs JSON, not prose.
+type dbCreateResult struct {
+	Name      string    `json:"name"`
+	OwnerUser string    `json:"owner_user"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type dbDeleteResult struct {
+	Name      string    `json:"name"`
+	OwnerUser string    `json:"owner_user"`
+	DeletedAt time.Time `json:"deleted_at"`
+}
 
 // identifierRe is the allow-list for database/user names. MySQL has no
 // placeholder syntax for identifiers (only for values), so the standard
@@ -75,7 +95,11 @@ func handleDBCreate(ctx context.Context, params map[string]any, progress Progres
 		return "", fmt.Errorf("flush privileges: %w", err)
 	}
 
-	return fmt.Sprintf("database %q created, owned by user %q with grants scoped to that database only", name, owner), nil
+	detail, err := json.Marshal(dbCreateResult{Name: name, OwnerUser: owner, CreatedAt: time.Now().UTC()})
+	if err != nil {
+		return "", err
+	}
+	return string(detail), nil
 }
 
 func handleDBDelete(ctx context.Context, params map[string]any, progress Progress) (string, error) {
@@ -100,7 +124,12 @@ func handleDBDelete(ctx context.Context, params map[string]any, progress Progres
 		}
 		db.ExecContext(ctx, fmt.Sprintf("DROP USER IF EXISTS `%s`@'localhost'", owner))
 	}
-	return fmt.Sprintf("database %q deleted", name), nil
+
+	detail, err := json.Marshal(dbDeleteResult{Name: name, OwnerUser: owner, DeletedAt: time.Now().UTC()})
+	if err != nil {
+		return "", err
+	}
+	return string(detail), nil
 }
 
 func handleDBList(ctx context.Context, params map[string]any, progress Progress) (string, error) {
