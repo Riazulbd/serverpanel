@@ -172,6 +172,16 @@ func (s *store) markIssuedCert(serverID, serial string) {
 	s.log(serverID, "", "agent.registered", fmt.Sprintf("cert_serial=%s", serial))
 }
 
+// recordCertRenewal updates a server's on-record certificate serial after a
+// successful mTLS-authenticated renewal (see gateway.renewAgentCert). The
+// previous serial is deliberately left out of revoked_certs — see that
+// method's doc comment for why an overlap window is used instead of an
+// immediate swap-and-revoke.
+func (s *store) recordCertRenewal(serverID, newSerial string) {
+	s.db.Exec(`UPDATE servers SET cert_serial = ? WHERE id = ?`, newSerial, serverID)
+	s.log(serverID, "", "agent.cert_renewed", fmt.Sprintf("cert_serial=%s", newSerial))
+}
+
 func (s *store) isRevoked(serial string) bool {
 	var n int
 	s.db.QueryRow(`SELECT COUNT(1) FROM revoked_certs WHERE serial = ?`, serial).Scan(&n)

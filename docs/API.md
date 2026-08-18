@@ -160,6 +160,8 @@ connection carries newline-delimited JSON `Envelope`s in both directions
 {"type": "task", "task": {"id": "...", "capability": "...", "params": {}, "issued_at": "..."}}
 {"type": "task_event", "task_event": {"task_id": "...", "status": "queued|running|succeeded|failed|rejected", "message": "...", "detail": "...", "at": "..."}}
 {"type": "ack"}
+{"type": "renew_csr", "renew_csr": {"csr_pem": "..."}}
+{"type": "renew_cert", "renew_cert": {"cert_pem": "...", "serial": "..."}}
 ```
 
 Flow: gateway accepts → verifies cert → sends `ack` → agent sends `hello`, then
@@ -170,6 +172,24 @@ HTTP handler) until it sees a terminal event for the task ID it sent, or its con
 deadline expires. There is no message type for a free-form command — `capability` must
 be a name in `packages/capabilities`'s fixed registry, or the agent returns `rejected`
 without executing anything.
+
+**Certificate renewal** (`renew_csr` / `renew_cert`, see `SECURITY.md` §2): at any
+point after the session is established, the agent may send `renew_csr` on its own
+schedule (`apps/agent/connect.go` `renewalLoop`, hourly check, triggers once fewer than
+7 days remain on its current 30-day client certificate). `renew_csr.csr_pem`'s embedded
+Subject is never trusted — the gateway (`gateway.renewAgentCert`) signs the replacement
+using the server ID it already derived from this connection's own peer certificate at
+handshake time, exactly as `POST /agents/register` does for a fresh registration. The
+gateway replies with `renew_cert` (a certificate valid for another 30 days, a fresh
+serial) or, on failure, nothing — the agent's current certificate is still valid, so a
+missing reply just means the next hourly check tries again. The previous certificate is
+*not* revoked at this point; both remain valid until the old one's natural expiry (an
+overlap window, not an instantaneous swap — see the doc comment on `renewAgentCert` for
+why). The agent persists the new certificate/key to disk (atomic write, so a crash
+mid-persist can't corrupt the identity files) and updates its in-memory identity so the
+*next* reconnect (whenever the current long-lived connection eventually drops, for any
+reason) authenticates with it; there is no forced immediate reconnect, since the
+overlap window makes one unnecessary.
 
 ## 4. Capability reference
 

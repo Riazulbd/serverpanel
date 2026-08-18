@@ -40,7 +40,7 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Documentation page**: Server Management → "Installation (Direct Method)"
 - **Short description**: Connect a VPS to the control plane via a one-time install command.
 - **Expected behavior** (per ServerAvatar's documented workflow): operator creates a server record, gets an install command, runs it on a clean VPS, server appears connected.
-- **Our implementation**: bootstrap-token → mTLS client-certificate exchange (`POST /agents/register`); agent connects outbound to the gateway, no inbound port required.
+- **Our implementation**: bootstrap-token → mTLS client-certificate exchange (`POST /agents/register`); agent connects outbound to the gateway, no inbound port required. The issued 30-day certificate auto-renews itself over the live connection ~7 days before expiry (`renew_csr`/`renew_cert`, `gateway.renewAgentCert`) — see AGT-002.
 - **Frontend**: `web/index.html` "+ New server" modal, server list/detail views.
 - **Backend service**: `apiServer.handleCreateServer`, `agentCA`, `gateway`.
 - **API endpoint(s)**: `POST /api/v1/servers`, `POST /agents/register`.
@@ -51,8 +51,64 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Test coverage**: `apps/controlplane/http_test.go` (`TestServerCreateListRevokeFlow`, `TestRegisterEndpointRejectsBadToken`), `apps/controlplane/store_test.go`.
 - **Current status**: `COMPLETE`
 - **Completion date**: 2026-08-14
-- **Known differences**: no agent certificate auto-renewal before 30-day expiry yet.
-- **Reason**: scoped out of the initial secure-foundation pass; tracked in `SYSTEM.md` §21.
+- **Known differences**: none remaining for initial registration; see AGT-002 for renewal's own known gap.
+- **Reason**: n/a.
+
+### AGT-002 — Agent certificate auto-renewal
+- **Category**: Server Management (agent security)
+- **Documentation page**: n/a — not a ServerAvatar-documented end-user feature; this is
+  the underlying machine-identity security property `SECURITY.md` §2 commits to for
+  SRV-001's agent connection to remain trustworthy over time without requiring a human
+  to periodically re-run the install command.
+- **Short description**: an agent's 30-day mTLS client certificate renews itself
+  automatically before it expires, with no human action required and no shared
+  long-lived secret ever reused.
+- **Expected behavior**: an agent connected for longer than its certificate's validity
+  period keeps working uninterrupted; a certificate is never silently allowed to lapse
+  and force a surprise reconnection failure.
+- **Our implementation**: `apps/agent/connect.go` `renewalLoop` checks hourly; once
+  fewer than 7 days remain (`renewalThreshold`) it sends `renew_csr` over the existing
+  authenticated connection. `apps/controlplane/gateway.go` `renewAgentCert` signs a
+  fresh 30-day certificate bound to the server ID already derived from the live
+  session's peer certificate (the CSR's own requested Subject is ignored), returns it
+  via `renew_cert`, and records the new serial (`store.recordCertRenewal`). The agent
+  persists the new cert/key atomically (temp file + rename) and updates its in-memory
+  identity so the next reconnect uses it; the previous certificate is intentionally left
+  un-revoked (an overlap window, not an instantaneous swap) so an agent crash between
+  receiving the new certificate and durably persisting it can never strand the machine.
+- **Frontend**: none — fully automatic, nothing for a user to configure or click.
+- **Backend service**: `gateway.renewAgentCert`, `store.recordCertRenewal`.
+- **API endpoint(s)**: n/a — agent gateway wire protocol only (`API.md` §3 "Certificate
+  renewal"), not a REST endpoint.
+- **Agent command**: n/a — protocol-level (`renew_csr`/`renew_cert` message types), not
+  a `packages/capabilities` allow-listed capability.
+- **DB tables**: `servers.cert_serial` (updated on each renewal), `audit_log`
+  (`agent.cert_renewed` / `agent.cert_renewal_failed` entries).
+- **Required permission**: n/a — gated entirely by the existing mTLS session, not a
+  user-facing permission.
+- **Security considerations**: renewal identity is bound to the already-authenticated
+  session, never to anything the CSR requests, so a connected agent can only ever renew
+  its own identity; overlap window (old cert stays valid until natural expiry) trades a
+  small, bounded extra-valid-cert window for eliminating a crash-during-swap
+  lockout scenario; a renewal window missed entirely (agent offline past expiry) fails
+  closed to manual re-registration by design, not silently re-trusted.
+- **Test coverage**: `apps/controlplane/renewal_test.go` (4 tests: identity binding
+  ignores the CSR's requested Subject, store update + overlap-window non-revocation,
+  unknown-server rejection, successive-renewal chaining), `apps/agent/register_test.go`
+  (9 tests: CSR/key generation, the renewal-threshold decision function, atomic
+  persistence, and that a renewed identity survives a simulated process restart via
+  `loadIdentity`). **Not covered**: the actual `renew_csr`/`renew_cert` exchange over a
+  live TCP mTLS connection — see `SECURITY.md` §2's own note on why (structural: two
+  separate `package main` binaries).
+- **Current status**: `PARTIAL`
+- **Completion date**: 2026-08-18 (logic implemented and tested at the CA/store and
+  on-disk-persistence layers; full wire-level round trip still unverified)
+- **Known differences**: none from the documented design in `SECURITY.md` §2 itself —
+  the remaining gap is test coverage depth, not behavior.
+- **Reason**: closing the wire-level test gap requires either a scripted
+  build-both-binaries subprocess test or extracting the protocol-handling logic into an
+  importable (non-`main`) package; both are real, scoped follow-up work, tracked in
+  `TESTING.md` §5.
 
 ### SRV-002 — Hosting stack installation (LEMP)
 - **Category**: Server Management
@@ -296,7 +352,7 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | Status | Count (detailed entries) | Count (summary-table rows) |
 |---|---|---|
 | `COMPLETE` | 3 (SRV-001, BAK-002, ACC-001) | 1 (PROV-006) |
-| `PARTIAL` | 3 (SRV-002, APP-001, APP-002, DB-001, BAK-001 — 5 total, see note) | 6 |
+| `PARTIAL` | 3 (SRV-002, APP-001, APP-002, DB-001, BAK-001, AGT-002 — 6 total, see note) | 6 |
 | `NOT_STARTED` | 0 | ~55 |
 | `BLOCKED_EXTERNAL` | 0 (sub-scoped within BAK-001/BAK-002's db/full-scope MariaDB verification) | 0 |
 | `INTENTIONALLY_NOT_APPLICABLE` | 0 | 1 |

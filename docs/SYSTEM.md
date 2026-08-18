@@ -52,8 +52,9 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | User/organization management | 🚧 single-user model only; no orgs/teams yet |
 | Multiple-server management | ✅ create/list/get/revoke, search/filter in UI |
 | Secure agent install/registration | ✅ bootstrap token → mTLS cert exchange |
-| Agent identity, cert rotation, revocation | 🚧 issuance + revocation done; no
-  auto-renewal before expiry yet (see `SECURITY.md` §2) |
+| Agent identity, cert rotation, revocation | ✅ issuance, hourly-checked auto-renewal
+  ~7 days before a cert's 30-day expiry (over the existing mTLS session, no shared
+  secret reused), and revocation all implemented — see `SECURITY.md` §2 |
 | Server health monitoring | ✅ heartbeat: uptime, load, mem%, disk% |
 | Server groups/tags/metadata | ✅ `group`, `tags[]` on server records |
 | Background job queue | ⬜ task dispatch is synchronous request/response today,
@@ -279,7 +280,10 @@ See `SECURITY.md` in full. Summary: single-use, short-lived (15 min default),
 hashed-at-rest bootstrap tokens exchanged exactly once for a 30-day mTLS client
 certificate bound (by `CommonName`) to the server's ID; the gateway independently
 derives identity from the certificate on every connection (never trusts anything the
-agent asserts in-band) and checks a revocation list on every handshake.
+agent asserts in-band) and checks a revocation list on every handshake. Before that
+30-day certificate expires, the agent auto-renews it over the same authenticated
+connection (`renew_csr`/`renew_cert`, `API.md` §3) — the replacement is bound to the
+same gateway-derived identity, never anything the renewal request itself claims.
 
 ## 12. Privileged operations and allow-list
 
@@ -384,8 +388,12 @@ all ⬜, scoped to Phase 2 per `product-plan.md` §9.
 - No backup scheduling/retention policy — backups are on-demand only.
 - No on-disk agent task journal — a task in flight when the agent process restarts is
   lost, not resumed (see `ARCHITECTURE.md` §4 "As built").
-- No agent certificate auto-renewal before its 30-day expiry (see `SECURITY.md` §2).
 - No agent self-update mechanism (see `SECURITY.md` §3).
+- Agent certificate auto-renewal (`SECURITY.md` §2) is unit- and integration-tested at
+  the CA/store layer and the on-disk persistence layer, but the actual `renew_csr`/
+  `renew_cert` exchange over a live TCP mTLS connection has not been exercised — see
+  `TESTING.md` §2 for why (a structural constraint: `apps/agent` and
+  `apps/controlplane` are both `package main`, so one Go test binary can't import both).
 - No background job queue — task dispatch is synchronous and bounded by a 120s HTTP
   timeout; this will not scale past a moderate number of concurrent long-running tasks
   (e.g. many simultaneous `stack.install` runs) without becoming a queue.

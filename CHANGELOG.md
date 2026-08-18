@@ -2,6 +2,68 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-18 — Agent certificate auto-renewal
+
+- **Implemented agent client-certificate auto-renewal**, closing the security gap
+  `SECURITY.md` §2 had flagged as not-yet-built since the initial trust-model design:
+  an agent's 30-day mTLS client certificate previously had no rotation path short of
+  a human manually re-running the install command with a fresh bootstrap token once it
+  expired. `apps/agent/connect.go`'s new `renewalLoop` checks hourly and, once fewer
+  than 7 days of validity remain, sends a `renew_csr` message over the agent's
+  *existing* authenticated connection — no shared long-lived secret is ever reused.
+  `apps/controlplane/gateway.go`'s new `renewAgentCert` signs the replacement bound to
+  the server ID it already derived from that live session's peer certificate at
+  handshake time (the CSR's own requested Subject is ignored outright, so a connected
+  agent can only ever renew its own identity), and replies with `renew_cert`. The
+  previous certificate is deliberately left un-revoked — an overlap window until its
+  own natural expiry, not an instantaneous swap — so an agent crash or dropped
+  connection between receiving the new certificate and durably persisting it to disk
+  can never strand the machine requiring manual re-registration for no operational
+  reason. The agent persists the renewed identity via an atomic temp-file-then-rename
+  write and updates its in-memory identity in place, so the very next reconnect (for
+  any reason — network blip, control-plane restart) picks it up automatically.
+- Added two new wire message types (`renew_csr`/`renew_cert`, `packages/proto/proto.go`)
+  and a shared `agentCertTTL` constant (`apps/controlplane/gateway.go`) now used by both
+  first registration and renewal, replacing a duplicated magic-number TTL.
+- **Fixed a latent goroutine-leak bug** found while wiring the renewal loop in:
+  `heartbeatLoop` was launched against the agent process's top-level context, not one
+  scoped to the individual connection — so every reconnect (a normal, expected event
+  over a long agent uptime) leaked one ticker goroutine forever, retrying failed writes
+  to an already-closed connection. Both `heartbeatLoop` and the new `renewalLoop` are
+  now scoped to a per-connection `context.WithCancel`, cancelled when `runConnection`
+  returns.
+- **Fixed a latent concurrent-write race** on the agent's connection encoder: task
+  results (`handleTask`, one goroutine per in-flight task) and heartbeats were both
+  calling `enc.Encode` on the same unsynchronized `*json.Encoder` concurrently, which
+  could interleave two JSON messages into one corrupted line on the wire under `-race`
+  detection. Introduced `safeEncoder`, a small mutex-guarded wrapper now shared by
+  `heartbeatLoop`, `handleTask`, and `renewalLoop`.
+- **Fixed the same class of race on `identity`'s certificate fields**: renewal
+  updates `CertPEM`/`KeyPEM` from a background goroutine that can outlive a single
+  `runConnection` call, and the next reconnect's `tls.X509KeyPair` read had no
+  synchronization against a still-in-flight renewal write. Made both fields
+  private, reachable only through mutex-guarded `certKeyPEM()`/`setCertKeyPEM()`
+  accessors — the full suite (including `apps/agent`, which had no test file
+  before this change) now passes under `go test -race`.
+- Added `apps/controlplane/renewal_test.go` (4 tests: renewal binds to the
+  already-authenticated server ID regardless of what the CSR requests, the store
+  updates to the new serial while the previous serial is confirmed *not* revoked — the
+  overlap window — an unknown server ID is rejected, and successive renewals chain
+  correctly) and `apps/agent/register_test.go` (9 tests: this is `apps/agent`'s first
+  test file — CSR/keypair generation and PEM round-tripping, the renewal-threshold
+  decision function, atomic file persistence, and that a renewed identity survives a
+  simulated process restart via `loadIdentity`). Full suite: 74 test functions across
+  three packages (was 61 across two), `go vet`/`gofmt` clean, `-race` clean.
+- Updated `SECURITY.md` §2 from "partially implemented" to "implemented", `API.md` §3
+  with the new wire messages, `SYSTEM.md` (§2 feature table, §11, §21 known
+  limitations), `TESTING.md`, and `docs/SERVERAVATAR_PARITY.md` (new AGT-002 entry) to
+  match — including an explicit, undisguised note that the actual `renew_csr`/
+  `renew_cert` exchange over a live TCP socket is *not* covered by the automated suite
+  (a structural limit: `apps/agent` and `apps/controlplane` are both `package main`, so
+  one Go test binary can't import both to drive a real connection between them), the
+  same honest gap the pre-existing agent connect/reconnect loop already had before this
+  change.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

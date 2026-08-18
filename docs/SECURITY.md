@@ -47,24 +47,42 @@ Properties this guarantees:
 - **Revocable**: an unused token can be revoked from the dashboard (e.g., user made a
   mistake, wants to reissue); an already-exchanged identity is revoked separately (§3).
 
-## 2. Ongoing authentication: mutual TLS — **partially implemented**
+## 2. Ongoing authentication: mutual TLS — **implemented**
 
 - All agent ↔ control-plane traffic (registration excluded, which is TLS + token) uses
   **mTLS**: the gateway only accepts connections presenting a valid, non-revoked
   certificate issued by the internal Agent CA, and the agent verifies the gateway's
   certificate/pinned CA to prevent MITM or connecting to a spoofed endpoint.
   **Implemented as described** — see `apps/controlplane/gateway.go` `handleConn`.
-- Client certs are **short-lived** (e.g. 30–90 days) and **auto-rotated**: before
-  expiry, the agent requests renewal authenticated by its current still-valid cert (no
-  shared long-lived secret is ever reused for renewal). If a renewal window is missed
-  (agent offline past expiry), the agent falls back to a manual re-registration flow
-  requiring a fresh bootstrap token from the dashboard — this is an intentional
-  fail-closed behavior, not silent re-trust.
-  **Not yet implemented**: certs are issued with a fixed 30-day TTL
-  (`apps/controlplane/http.go` `handleRegister`) and there is no renewal
-  capability/endpoint yet — an agent whose cert expires must be manually
-  re-registered with a fresh bootstrap token today. Auto-rotation before expiry is
-  tracked as a known gap in `SYSTEM.md`.
+- Client certs are **short-lived** (30 days, `agentCertTTL` in
+  `apps/controlplane/gateway.go`) and **auto-rotated**: `apps/agent/connect.go`'s
+  `renewalLoop` checks hourly, and once fewer than 7 days of validity remain
+  (`renewalThreshold`) sends a `renew_csr` message over the *existing*
+  mTLS-authenticated connection — no shared long-lived secret is ever reused for
+  renewal, and the CSR's own requested Subject is ignored: `gateway.renewAgentCert`
+  binds the reissued certificate to the server ID it already derived from this
+  session's peer certificate at handshake time, the same trust anchor `POST
+  /agents/register` uses for first issuance. See `API.md` §3 "Certificate renewal" for
+  the full wire flow, including why the previous certificate is deliberately left valid
+  (an overlap window) rather than revoked at the instant a replacement is issued.
+  If a renewal window is missed entirely (agent offline past its cert's expiry), there
+  is no live mTLS session left to renew over — the agent falls back to needing a fresh
+  bootstrap token and full re-registration, which is the intentional fail-closed
+  behavior this section originally called for, not a gap.
+  **Tested**: `apps/controlplane/renewal_test.go` covers `renewAgentCert` — a renewal
+  is bound to the caller's authenticated server ID regardless of what the CSR itself
+  requests, the store is updated to the new serial, the previous serial is confirmed
+  *not* revoked (the overlap window), an unknown server ID is rejected, and successive
+  renewals chain correctly. `apps/agent/register_test.go` covers the renewal-threshold
+  decision (`needsRenewal`), CSR/key generation, and that a renewed identity is
+  durably persisted (atomic write) and survives a simulated process restart
+  (`loadIdentity` picks up the renewed cert, not the original). **Not yet exercised**:
+  the actual `renew_csr`/`renew_cert` exchange over a live TCP mTLS connection —
+  `apps/agent` and `apps/controlplane` are both `package main`, so a single Go test
+  binary can't import both to drive a real socket round trip; closing that requires
+  either a scripted subprocess test (building both binaries and wiring them together,
+  tracked in `TESTING.md` §5 item 2) or extracting the wire-level logic into an
+  importable package, neither of which is done yet.
 - The Agent CA's private key is held in a dedicated, tightly access-controlled service
   (e.g. `step-ca` or HSM-backed KMS in later stages), separate from the general
   application database, so a control-plane app-tier compromise doesn't automatically

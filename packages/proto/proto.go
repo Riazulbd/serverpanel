@@ -18,6 +18,8 @@ const (
 	MsgTask      MessageType = "task"       // gateway -> agent, requests a capability run
 	MsgTaskEvent MessageType = "task_event" // agent -> gateway, progress/result of a task
 	MsgAck       MessageType = "ack"        // either direction, generic acknowledgement
+	MsgRenewCSR  MessageType = "renew_csr"  // agent -> gateway, request a fresh client cert before expiry
+	MsgRenewCert MessageType = "renew_cert" // gateway -> agent, the freshly issued client cert
 )
 
 // Envelope is the outer message wrapper. Exactly one of the typed payload
@@ -28,6 +30,29 @@ type Envelope struct {
 	Heartbeat *Heartbeat  `json:"heartbeat,omitempty"`
 	Task      *Task       `json:"task,omitempty"`
 	TaskEvent *TaskEvent  `json:"task_event,omitempty"`
+	RenewCSR  *RenewCSR   `json:"renew_csr,omitempty"`
+	RenewCert *RenewCert  `json:"renew_cert,omitempty"`
+}
+
+// RenewCSR is sent by an agent over its already-mTLS-authenticated
+// connection to request a fresh client certificate before its current one
+// expires (see docs/SECURITY.md §2). The gateway binds the issued
+// certificate to the CommonName it already independently derived from this
+// session's peer certificate — CSRPEM's own requested Subject is ignored, so
+// a connected agent can only ever renew its own identity, never claim
+// another server's.
+type RenewCSR struct {
+	CSRPEM string `json:"csr_pem"`
+}
+
+// RenewCert is the gateway's reply to a RenewCSR: a freshly issued client
+// certificate for the same server identity, with a new serial. The
+// certificate that authenticated this connection remains valid until its own
+// natural expiry (an overlap window, not an immediate swap) — see
+// apps/controlplane/gateway.go renewAgentCert's doc comment for why.
+type RenewCert struct {
+	CertPEM string `json:"cert_pem"`
+	Serial  string `json:"serial"`
 }
 
 // Hello is sent by the agent immediately after the mTLS handshake completes,

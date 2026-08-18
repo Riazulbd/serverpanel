@@ -28,6 +28,14 @@ type gateway struct {
 	sessions map[string]*agentSession
 }
 
+// agentCertTTL is the validity period issued to every agent client
+// certificate, both at first registration (http.go handleRegister) and on
+// every subsequent renewal (renewAgentCert) — short enough that a leaked key
+// has a bounded blast radius, long enough that routine renewal (agents
+// request a new one once under renewalThreshold of validity remains, see
+// apps/agent/connect.go) is infrequent. See docs/SECURITY.md §2.
+const agentCertTTL = 30 * 24 * time.Hour
+
 type agentSession struct {
 	serverID string
 	conn     net.Conn
@@ -173,8 +181,50 @@ func (g *gateway) handleConn(conn net.Conn) {
 					}
 				}
 			}
+		case proto.MsgRenewCSR:
+			if env.RenewCSR != nil {
+				certPEM, serial, err := g.renewAgentCert(serverID, []byte(env.RenewCSR.CSRPEM))
+				if err != nil {
+					// Not fatal to the session: the agent's current cert is
+					// still valid, so it simply retries renewal on its next
+					// scheduled check. Logged, not silently dropped.
+					g.store.log(serverID, "", "agent.cert_renewal_failed", err.Error())
+					log.Printf("cert renewal failed for server_id=%s: %v", serverID, err)
+					continue
+				}
+				sess.mu.Lock()
+				err = sess.enc.Encode(proto.Envelope{Type: proto.MsgRenewCert, RenewCert: &proto.RenewCert{CertPEM: string(certPEM), Serial: serial}})
+				sess.mu.Unlock()
+				if err != nil {
+					return
+				}
+			}
 		}
 	}
+}
+
+// renewAgentCert issues a fresh client certificate for a server whose
+// identity this method's caller has already independently established from
+// the live mTLS session's peer certificate (handleConn's serverID, never a
+// value the agent asserts in-band) — csrPEM only ever supplies a public key,
+// never an identity claim. The previously issued certificate is deliberately
+// left un-revoked: it stays valid until its own natural expiry, giving an
+// overlap window rather than an instantaneous swap. That trade is safer
+// because it tolerates the agent crashing or losing its connection between
+// receiving the new certificate and durably persisting it to disk — with an
+// immediate revoke-the-old-one, that narrow window would strand the agent
+// and force a manual re-registration for no operational reason.
+func (g *gateway) renewAgentCert(serverID string, csrPEM []byte) (certPEM []byte, serial string, err error) {
+	if _, ok := g.store.get(serverID); !ok {
+		return nil, "", fmt.Errorf("unknown server_id=%s", serverID)
+	}
+	certPEM, sn, err := g.ca.signAgentCSR(csrPEM, serverID, agentCertTTL)
+	if err != nil {
+		return nil, "", fmt.Errorf("sign renewal CSR: %w", err)
+	}
+	serial = sn.String()
+	g.store.recordCertRenewal(serverID, serial)
+	return certPEM, serial, nil
 }
 
 // dispatch sends a task to a connected agent and waits (bounded by ctx) for
