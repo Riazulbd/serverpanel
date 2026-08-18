@@ -184,6 +184,15 @@
         <p class="muted" id="siteDetailMeta" style="margin:0 0 20px"></p>
 
         <div class="section-title" style="display:flex;justify-content:space-between;align-items:center">
+          <span>SSL</span>
+          <div>
+            <button onclick="checkSSLStatus()">Check status</button>
+            <button class="primary" onclick="openIssueSSLModal()">Issue Let's Encrypt certificate</button>
+          </div>
+        </div>
+        <div id="sslResult" class="task-result hidden"></div>
+
+        <div class="section-title" style="display:flex;justify-content:space-between;align-items:center">
           <span>Backups</span>
           <button class="primary" onclick="openNewBackupModal()">+ Create backup</button>
         </div>
@@ -553,6 +562,74 @@ async function createBackup() {
 }
 
 function closeModalNoRefresh() { document.getElementById('modalRoot').innerHTML = ''; }
+
+function openIssueSSLModal() {
+  const site = (state.sites || []).find(s => s.ID === state.selectedSiteId);
+  const root = document.getElementById('modalRoot');
+  root.innerHTML = `
+    <div class="modal-backdrop" onclick="if(event.target===this) closeModal()">
+      <div class="modal">
+        <h2>Issue Let's Encrypt certificate</h2>
+        <p class="muted">Requests and installs a free SSL certificate for <strong>${escapeHtml(site ? site.Domain : '')}</strong>. The domain's DNS must already point at this server.</p>
+        <div class="field">
+          <label>Notification email (required by Let's Encrypt for expiry/urgent notices)</label>
+          <input id="sslEmail" placeholder="you@example.com">
+        </div>
+        <button class="primary" style="width:100%" onclick="issueSSL()">Issue certificate</button>
+        <div class="error" id="sslModalError"></div>
+        <p class="muted" id="sslModalStatus"></p>
+      </div>
+    </div>`;
+}
+
+async function issueSSL() {
+  const site = (state.sites || []).find(s => s.ID === state.selectedSiteId);
+  const email = document.getElementById('sslEmail').value.trim();
+  const err = document.getElementById('sslModalError');
+  const status = document.getElementById('sslModalStatus');
+  err.textContent = '';
+  if (!email) { err.textContent = 'Email is required.'; return; }
+  status.textContent = 'Requesting certificate from Let\'s Encrypt... this can take up to a minute.';
+  try {
+    const res = await api(API + '/servers/' + state.selectedServerId + '/tasks', {
+      method: 'POST',
+      body: JSON.stringify({capability: 'ssl.issue_letsencrypt', params: {domain: site.Domain, email}})
+    });
+    if (res.status !== 'succeeded') {
+      status.textContent = '';
+      err.textContent = res.message || res.detail || 'Certificate issuance failed.';
+      return;
+    }
+    closeModalNoRefresh();
+    const box = document.getElementById('sslResult');
+    box.className = 'task-result ok';
+    box.textContent = res.detail || 'Certificate issued.';
+    box.classList.remove('hidden');
+  } catch (e) {
+    status.textContent = '';
+    err.textContent = e.message;
+  }
+}
+
+async function checkSSLStatus() {
+  const site = (state.sites || []).find(s => s.ID === state.selectedSiteId);
+  const box = document.getElementById('sslResult');
+  box.className = 'task-result running';
+  box.textContent = 'Checking certificate and auto-renewal status...';
+  box.classList.remove('hidden');
+  try {
+    const res = await api(API + '/servers/' + state.selectedServerId + '/tasks', {
+      method: 'POST',
+      body: JSON.stringify({capability: 'ssl.status', params: {domain: site.Domain}})
+    });
+    const ok = res.status === 'succeeded' && !(res.detail || '').includes('WARNING');
+    box.className = 'task-result ' + (res.status === 'succeeded' ? (ok ? 'ok' : 'fail') : 'fail');
+    box.textContent = res.detail || res.message || 'No status returned.';
+  } catch (e) {
+    box.className = 'task-result fail';
+    box.textContent = 'SSL status check failed: ' + e.message;
+  }
+}
 
 async function restoreBackup(backupId) {
   if (!confirm('Restore this backup? The site\'s current files/database will be replaced with the backed-up version. A safety checkpoint of the current state is taken automatically before anything is changed.')) return;

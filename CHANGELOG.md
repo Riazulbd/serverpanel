@@ -2,6 +2,33 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-18 — SSL auto-renewal wired up, renewal monitoring
+
+- **`stack.install` now explicitly enables and starts `certbot.timer`** (idempotent
+  step, `packages/capabilities/stack.go`), closing the previously-flagged "automatic
+  SSL renewal is not wired up" gap instead of relying on the apt package's default
+  having done it.
+- **New `ssl.status` capability** (`packages/capabilities/ssl.go`): parses `certbot
+  certificates` output for a domain's expiry date and days remaining, and checks
+  whether `certbot.timer` is actually enabled+active — not just installed — returning
+  a WARNING in its result if renewal isn't actually going to happen or the cert is
+  inside its renewal window with an inactive timer. This is on-demand (dispatched from
+  the dashboard), not a proactive alert; a scheduled/notified version depends on the
+  still-unbuilt background job queue and notification channels (`SYSTEM.md` §2).
+- **Dashboard**: the site detail page previously had no SSL UI at all despite
+  `ssl.issue_letsencrypt`/`ssl.install_custom` existing as agent capabilities since
+  Phase 1 — added an "SSL" section with "Issue Let's Encrypt certificate" (prompts for
+  the required notification email) and "Check status" buttons.
+- Added `packages/capabilities/ssl_test.go` (previously no test coverage existed for
+  `ssl.go` at all): certbot-output parsing (single cert, multiple certs, empty output,
+  unparsable expiry date — all as pure-function tests, no process execution), and
+  input-validation tests for all three SSL capabilities. One test
+  (`TestSSLStatusFailsClosedWithoutCertbot`) runs the real handler against this
+  environment's actual absence of certbot, verifying the fail-closed path rather than
+  mocking it.
+- Updated `docs/SYSTEM.md` and `docs/API.md`; see `docs/SERVERAVATAR_PARITY.md` for the
+  updated SSL-management status.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

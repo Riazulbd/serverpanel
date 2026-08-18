@@ -140,6 +140,29 @@ func phase1LEMPSteps() []installStep {
 			},
 		},
 		{
+			Name: "certbot auto-renewal timer",
+			// Ubuntu's certbot .deb normally enables this on install, but
+			// that's a packaging default, not a guarantee (e.g. it can be
+			// left disabled by a prior manual `systemctl disable`, or not
+			// auto-started in a minimal/containerized base image) — and a
+			// certificate that silently stops auto-renewing is exactly the
+			// kind of failure that only surfaces when it's too late.
+			// Enabling it explicitly here, and letting ssl.status alert on
+			// it separately, makes renewal an owned, checked property of a
+			// managed server rather than an assumption about the package.
+			Check: func(ctx context.Context) bool {
+				active, _ := run(ctx, "systemctl", "is-active", "certbot.timer")
+				enabled, _ := run(ctx, "systemctl", "is-enabled", "certbot.timer")
+				return strings.TrimSpace(active) == "active" && strings.TrimSpace(enabled) == "enabled"
+			},
+			Run: func(ctx context.Context) error {
+				if _, err := run(ctx, "systemctl", "enable", "--now", "certbot.timer"); err != nil {
+					return fmt.Errorf("enable certbot.timer: %w", err)
+				}
+				return nil
+			},
+		},
+		{
 			Name:  "ufw",
 			Check: func(ctx context.Context) bool { return isPackageInstalled(ctx, "ufw") },
 			Run:   func(ctx context.Context) error { _, err := aptInstall(ctx, "ufw"); return err },

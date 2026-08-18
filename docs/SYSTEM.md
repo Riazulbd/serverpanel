@@ -102,9 +102,17 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | Site cloning, cross-server migration | ⬜ Phase 2 |
 | Maintenance mode | ⬜ not implemented |
 | Basic auth on a site | ⬜ not implemented |
-| Custom + Let's Encrypt SSL | ✅ `ssl.issue_letsencrypt` (certbot), `ssl.install_custom` |
-| Automatic SSL renewal | ⬜ not implemented (certbot's own renewal timer is not
-  wired up by `stack.install` yet) |
+| Custom + Let's Encrypt SSL | ✅ `ssl.issue_letsencrypt` (certbot), `ssl.install_custom`;
+  dashboard "Issue Let's Encrypt certificate" / "Check status" buttons on the site
+  detail page |
+| Automatic SSL renewal + renewal monitoring | ✅ `stack.install` now has an explicit,
+  idempotent step that enables and starts `certbot.timer` (not just relying on the apt
+  package's default); the new `ssl.status` capability reports certificate expiry, days
+  remaining, and whether the timer is actually enabled+active, with a WARNING in its
+  output if the timer is off or the cert is inside its renewal window — closing the gap
+  where a broken renewal would otherwise go unnoticed until the cert actually expired.
+  Not yet wired to a proactive alert/notification (no notification channels exist yet
+  at all — see "Notifications" above); today it's checked on demand from the dashboard. |
 | WordPress auto-login/auto-update | ⬜ not implemented |
 | Application enable/disable | ✅ `site.set_status` |
 | Secure file manager | ✅ `file.list/read/write/delete`, scoped + symlink-safe |

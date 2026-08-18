@@ -252,8 +252,8 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | APP-012 | Additional one-click installers (Laravel, Joomla, Mautic, Moodle, PrestaShop, Akaunting, Nextcloud, Statamic, Craft CMS, n8n, Node-RED, Uptime Kuma, NodeBB) | `NOT_STARTED` | WordPress is the only one-click installer today |
 | APP-013 | Log Monitoring Suite (traffic analytics) | `NOT_STARTED` | |
 | APP-014 | Application-level WAF / AI-bot blocker | `NOT_STARTED` | |
-| APP-015 | Custom SSL upload | `PARTIAL` | `ssl.install_custom` capability exists agent-side; no dedicated dashboard UI |
-| APP-016 | Let's Encrypt SSL + auto-renewal | `PARTIAL` | `ssl.issue_letsencrypt` implemented; certbot's own renewal timer not yet wired up by `stack.install` |
+| APP-015 | Custom SSL upload | `PARTIAL` | `ssl.install_custom` capability exists agent-side, dashboard-reachable via the generic task-dispatch call; still no dedicated "paste cert/key" modal (only Let's Encrypt has a purpose-built UI) |
+| APP-016 | Let's Encrypt SSL + auto-renewal | `COMPLETE` | `ssl.issue_letsencrypt` issues; `stack.install` now enables+starts `certbot.timer` explicitly (idempotent step, not just relying on the apt package default); new `ssl.status` capability reports expiry/days-remaining and whether the timer is actually enabled+active, surfaced via dashboard "Check status"/"Issue Let's Encrypt certificate" buttons on the site detail page (2026-08-18). Known difference: renewal *monitoring* is on-demand only — no proactive alert if a renewal silently fails, since no background job queue or notification channels exist yet (tracked separately under the "background job queue" and "notifications" core-platform gaps in `SYSTEM.md` §2). |
 
 ### Database management — not yet started (DB-*)
 | ID | Feature | Status | Notes |
@@ -295,8 +295,8 @@ capability surface (per task-brief §3/§101), not just what's already built.
 
 | Status | Count (detailed entries) | Count (summary-table rows) |
 |---|---|---|
-| `COMPLETE` | 3 (SRV-001, BAK-002, ACC-001) | 1 (PROV-006) |
-| `PARTIAL` | 3 (SRV-002, APP-001, APP-002, DB-001, BAK-001 — 5 total, see note) | 6 |
+| `COMPLETE` | 3 (SRV-001, BAK-002, ACC-001) | 2 (PROV-006, APP-016) |
+| `PARTIAL` | 3 (SRV-002, APP-001, APP-002, DB-001, BAK-001 — 5 total, see note) | 5 |
 | `NOT_STARTED` | 0 | ~55 |
 | `BLOCKED_EXTERNAL` | 0 (sub-scoped within BAK-001/BAK-002's db/full-scope MariaDB verification) | 0 |
 | `INTENTIONALLY_NOT_APPLICABLE` | 0 | 1 |
@@ -359,3 +359,8 @@ establish the tracking process and close the single highest-priority gap
   BAK-001/BAK-002 reflecting this session's backup-restore implementation. ~60
   capabilities enumerated overall (detailed + summary), the large majority honestly
   `NOT_STARTED`.
+- **2026-08-18**: APP-016 (Let's Encrypt SSL + auto-renewal) moved `PARTIAL` →
+  `COMPLETE`: `stack.install` now explicitly enables/starts `certbot.timer`, a new
+  `ssl.status` capability reports certificate expiry and actual timer state, and the
+  dashboard gained its first SSL UI (previously `ssl.issue_letsencrypt` had no
+  dashboard entry point at all). See `CHANGELOG.md` for the full detail.

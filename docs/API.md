@@ -177,8 +177,8 @@ The full allow-listed capability names `packages/capabilities.Default()` registe
 (see `SYSTEM.md` §12 for the allow-list rationale): `system.ping`, `service.control`,
 `diagnostics.basic`, `stack.install`, `site.create`, `site.set_php_version`,
 `site.set_status`, `app.wordpress_install`, `ssl.issue_letsencrypt`,
-`ssl.install_custom`, `db.create`, `db.delete`, `db.list`, `file.list`, `file.read`,
-`file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`.
+`ssl.install_custom`, `ssl.status`, `db.create`, `db.delete`, `db.list`, `file.list`,
+`file.read`, `file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`.
 
 ### `backup.restore`
 ```json
@@ -197,3 +197,17 @@ database or site files, a fresh checkpoint backup of the *current* state is take
 `backup.run` — its path is returned in the result's `checkpoints`, so a restore is
 always recoverable, never a one-way trip. Returns
 `{"scope", "archive_path", "checkpoints": [...], "restored_at"}` on success.
+
+### `ssl.status`
+```json
+{"domain": "example.com"}
+```
+Reports the current Let's Encrypt certificate's expiry and whether certbot's
+`certbot.timer` (enabled by `stack.install`) is actually enabled and active on this
+server. Returns a `detail` string of the form
+`domain=... expires=YYYY-MM-DD days_remaining=N renewal_timer_enabled=enabled
+renewal_timer_active=active`, with a trailing ` — WARNING: ...` appended if the timer is
+not enabled+active or the certificate has fewer than 14 days left (the latter warning is
+advisory only — a healthy timer renews well before that point, so a warning alongside a
+healthy timer is not itself an error, just a nudge to look closer). Fails (task status
+`failed`) if certbot isn't installed or no certificate exists yet for the domain.
