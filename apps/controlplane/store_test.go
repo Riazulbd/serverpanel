@@ -297,3 +297,51 @@ func TestBackupCreateListGetRoundTrip(t *testing.T) {
 		t.Fatal("expected getBackup to refuse a backup ID under the wrong server")
 	}
 }
+
+func TestCronJobCreateListToggleDeleteRoundTrip(t *testing.T) {
+	st := newTestStore(t)
+	serverID, _, _ := st.createServer("web-11", "", nil, time.Hour, "admin@example.com")
+	site, err := st.createSite(serverID, "c.example.com", "site_c", "/home/sites/site_c", "wordpress", "8.3")
+	if err != nil {
+		t.Fatalf("createSite: %v", err)
+	}
+
+	job, err := st.createCronJobWithID("cron_test1", serverID, site.ID, "*/5 * * * *", "php artisan schedule:run")
+	if err != nil {
+		t.Fatalf("createCronJobWithID: %v", err)
+	}
+	if !job.Enabled {
+		t.Fatal("a newly created cron job should default to enabled")
+	}
+
+	list := st.listCronJobs(serverID, site.ID)
+	if len(list) != 1 || list[0].ID != job.ID {
+		t.Fatalf("listCronJobs = %+v, want one entry matching the created job", list)
+	}
+
+	if err := st.setCronJobEnabled(serverID, job.ID, false); err != nil {
+		t.Fatalf("setCronJobEnabled: %v", err)
+	}
+	got, ok := st.getCronJob(serverID, job.ID)
+	if !ok || got.Enabled {
+		t.Fatalf("getCronJob after disable = %+v, ok=%v; want Enabled=false", got, ok)
+	}
+
+	otherServer, _, _ := st.createServer("web-12", "", nil, time.Hour, "admin@example.com")
+	if _, ok := st.getCronJob(otherServer, job.ID); ok {
+		t.Fatal("expected getCronJob to refuse a job ID under the wrong server")
+	}
+	if err := st.setCronJobEnabled(otherServer, job.ID, true); err == nil {
+		t.Fatal("expected setCronJobEnabled to refuse a job ID under the wrong server")
+	}
+
+	if err := st.deleteCronJob(serverID, job.ID); err != nil {
+		t.Fatalf("deleteCronJob: %v", err)
+	}
+	if _, ok := st.getCronJob(serverID, job.ID); ok {
+		t.Fatal("expected the cron job to be gone after deleteCronJob")
+	}
+	if err := st.deleteCronJob(serverID, job.ID); err == nil {
+		t.Fatal("deleting an already-deleted cron job should fail, not silently succeed")
+	}
+}

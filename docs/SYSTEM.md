@@ -80,7 +80,10 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | SSH/SFTP management, SSH-key mgmt, port mgmt, root-login controls | ⬜ Phase 2 |
 | Automatic security updates | ⬜ Phase 2 (`unattended-upgrades` integration) |
 | Service controls | ✅ `service.control`, allow-listed units/actions only |
-| Cron-job management | ⬜ Phase 2 |
+| Cron-job management | ✅ `cron.create`/`cron.delete`/`cron.set_enabled`, always as the
+  app's own `site_*` user (never root); create/list/enable-disable/delete UI in the
+  site-detail panel. No execution history/output capture yet (crontab has none
+  built in) |
 | Process/worker management | ⬜ Phase 2 |
 | Disk-usage analysis, safe cleanup | ⬜ not started |
 | Server diagnostics | 🚧 `diagnostics.basic` (read-only service-state check); no
@@ -164,11 +167,13 @@ Phase boundaries and full milestone/estimate tables are in `product-plan.md` §6
 is the condensed status:
 
 - **Phase 1 — secure working foundation:** ~90% of the *capability* surface exists and
-  is tested per-capability (see the tables above); the biggest real gaps are backup
-  **restore**, an automated test suite (now added, see `TESTING.md`), SSL auto-renewal,
-  and agent cert auto-rotation. Not "GA-ready" yet, but the architecture and security
-  primitives it depends on (mTLS, allow-listed capabilities, per-app isolation, audit
-  log) are real and proven, not stubs.
+  is tested per-capability (see the tables above); backup restore, cron-job
+  management, and an automated test suite are now in place (see `TESTING.md`). The
+  remaining real gaps are SSL auto-renewal (certbot's own renewal timer isn't wired
+  up by `stack.install` yet) and agent cert auto-rotation before expiry. Not
+  "GA-ready" yet, but the architecture and security primitives it depends on (mTLS,
+  allow-listed capabilities, per-app isolation, audit log) are real and proven, not
+  stubs.
 - **Phase 2 — professional server management:** not started. Git deployment,
   cron/process management, SSH/firewall management UI, remote backups, cross-server
   migration all remain ⬜.

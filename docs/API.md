@@ -46,6 +46,10 @@ protected route; there is no route that skips it by omission.
 | `GET` | `/api/v1/servers/{id}/sites/{siteId}/backups` | List backups for a site, newest first |
 | `POST` | `/api/v1/servers/{id}/sites/{siteId}/backups` | Dispatch `backup.run` and persist the resulting backup record |
 | `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a previously recorded backup |
+| `GET` | `/api/v1/servers/{id}/sites/{siteId}/cron` | List cron jobs for a site, newest first |
+| `POST` | `/api/v1/servers/{id}/sites/{siteId}/cron` | Dispatch `cron.create` and persist the resulting cron job record |
+| `POST` | `/api/v1/servers/{id}/cron/{jobId}/enabled` | Dispatch `cron.set_enabled` and update the recorded job's enabled state |
+| `DELETE` | `/api/v1/servers/{id}/cron/{jobId}` | Dispatch `cron.delete` and remove the recorded job |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -137,6 +141,40 @@ isn't connected; `422` if `backup.restore` itself failed on the agent (the agent
 error message explains why, and any checkpoint already taken is named in it so it's
 never a silent loss).
 
+### `POST /api/v1/servers/{id}/sites/{siteId}/cron`
+```json
+{"schedule": "*/5 * * * *", "command": "php /home/sites/site_example/artisan schedule:run"}
+```
+`schedule` must be a standard 5-field cron expression (minute hour day month weekday;
+named values like `MON`/`@daily` are rejected — see `cron.create` below). The control
+plane generates the job's id before dispatch and passes it to the agent, so the
+crontab's marker comment and the persisted record always share the same id. Dispatches
+`cron.create` with `system_user` taken from the site's own recorded `system_user`
+(never caller-supplied) — a job always runs as the application's own least-privilege
+user, never root. Only on agent success is a `cron_jobs` row persisted. → `201` with
+the `cronJobRecord` JSON (`ID`, `ServerID`, `SiteID`, `Schedule`, `Command`, `Enabled`,
+`CreatedAt`). `404` if the site doesn't exist on that server; `400` for a missing
+schedule/command; `502` if the agent isn't connected; `422` if `cron.create` itself
+failed on the agent (including a rejected schedule/command or a duplicate id).
+
+### `GET /api/v1/servers/{id}/sites/{siteId}/cron`
+→ `200` with an array of `cronJobRecord`, newest first. `404` if the site doesn't
+exist on that server.
+
+### `POST /api/v1/servers/{id}/cron/{jobId}/enabled`
+```json
+{"enabled": false}
+```
+Dispatches `cron.set_enabled` first and only updates the store on agent success, so
+the recorded `Enabled` flag never claims a state the actual crontab doesn't have. →
+`200` with the updated `cronJobRecord`. `404` if the job doesn't exist on that server;
+`502`/`422` as above.
+
+### `DELETE /api/v1/servers/{id}/cron/{jobId}`
+Dispatches `cron.delete` and only removes the store record once the agent confirms
+the crontab line is gone. → `204` on success. `404` if the job doesn't exist on that
+server; `502`/`422` as above.
+
 ### `POST /agents/register`
 ```json
 {"token": "<bootstrap token>", "csr_pem": "<PEM-encoded CSR>"}
@@ -178,7 +216,27 @@ The full allow-listed capability names `packages/capabilities.Default()` registe
 `diagnostics.basic`, `stack.install`, `site.create`, `site.set_php_version`,
 `site.set_status`, `app.wordpress_install`, `ssl.issue_letsencrypt`,
 `ssl.install_custom`, `db.create`, `db.delete`, `db.list`, `file.list`, `file.read`,
-`file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`.
+`file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`,
+`cron.create`, `cron.delete`, `cron.set_enabled`.
+
+### `cron.create` / `cron.delete` / `cron.set_enabled`
+```json
+{"system_user": "site_example_com", "schedule": "*/5 * * * *",
+ "command": "php artisan schedule:run", "id": "cron_1a2b3c"}
+```
+All three reject any `system_user` that doesn't start with `site_` before touching
+anything — cron jobs may only run as an application's own system user, never root.
+Jobs are stored as lines in that user's own crontab (`crontab -u <user> -`, never
+root's), each tagged with a trailing `# serverpanel-cron:<id>` marker comment so a
+specific job can always be found and mutated without disturbing any other line
+already in that crontab (managed or not). `schedule` must be exactly 5
+whitespace-separated fields, each restricted to `[0-9*/,-]`; `command` is capped at
+2000 characters and must not contain a newline (would inject an extra, unmanaged
+crontab line) or `#` (cron treats it as an end-of-line comment, which would truncate
+the trailing id marker and could be used to spoof it). `cron.set_enabled` toggles a
+job between its normal line and a `#DISABLED# `-prefixed comment — still fully
+identifiable by its marker, so re-enabling never loses the schedule or command.
+`cron.delete` fails (rather than silently no-op'ing) if the id isn't found.
 
 ### `backup.restore`
 ```json

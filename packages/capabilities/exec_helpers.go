@@ -33,6 +33,18 @@ func run(ctx context.Context, name string, args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), err
 }
 
+// runWithStdin is like run, but feeds stdin a fixed string built entirely
+// from already-validated values (used by crontab -u <user> - to replace a
+// user's crontab in one atomic write, since crontab has no "append one
+// line" mode).
+func runWithStdin(ctx context.Context, stdin string, name string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
+	cmd.Stdin = strings.NewReader(stdin)
+	out, err := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out)), err
+}
+
 // isPackageInstalled reports whether an apt package is already installed,
 // which is what makes stack installation idempotent/safely-retryable: a
 // re-run skips every step whose target state already holds.

@@ -2,6 +2,47 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-18 — Cron job management (SRV-005)
+
+- **Implemented `cron.create`/`cron.delete`/`cron.set_enabled`**
+  (`packages/capabilities/cron.go`) — the next highest-priority `NOT_STARTED` item in
+  the parity matrix after last session's backup-restore work. Jobs are written
+  directly into the target application's own `site_*` system user's crontab via the
+  real `crontab` binary (never root's, and the capability independently refuses any
+  `system_user` not prefixed `site_` even if a future caller bypassed the
+  control-plane's own lookup). Each managed line carries a trailing
+  `# serverpanel-cron:<id>` marker comment so create/delete/enable-toggle can find and
+  mutate exactly one job without disturbing any other line already in that crontab —
+  including one the user added by hand. Disabling comments the whole line out
+  (`#DISABLED# ` prefix, still fully valid cron syntax and still carrying its marker)
+  instead of deleting it, so re-enabling never loses the schedule or command.
+  `schedule` is restricted to standard 5-field numeric-style cron syntax
+  (`[0-9*/,-]` per field); `command` rejects embedded newlines (would inject an
+  unmanaged second crontab line) and `#` (would truncate, or let a caller forge, the
+  trailing id marker) and is capped at 2000 characters.
+- Wired the new capabilities into the control plane end-to-end: a `cron_jobs` table
+  (`server_id`, `site_id`, `schedule`, `command`, `enabled`, `created_at`), new store
+  methods (`createCronJobWithID`/`listCronJobs`/`getCronJob`/`setCronJobEnabled`/
+  `deleteCronJob`, each scoped by server ID the same way `getSite`/`getBackup` are),
+  four new endpoints (`GET`/`POST /api/v1/servers/{id}/sites/{siteId}/cron`,
+  `POST /api/v1/servers/{id}/cron/{jobId}/enabled`,
+  `DELETE /api/v1/servers/{id}/cron/{jobId}`) using the same
+  dispatch-then-persist-on-success pattern as backups, and a "Cron jobs" panel per
+  site in the dashboard (add-job modal, jobs table with per-row enable/disable and
+  delete).
+- Added 6 new capability-layer tests (schedule/command/user validation including
+  newline- and `#`-injection attempts, marker round-trip, and a full
+  create→disable→enable→delete lifecycle test against a real system user's real
+  crontab verifying an unrelated pre-existing crontab line is never disturbed) and 2
+  new control-plane tests (cron CRUD round trip with cross-server-scoping rejection,
+  and the cron endpoints' not-found/validation HTTP boundaries). Full suite: 69 test
+  functions, `go vet`/`gofmt`/`go test -race` clean.
+- Updated `SYSTEM.md`, `API.md`, `TESTING.md`, and `SERVERAVATAR_PARITY.md` (SRV-005
+  moved from the not-started summary table to a full `COMPLETE` detail entry) to
+  reflect cron job management as implemented. Known gap: no execution
+  history/output capture (crontab has none built in) — tracked as a follow-up, not
+  silently dropped.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

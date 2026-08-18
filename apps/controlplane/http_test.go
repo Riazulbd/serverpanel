@@ -239,6 +239,56 @@ func TestBackupEndpointsRequireARealSite(t *testing.T) {
 	}
 }
 
+func TestCronEndpointsRequireARealSiteAndJob(t *testing.T) {
+	secureCookies = false
+	defer func() { secureCookies = true }()
+
+	a := newTestAPIServer(t)
+	h := a.routes()
+
+	doJSON(t, h, "POST", "/api/v1/auth/signup", map[string]string{
+		"Email": "ops3@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	rec := doJSON(t, h, "POST", "/api/v1/auth/login", map[string]string{
+		"Email": "ops3@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	cookie := sessionCookie(rec)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers", map[string]any{"Name": "web-13"}, cookie)
+	var created struct {
+		ServerID string `json:"server_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+
+	rec = doJSON(t, h, "GET", "/api/v1/servers/"+created.ServerID+"/sites/site_nonexistent/cron", nil, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("list cron for nonexistent site: status = %d, want 404", rec.Code)
+	}
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/sites/site_nonexistent/cron",
+		map[string]any{"schedule": "* * * * *", "command": "/usr/bin/true"}, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("create cron for nonexistent site: status = %d, want 404", rec.Code)
+	}
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/sites/site_nonexistent/cron",
+		map[string]any{"schedule": "", "command": ""}, cookie)
+	if rec.Code != http.StatusBadRequest && rec.Code != http.StatusNotFound {
+		t.Fatalf("create cron with empty schedule/command: status = %d, want 400 or 404", rec.Code)
+	}
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/cron/cron_nonexistent/enabled",
+		map[string]any{"enabled": false}, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("toggle nonexistent cron job: status = %d, want 404", rec.Code)
+	}
+
+	rec = doJSON(t, h, "DELETE", "/api/v1/servers/"+created.ServerID+"/cron/cron_nonexistent", nil, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("delete nonexistent cron job: status = %d, want 404", rec.Code)
+	}
+}
+
 func TestCreateBackupRejectsInvalidScope(t *testing.T) {
 	secureCookies = false
 	defer func() { secureCookies = true }()
