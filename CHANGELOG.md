@@ -2,6 +2,38 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-18 — SSL auto-renewal wiring, dashboard SSL status (APP-016 complete)
+
+- **Closed the ServerAvatar parity gap on APP-016** (Let's Encrypt SSL + auto-renewal):
+  `stack.install` now adds a "certbot auto-renewal timer" step that enables the
+  systemd `certbot.timer` the certbot package ships (`systemctl enable --now`) and,
+  rather than trusting that alone, verifies it actually works via
+  `certbot renew --dry-run --non-interactive` before considering the step complete —
+  catching a broken renewal hook at install time instead of silently 90 days later.
+- Added the `ssl.renewal_status` capability (`packages/capabilities/ssl.go`): runs
+  `certbot certificates`, parses per-domain expiry out of its text output (certbot has
+  no `--format json`) via a pure, unit-tested `parseCertbotCertificates` function, and
+  reports whether the renewal timer is active — `{"certificates": [{"domain",
+  "expires_at", "days_remaining", "valid"}], "renewal_timer_active"}`.
+- Wired SSL into the control plane end-to-end: `sites.ssl_status`/`ssl_expires_at`
+  columns (idempotent migration), `store.updateSiteSSL` (scoped by server ID, same
+  pattern as `getSite`), two new endpoints (`POST`/`GET
+  /api/v1/servers/{id}/sites/{siteId}/ssl`) that dispatch `ssl.issue_letsencrypt` /
+  `ssl.renewal_status` and persist the result only on agent-confirmed success, and a
+  new "SSL" panel in the site detail view — an "Issue free SSL" button and an
+  expiry badge (amber inside 14 days of expiry) that also notes renewal is automatic.
+- Added 12 new tests: 7 capability-layer (`parseCertbotCertificates` parsing —
+  multi-cert, no-certs, and tolerant-of-unrecognized-lines cases; domain/email
+  validation for `ssl.issue_letsencrypt`/`ssl.install_custom`; the
+  certbot-not-installed error path) and 5 control-plane (store round trip +
+  cross-server scoping for `updateSiteSSL`, `expiryForDomain` domain-matching, and
+  HTTP boundary tests for the new endpoints — nonexistent site → 404, no agent
+  connected → 502). Full suite: 73 test functions, `go vet`/`gofmt` clean.
+- Updated `SYSTEM.md`, `API.md`, and `SERVERAVATAR_PARITY.md` (APP-016: `PARTIAL` →
+  `COMPLETE`) to reflect the above. Known remaining gap, tracked under SRV-008
+  (monitoring/alerts) rather than here: no automated "certificate expiring soon"
+  notification yet — the dashboard surfaces expiry, but nothing pushes an alert.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

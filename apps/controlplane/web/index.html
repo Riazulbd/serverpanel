@@ -184,6 +184,13 @@
         <p class="muted" id="siteDetailMeta" style="margin:0 0 20px"></p>
 
         <div class="section-title" style="display:flex;justify-content:space-between;align-items:center">
+          <span>SSL</span>
+          <button class="primary" onclick="issueSSL()">Issue free SSL (Let's Encrypt)</button>
+        </div>
+        <div id="sslResult" class="task-result hidden"></div>
+        <div id="sslStatus" class="muted">No certificate on record for this domain yet.</div>
+
+        <div class="section-title" style="display:flex;justify-content:space-between;align-items:center">
           <span>Backups</span>
           <button class="primary" onclick="openNewBackupModal()">+ Create backup</button>
         </div>
@@ -468,14 +475,48 @@ async function openSiteDetail(siteId) {
   const site = (state.sites || []).find(s => s.ID === siteId);
   showTab('siteDetail');
   document.getElementById('backupResult').classList.add('hidden');
+  document.getElementById('sslResult').classList.add('hidden');
   const server = (state.servers || []).find(s => s.ID === state.selectedServerId);
   document.getElementById('siteDetailServerName').textContent = server ? server.Name : 'Server';
   if (site) {
     document.getElementById('siteDetailDomain').textContent = site.Domain;
     document.getElementById('siteDetailMeta').textContent =
       site.AppType + (site.PHPVersion ? (' · PHP ' + site.PHPVersion) : '') + ' · ' + site.Status;
+    renderSSLStatus(site);
   }
   await refreshBackups();
+}
+
+function renderSSLStatus(site) {
+  const el = document.getElementById('sslStatus');
+  if (site.SSLStatus === 'active' && site.SSLExpiresAt) {
+    const expires = new Date(site.SSLExpiresAt);
+    const daysLeft = Math.round((expires - new Date()) / 86400000);
+    const warn = daysLeft <= 14;
+    el.innerHTML = `<span class="badge ${warn ? 'offline' : 'connected'}">Active</span> ` +
+      `Expires ${expires.toLocaleDateString()} (${daysLeft} day${daysLeft === 1 ? '' : 's'} left) &middot; ` +
+      `renews automatically via the server's certbot timer`;
+  } else {
+    el.textContent = 'No certificate on record for this domain yet.';
+  }
+}
+
+async function issueSSL() {
+  const site = (state.sites || []).find(s => s.ID === state.selectedSiteId);
+  if (!site) return;
+  if (!confirm(`Issue a free Let's Encrypt certificate for ${site.Domain}? The domain's DNS must already point at this server.`)) return;
+  const box = document.getElementById('sslResult');
+  box.classList.remove('hidden');
+  box.textContent = "Requesting certificate from Let's Encrypt...";
+  try {
+    const result = await api(API + '/servers/' + state.selectedServerId + '/sites/' + state.selectedSiteId + '/ssl', {method: 'POST'});
+    box.textContent = 'Certificate issued for ' + result.domain + '.';
+    site.SSLStatus = result.ssl_status;
+    site.SSLExpiresAt = result.ssl_expires_at;
+    renderSSLStatus(site);
+  } catch (e) {
+    box.textContent = 'Failed: ' + e.message;
+  }
 }
 
 async function refreshBackups() {

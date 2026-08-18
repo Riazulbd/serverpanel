@@ -46,6 +46,8 @@ protected route; there is no route that skips it by omission.
 | `GET` | `/api/v1/servers/{id}/sites/{siteId}/backups` | List backups for a site, newest first |
 | `POST` | `/api/v1/servers/{id}/sites/{siteId}/backups` | Dispatch `backup.run` and persist the resulting backup record |
 | `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a previously recorded backup |
+| `POST` | `/api/v1/servers/{id}/sites/{siteId}/ssl` | Dispatch `ssl.issue_letsencrypt` for the site's domain and persist the resulting status/expiry |
+| `GET` | `/api/v1/servers/{id}/sites/{siteId}/ssl` | Dispatch `ssl.renewal_status` live and refresh the persisted status/expiry |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -137,6 +139,32 @@ isn't connected; `422` if `backup.restore` itself failed on the agent (the agent
 error message explains why, and any checkpoint already taken is named in it so it's
 never a silent loss).
 
+### `POST /api/v1/servers/{id}/sites/{siteId}/ssl`
+```json
+{"email": "optional-override@example.com"}
+```
+`email` defaults to the requesting account's own login email when omitted. Dispatches
+`ssl.issue_letsencrypt` with `domain` taken from the site's own recorded `domain`
+(never caller-supplied) — 5-minute dispatch timeout. On success, immediately follows up
+with `ssl.renewal_status` to read back the real expiry certbot just set, and persists
+both onto the `sites` row (`ssl_status`, `ssl_expires_at`) — a `sites` row is never
+marked `active` on say-so alone. → `200 {"domain": "...", "ssl_status": "active",
+"ssl_expires_at": "<RFC3339>"}`. `404` if the site doesn't exist on that server; `502`
+if the agent isn't connected; `422` if `ssl.issue_letsencrypt` itself failed on the
+agent (e.g. DNS for the domain doesn't point at this server yet).
+
+### `GET /api/v1/servers/{id}/sites/{siteId}/ssl`
+No request body. Dispatches `ssl.renewal_status`, which reports every certificate the
+agent's certbot currently manages (not just this one site) plus whether the systemd
+renewal timer is active. → `200` with the agent's raw `ssl.renewal_status` JSON
+(`certificates: [{domain, expires_at, days_remaining, valid}]`,
+`renewal_timer_active`). If this site's domain is present in the result and its expiry
+differs from what's on record, the `sites` row is refreshed to match before responding
+— so a certificate that silently stopped renewing shows up as such on the next check,
+not only right after issuance. `404` if the site doesn't exist on that server; `502` if
+the agent isn't connected; `422` if `ssl.renewal_status` itself failed on the agent
+(e.g. certbot isn't installed — run `stack.install` first).
+
 ### `POST /agents/register`
 ```json
 {"token": "<bootstrap token>", "csr_pem": "<PEM-encoded CSR>"}
@@ -177,8 +205,17 @@ The full allow-listed capability names `packages/capabilities.Default()` registe
 (see `SYSTEM.md` §12 for the allow-list rationale): `system.ping`, `service.control`,
 `diagnostics.basic`, `stack.install`, `site.create`, `site.set_php_version`,
 `site.set_status`, `app.wordpress_install`, `ssl.issue_letsencrypt`,
-`ssl.install_custom`, `db.create`, `db.delete`, `db.list`, `file.list`, `file.read`,
-`file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`.
+`ssl.install_custom`, `ssl.renewal_status`, `db.create`, `db.delete`, `db.list`,
+`file.list`, `file.read`, `file.write`, `file.delete`, `backup.run`, `backup.restore`,
+`logs.tail`.
+
+### `ssl.renewal_status`
+No parameters. Runs `certbot certificates` and parses every certificate the host's
+certbot currently manages, plus whether the systemd `certbot.timer` renewal timer
+(enabled by `stack.install`) is active. Returns
+`{"certificates": [{"domain", "expires_at" (RFC3339), "days_remaining", "valid"}],
+"renewal_timer_active": bool}`. Fails with a clear error (rather than an exec failure)
+if certbot isn't installed.
 
 ### `backup.restore`
 ```json

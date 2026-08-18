@@ -184,6 +184,39 @@ func phase1LEMPSteps() []installStep {
 			Check: func(ctx context.Context) bool { return isPackageInstalled(ctx, "fail2ban") },
 			Run:   func(ctx context.Context) error { _, err := aptInstall(ctx, "fail2ban"); return err },
 		},
+		{
+			Name: "certbot auto-renewal timer",
+			// The certbot .deb ships a systemd timer (certbot.timer) that
+			// twice-daily runs `certbot renew` for every certificate this
+			// host holds, but package installation alone doesn't guarantee
+			// it's enabled — a prior manual "systemctl disable" or a distro
+			// that ships it inactive would otherwise leave every
+			// Let's-Encrypt cert issued via ssl.issue_letsencrypt to expire
+			// silently 90 days later with nothing here to catch it. This
+			// step makes "certificates renew themselves" an explicit,
+			// checked part of the install rather than an assumption.
+			Check: func(ctx context.Context) bool {
+				out, _ := run(ctx, "systemctl", "is-enabled", "certbot.timer")
+				return strings.TrimSpace(out) == "enabled"
+			},
+			Run: func(ctx context.Context) error {
+				if _, err := run(ctx, "systemctl", "enable", "--now", "certbot.timer"); err != nil {
+					return fmt.Errorf("enable certbot.timer: %w", err)
+				}
+				// certbot's own renewal is a dry-run away from being
+				// verifiably correct rather than merely "the timer
+				// exists" — this catches a broken renewal hook (e.g. a
+				// site's nginx vhost later removed or malformed) at
+				// install time instead of silently at the next real
+				// renewal window. No certificates exist yet on a fresh
+				// install, so an empty renewal set is success, not a
+				// skipped check.
+				if out, err := run(ctx, "certbot", "renew", "--dry-run", "--non-interactive"); err != nil {
+					return fmt.Errorf("certbot renew --dry-run: %w: %s", err, out)
+				}
+				return nil
+			},
+		},
 	}
 }
 

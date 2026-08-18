@@ -102,9 +102,11 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | Site cloning, cross-server migration | ⬜ Phase 2 |
 | Maintenance mode | ⬜ not implemented |
 | Basic auth on a site | ⬜ not implemented |
-| Custom + Let's Encrypt SSL | ✅ `ssl.issue_letsencrypt` (certbot), `ssl.install_custom` |
-| Automatic SSL renewal | ⬜ not implemented (certbot's own renewal timer is not
-  wired up by `stack.install` yet) |
+| Custom + Let's Encrypt SSL | ✅ `ssl.issue_letsencrypt` (certbot), `ssl.install_custom`;
+  dashboard "Issue free SSL" button + expiry badge on the site detail view |
+| Automatic SSL renewal | ✅ `stack.install` enables + verifies (`certbot renew
+  --dry-run`) the systemd `certbot.timer`; `ssl.renewal_status` reports per-domain
+  expiry and timer health, surfaced via `GET .../sites/{siteId}/ssl` |
 | WordPress auto-login/auto-update | ⬜ not implemented |
 | Application enable/disable | ✅ `site.set_status` |
 | Secure file manager | ✅ `file.list/read/write/delete`, scoped + symlink-safe |
@@ -295,10 +297,11 @@ in `packages/capabilities/capabilities_test.go`), not just convention.
 
 Current capability list: `system.ping`, `service.control`, `diagnostics.basic`,
 `stack.install`, `site.create`, `site.set_php_version`, `site.set_status`,
-`app.wordpress_install`, `ssl.issue_letsencrypt`, `ssl.install_custom`, `db.create`,
-`db.delete`, `db.list`, `file.list`, `file.read`, `file.write`, `file.delete`,
-`backup.run`, `backup.restore`, `logs.tail`. Notably absent (by design, until reviewed
-and added): `git.deploy`, `cron.upsert`, `ssh.*`, `firewall.*`, `agent.self_update`.
+`app.wordpress_install`, `ssl.issue_letsencrypt`, `ssl.install_custom`,
+`ssl.renewal_status`, `db.create`, `db.delete`, `db.list`, `file.list`, `file.read`,
+`file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`. Notably
+absent (by design, until reviewed and added): `git.deploy`, `cron.upsert`, `ssh.*`,
+`firewall.*`, `agent.self_update`.
 
 ## 13. Installation and deployment
 

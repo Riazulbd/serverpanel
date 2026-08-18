@@ -287,6 +287,92 @@ func TestCreateBackupRejectsInvalidScope(t *testing.T) {
 	}
 }
 
+func TestSSLEndpointsRequireARealSite(t *testing.T) {
+	secureCookies = false
+	defer func() { secureCookies = true }()
+
+	a := newTestAPIServer(t)
+	h := a.routes()
+
+	doJSON(t, h, "POST", "/api/v1/auth/signup", map[string]string{
+		"Email": "ssl-ops@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	rec := doJSON(t, h, "POST", "/api/v1/auth/login", map[string]string{
+		"Email": "ssl-ops@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	cookie := sessionCookie(rec)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers", map[string]any{"Name": "web-ssl"}, cookie)
+	var created struct {
+		ServerID string `json:"server_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/sites/site_nonexistent/ssl", nil, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("issue SSL for nonexistent site: status = %d, want 404", rec.Code)
+	}
+	rec = doJSON(t, h, "GET", "/api/v1/servers/"+created.ServerID+"/sites/site_nonexistent/ssl", nil, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("SSL status for nonexistent site: status = %d, want 404", rec.Code)
+	}
+}
+
+func TestIssueSSLWithNoAgentConnectedFailsAsGatewayError(t *testing.T) {
+	secureCookies = false
+	defer func() { secureCookies = true }()
+
+	a := newTestAPIServer(t)
+	h := a.routes()
+
+	doJSON(t, h, "POST", "/api/v1/auth/signup", map[string]string{
+		"Email": "ssl-ops2@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	rec := doJSON(t, h, "POST", "/api/v1/auth/login", map[string]string{
+		"Email": "ssl-ops2@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	cookie := sessionCookie(rec)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers", map[string]any{"Name": "web-ssl-2"}, cookie)
+	var created struct {
+		ServerID string `json:"server_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+
+	site, err := a.store.createSite(created.ServerID, "d.example.com", "sp_d", "/home/sites/sp_d", "static", "")
+	if err != nil {
+		t.Fatalf("createSite: %v", err)
+	}
+
+	// No agent is connected for this server, so a well-formed request must
+	// fail as a gateway/dispatch error rather than succeeding or panicking.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/sites/"+site.ID+"/ssl", nil, cookie)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("issue SSL with no agent connected: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	rec = doJSON(t, h, "GET", "/api/v1/servers/"+created.ServerID+"/sites/"+site.ID+"/ssl", nil, cookie)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("SSL status with no agent connected: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestExpiryForDomainPicksExactMatch(t *testing.T) {
+	statusJSON := `{"certificates":[
+		{"domain":"a.example.com","expires_at":"2026-01-01T00:00:00Z"},
+		{"domain":"b.example.com","expires_at":"2026-02-01T00:00:00Z"}
+	],"renewal_timer_active":true}`
+
+	if got := expiryForDomain(statusJSON, "b.example.com"); got != "2026-02-01T00:00:00Z" {
+		t.Errorf("expiryForDomain(b.example.com) = %q, want 2026-02-01T00:00:00Z", got)
+	}
+	if got := expiryForDomain(statusJSON, "not-present.example.com"); got != "" {
+		t.Errorf("expiryForDomain(not-present.example.com) = %q, want empty", got)
+	}
+	if got := expiryForDomain("not json", "a.example.com"); got != "" {
+		t.Errorf("expiryForDomain with malformed JSON = %q, want empty", got)
+	}
+}
+
 func TestRegisterEndpointRejectsBadToken(t *testing.T) {
 	a := newTestAPIServer(t)
 	h := a.routes()

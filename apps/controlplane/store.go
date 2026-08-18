@@ -334,20 +334,22 @@ func (s *store) auditLog() []auditEntry {
 }
 
 type siteRecord struct {
-	ID         string
-	ServerID   string
-	Domain     string
-	SystemUser string
-	Docroot    string
-	AppType    string
-	PHPVersion string
-	Status     string
-	CreatedAt  time.Time
+	ID           string
+	ServerID     string
+	Domain       string
+	SystemUser   string
+	Docroot      string
+	AppType      string
+	PHPVersion   string
+	Status       string
+	SSLStatus    string
+	SSLExpiresAt string
+	CreatedAt    time.Time
 }
 
 func (s *store) listSites(serverID string) []*siteRecord {
 	rows, err := s.db.Query(
-		`SELECT id, server_id, domain, system_user, docroot, app_type, php_version, status, created_at
+		`SELECT id, server_id, domain, system_user, docroot, app_type, php_version, status, ssl_status, ssl_expires_at, created_at
 		 FROM sites WHERE server_id = ? ORDER BY created_at DESC`, serverID)
 	if err != nil {
 		return nil
@@ -359,7 +361,7 @@ func (s *store) listSites(serverID string) []*siteRecord {
 		var rec siteRecord
 		var createdAt string
 		if err := rows.Scan(&rec.ID, &rec.ServerID, &rec.Domain, &rec.SystemUser, &rec.Docroot,
-			&rec.AppType, &rec.PHPVersion, &rec.Status, &createdAt); err != nil {
+			&rec.AppType, &rec.PHPVersion, &rec.Status, &rec.SSLStatus, &rec.SSLExpiresAt, &createdAt); err != nil {
 			continue
 		}
 		rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
@@ -371,13 +373,14 @@ func (s *store) listSites(serverID string) []*siteRecord {
 func (s *store) createSite(serverID, domain, systemUser, docroot, appType, phpVersion string) (*siteRecord, error) {
 	rec := &siteRecord{
 		ID: randID("site"), ServerID: serverID, Domain: domain, SystemUser: systemUser,
-		Docroot: docroot, AppType: appType, PHPVersion: phpVersion, Status: "active", CreatedAt: time.Now().UTC(),
+		Docroot: docroot, AppType: appType, PHPVersion: phpVersion, Status: "active", SSLStatus: "none",
+		CreatedAt: time.Now().UTC(),
 	}
 	_, err := s.db.Exec(
-		`INSERT INTO sites (id, server_id, domain, system_user, docroot, app_type, php_version, status, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO sites (id, server_id, domain, system_user, docroot, app_type, php_version, status, ssl_status, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		rec.ID, rec.ServerID, rec.Domain, rec.SystemUser, rec.Docroot, rec.AppType, rec.PHPVersion, rec.Status,
-		rec.CreatedAt.Format(time.RFC3339Nano),
+		rec.SSLStatus, rec.CreatedAt.Format(time.RFC3339Nano),
 	)
 	if err != nil {
 		return nil, err
@@ -391,16 +394,38 @@ func (s *store) createSite(serverID, domain, systemUser, docroot, appType, phpVe
 // site X's docroot if X actually belongs to server B).
 func (s *store) getSite(serverID, siteID string) (*siteRecord, bool) {
 	row := s.db.QueryRow(
-		`SELECT id, server_id, domain, system_user, docroot, app_type, php_version, status, created_at
+		`SELECT id, server_id, domain, system_user, docroot, app_type, php_version, status, ssl_status, ssl_expires_at, created_at
 		 FROM sites WHERE id = ? AND server_id = ?`, siteID, serverID)
 	var rec siteRecord
 	var createdAt string
 	if err := row.Scan(&rec.ID, &rec.ServerID, &rec.Domain, &rec.SystemUser, &rec.Docroot,
-		&rec.AppType, &rec.PHPVersion, &rec.Status, &createdAt); err != nil {
+		&rec.AppType, &rec.PHPVersion, &rec.Status, &rec.SSLStatus, &rec.SSLExpiresAt, &createdAt); err != nil {
 		return nil, false
 	}
 	rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
 	return &rec, true
+}
+
+// updateSiteSSL persists the SSL status/expiry the agent last reported for
+// a site, scoped to serverID for the same reason getSite is: a status
+// update for site X on server A must never be applicable if X actually
+// belongs to server B.
+func (s *store) updateSiteSSL(serverID, siteID, status, expiresAt string) error {
+	res, err := s.db.Exec(
+		`UPDATE sites SET ssl_status = ?, ssl_expires_at = ? WHERE id = ? AND server_id = ?`,
+		status, expiresAt, siteID, serverID,
+	)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("site %q not found on server %q", siteID, serverID)
+	}
+	return nil
 }
 
 type backupRecord struct {

@@ -253,7 +253,7 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | APP-013 | Log Monitoring Suite (traffic analytics) | `NOT_STARTED` | |
 | APP-014 | Application-level WAF / AI-bot blocker | `NOT_STARTED` | |
 | APP-015 | Custom SSL upload | `PARTIAL` | `ssl.install_custom` capability exists agent-side; no dedicated dashboard UI |
-| APP-016 | Let's Encrypt SSL + auto-renewal | `PARTIAL` | `ssl.issue_letsencrypt` implemented; certbot's own renewal timer not yet wired up by `stack.install` |
+| APP-016 | Let's Encrypt SSL + auto-renewal | `COMPLETE` | `ssl.issue_letsencrypt` issues via certbot's nginx plugin; `stack.install` now enables+verifies (`certbot renew --dry-run`) the systemd `certbot.timer` so certs actually renew unattended; `ssl.renewal_status` reports per-domain expiry + timer health; control plane persists `sites.ssl_status`/`ssl_expires_at` and exposes `POST`/`GET /api/v1/servers/{id}/sites/{siteId}/ssl`; dashboard "Issue free SSL" button + expiry badge in the site detail view. Known difference: no automated "cert expiring soon" alert yet — see SRV-008 (monitoring/alerts), which is where that belongs once implemented. |
 
 ### Database management — not yet started (DB-*)
 | ID | Feature | Status | Notes |
@@ -295,9 +295,9 @@ capability surface (per task-brief §3/§101), not just what's already built.
 
 | Status | Count (detailed entries) | Count (summary-table rows) |
 |---|---|---|
-| `COMPLETE` | 3 (SRV-001, BAK-002, ACC-001) | 1 (PROV-006) |
-| `PARTIAL` | 3 (SRV-002, APP-001, APP-002, DB-001, BAK-001 — 5 total, see note) | 6 |
-| `NOT_STARTED` | 0 | ~55 |
+| `COMPLETE` | 3 (SRV-001, BAK-002, ACC-001) | 2 (PROV-006, APP-016) |
+| `PARTIAL` | 3 (SRV-002, APP-001, APP-002, DB-001, BAK-001 — 5 total, see note) | 5 |
+| `NOT_STARTED` | 0 | ~54 |
 | `BLOCKED_EXTERNAL` | 0 (sub-scoped within BAK-001/BAK-002's db/full-scope MariaDB verification) | 0 |
 | `INTENTIONALLY_NOT_APPLICABLE` | 0 | 1 |
 
