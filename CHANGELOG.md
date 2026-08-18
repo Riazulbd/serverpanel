@@ -2,6 +2,50 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-18 — Agent certificate auto-renewal
+
+- **Implemented agent certificate auto-renewal**, closing the top-priority gap flagged
+  in `SYSTEM.md` §21: agent client certificates (30-day TTL) previously had no rotation
+  path at all — an agent whose cert expired would silently drop off the gateway and
+  require a fresh bootstrap token to reconnect, a real availability risk for every
+  managed server once it crossed 30 days of age.
+- New wire messages `renew_request`/`renew_response` (`packages/proto/proto.go`), sent
+  over an agent's *existing* mTLS session — no bootstrap token or second connection
+  involved, and the new certificate is always bound to the `server_id` the gateway
+  already derived from that session's peer certificate, never to anything the CSR asks
+  for.
+- Agent side (`apps/agent/renew.go`, new file): a `renewalLoop` goroutine checks the
+  current certificate's expiry every 12 hours and, once inside a 7-day window, generates
+  a fresh keypair/CSR, requests renewal, and persists the result with a
+  temp-file-then-rename write (`writeFileAtomic`) so a crash mid-write can never leave a
+  torn identity file on disk. Added a `syncEncoder` wrapper around the connection's
+  `*json.Encoder`, now shared by the heartbeat loop, per-task result writer, and the
+  renewal loop — closing a latent (if narrow) concurrent-write race that existed before
+  this change added a third writer to the same connection.
+- Control-plane side (`gateway.handleRenew`, `apps/controlplane/gateway.go`): signs the
+  renewed certificate with the same `AgentCertTTL`, then calls a new
+  `store.rotateCert`, which atomically makes the new serial the server's active one
+  *and* revokes the superseded serial — preserving the invariant that revoking a server
+  from the dashboard revokes every certificate that was ever live for it, not just the
+  most recent. The current session is deliberately left open across a renewal
+  (revocation is enforced at the *next* handshake, not against an already-open
+  connection), so renewal never disrupts a healthy connection.
+- Refactored `gateway.listenAndServe` into separate `listen`/`serve` steps (behavior
+  unchanged for `main.go`) so tests can bind an OS-assigned port and read back the real
+  address; also fixed `serve`'s accept loop to stop cleanly on listener-closed instead of
+  busy-logging forever, while still tolerating transient accept errors.
+- Added 8 new tests: `apps/agent/renew_test.go` (cert-expiry parsing, the
+  renewal-window decision table-driven across 4 cases, `writeFileAtomic`'s
+  crash-safety/permissions), `store_test.go`'s `TestRotateCertRevokesOldSerialAndKeepsNewOneValid`
+  / `TestRotateCertRejectsUnknownServer`, and two real-mTLS integration tests in the new
+  `apps/controlplane/gateway_test.go` that drive the actual wire protocol end-to-end
+  rather than mocking either side. Full suite: 69 test functions, `go vet`/`gofmt`/
+  `-race` all clean.
+- Updated `SECURITY.md` §2 (moves from "not yet implemented" to "implemented as
+  described"), `SYSTEM.md` (§3, §11, §21), `API.md` §3, `TESTING.md`, and
+  `docs/SERVERAVATAR_PARITY.md` (SRV-001 now `COMPLETE` with no material known
+  differences).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

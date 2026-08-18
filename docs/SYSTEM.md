@@ -164,11 +164,11 @@ Phase boundaries and full milestone/estimate tables are in `product-plan.md` §6
 is the condensed status:
 
 - **Phase 1 — secure working foundation:** ~90% of the *capability* surface exists and
-  is tested per-capability (see the tables above); the biggest real gaps are backup
-  **restore**, an automated test suite (now added, see `TESTING.md`), SSL auto-renewal,
-  and agent cert auto-rotation. Not "GA-ready" yet, but the architecture and security
-  primitives it depends on (mTLS, allow-listed capabilities, per-app isolation, audit
-  log) are real and proven, not stubs.
+  is tested per-capability (see the tables above); backup **restore** and agent
+  **certificate auto-rotation** are both now implemented and tested (see `TESTING.md`);
+  the remaining real gap is SSL auto-renewal. Not "GA-ready" yet, but the architecture
+  and security primitives it depends on (mTLS, allow-listed capabilities, per-app
+  isolation, audit log) are real and proven, not stubs.
 - **Phase 2 — professional server management:** not started. Git deployment,
   cron/process management, SSH/firewall management UI, remote backups, cross-server
   migration all remain ⬜.
@@ -279,7 +279,13 @@ See `SECURITY.md` in full. Summary: single-use, short-lived (15 min default),
 hashed-at-rest bootstrap tokens exchanged exactly once for a 30-day mTLS client
 certificate bound (by `CommonName`) to the server's ID; the gateway independently
 derives identity from the certificate on every connection (never trusts anything the
-agent asserts in-band) and checks a revocation list on every handshake.
+agent asserts in-band) and checks a revocation list on every handshake. Before that
+30-day certificate expires, the agent auto-renews it over its existing session
+(`renew_request`/`renew_response`, `apps/agent/renew.go` + `gateway.handleRenew`) —
+never falling back to the bootstrap token, and never needing a second inbound
+connection — and the superseded certificate is revoked the moment the new one is
+issued, so a later "revoke this server" always covers every certificate the server
+ever held, not just its latest.
 
 ## 12. Privileged operations and allow-list
 
@@ -384,7 +390,6 @@ all ⬜, scoped to Phase 2 per `product-plan.md` §9.
 - No backup scheduling/retention policy — backups are on-demand only.
 - No on-disk agent task journal — a task in flight when the agent process restarts is
   lost, not resumed (see `ARCHITECTURE.md` §4 "As built").
-- No agent certificate auto-renewal before its 30-day expiry (see `SECURITY.md` §2).
 - No agent self-update mechanism (see `SECURITY.md` §3).
 - No background job queue — task dispatch is synchronous and bounded by a 120s HTTP
   timeout; this will not scale past a moderate number of concurrent long-running tasks

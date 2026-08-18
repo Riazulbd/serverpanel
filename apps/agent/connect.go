@@ -26,7 +26,7 @@ const agentVersion = "0.1.0-dev"
 // manages (nginx, php-fpm, mariadb, ...) run under systemd independent of
 // this connection — see docs/architecture.md §2 — so a dropped connection
 // here degrades orchestration/observability only, never site serving.
-func runConnection(ctx context.Context, id *identity, reg capabilities.Registry) error {
+func runConnection(ctx context.Context, dataDir string, id *identity, reg capabilities.Registry) error {
 	cert, err := tls.X509KeyPair(id.CertPEM, id.KeyPEM)
 	if err != nil {
 		return err
@@ -70,21 +70,37 @@ func runConnection(ctx context.Context, id *identity, reg capabilities.Registry)
 	}
 	log.Printf("connected to gateway %s as %s", id.GatewayAddr, id.ServerID)
 
-	go heartbeatLoop(ctx, enc)
+	sharedEnc := &syncEncoder{enc: enc}
+	renewCh := make(chan proto.RenewResponse, 1)
+
+	go heartbeatLoop(ctx, sharedEnc)
+	go renewalLoop(ctx, dataDir, id, sharedEnc, renewCh)
 
 	for {
 		var env proto.Envelope
 		if err := dec.Decode(&env); err != nil {
 			return err
 		}
-		if env.Type != proto.MsgTask || env.Task == nil {
-			continue
+		switch env.Type {
+		case proto.MsgTask:
+			if env.Task != nil {
+				go handleTask(ctx, sharedEnc, reg, *env.Task)
+			}
+		case proto.MsgRenewResponse:
+			if env.RenewResponse != nil {
+				select {
+				case renewCh <- *env.RenewResponse:
+				default:
+					// A response arrived with no renewal in flight (e.g. a
+					// duplicate/late reply after the wait already timed
+					// out) — drop it rather than block the read loop.
+				}
+			}
 		}
-		go handleTask(ctx, enc, reg, *env.Task)
 	}
 }
 
-func handleTask(ctx context.Context, enc *json.Encoder, reg capabilities.Registry, task proto.Task) {
+func handleTask(ctx context.Context, enc *syncEncoder, reg capabilities.Registry, task proto.Task) {
 	send := func(ev proto.TaskEvent) {
 		ev.TaskID = task.ID
 		ev.At = time.Now().UTC()
@@ -111,7 +127,7 @@ func handleTask(ctx context.Context, enc *json.Encoder, reg capabilities.Registr
 	send(proto.TaskEvent{Status: proto.TaskSucceeded, Message: "ok", Detail: detail})
 }
 
-func heartbeatLoop(ctx context.Context, enc *json.Encoder) {
+func heartbeatLoop(ctx context.Context, enc *syncEncoder) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for {

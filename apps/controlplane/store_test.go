@@ -152,6 +152,51 @@ func TestRevokeServerBlocksReuseOfCertSerial(t *testing.T) {
 	}
 }
 
+func TestRotateCertRevokesOldSerialAndKeepsNewOneValid(t *testing.T) {
+	st := newTestStore(t)
+	id, _, err := st.createServer("web-4", "", nil, time.Hour, "admin@example.com")
+	if err != nil {
+		t.Fatalf("createServer: %v", err)
+	}
+	st.markIssuedCert(id, "100")
+
+	oldSerial, err := st.rotateCert(id, "101")
+	if err != nil {
+		t.Fatalf("rotateCert: %v", err)
+	}
+	if oldSerial != "100" {
+		t.Fatalf("oldSerial = %q, want %q", oldSerial, "100")
+	}
+	if !st.isRevoked("100") {
+		t.Fatal("superseded serial should be revoked immediately after rotation")
+	}
+	if st.isRevoked("101") {
+		t.Fatal("newly rotated-in serial must not be revoked")
+	}
+	rec, ok := st.get(id)
+	if !ok {
+		t.Fatal("server should still exist after rotation")
+	}
+	if rec.CertSerial != "101" {
+		t.Fatalf("server's active cert_serial = %q, want %q", rec.CertSerial, "101")
+	}
+
+	// Revoking the server afterward must still revoke its now-current serial.
+	if err := st.revokeServer(id, "admin@example.com"); err != nil {
+		t.Fatalf("revokeServer: %v", err)
+	}
+	if !st.isRevoked("101") {
+		t.Fatal("revokeServer should revoke the server's current (post-rotation) serial")
+	}
+}
+
+func TestRotateCertRejectsUnknownServer(t *testing.T) {
+	st := newTestStore(t)
+	if _, err := st.rotateCert("srv_doesnotexist", "1"); err == nil {
+		t.Fatal("expected rotating cert for an unknown server to fail")
+	}
+}
+
 func TestRevokeServerRejectsUnknownServer(t *testing.T) {
 	st := newTestStore(t)
 	if err := st.revokeServer("srv_doesnotexist", "admin@example.com"); err == nil {

@@ -172,6 +172,46 @@ func (s *store) markIssuedCert(serverID, serial string) {
 	s.log(serverID, "", "agent.registered", fmt.Sprintf("cert_serial=%s", serial))
 }
 
+// rotateCert records a renewed certificate's serial as the server's active
+// one and immediately revokes the superseded serial. Revoking the old
+// serial (rather than letting it merely expire) preserves the invariant
+// that revoking a server revokes *every* certificate that was ever live for
+// it, not just the most recently issued one — otherwise a still-valid,
+// pre-renewal certificate would keep authenticating after an operator
+// revoked the server. Returns the serial that was superseded (empty if this
+// is the server's first certificate, which should not happen for a renewal
+// but is handled the same as revokeServer's equivalent case).
+func (s *store) rotateCert(serverID, newSerial string) (oldSerial string, err error) {
+	rec, ok := s.get(serverID)
+	if !ok {
+		return "", fmt.Errorf("server not found")
+	}
+	oldSerial = rec.CertSerial
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`UPDATE servers SET cert_serial = ? WHERE id = ?`, newSerial, serverID); err != nil {
+		return "", err
+	}
+	if oldSerial != "" {
+		if _, err := tx.Exec(
+			`INSERT OR REPLACE INTO revoked_certs (serial, server_id, revoked_at) VALUES (?, ?, ?)`,
+			oldSerial, serverID, time.Now().UTC().Format(time.RFC3339Nano),
+		); err != nil {
+			return "", err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return "", err
+	}
+	s.log(serverID, "", "agent.cert_rotated", fmt.Sprintf("old_serial=%s new_serial=%s", oldSerial, newSerial))
+	return oldSerial, nil
+}
+
 func (s *store) isRevoked(serial string) bool {
 	var n int
 	s.db.QueryRow(`SELECT COUNT(1) FROM revoked_certs WHERE serial = ?`, serial).Scan(&n)

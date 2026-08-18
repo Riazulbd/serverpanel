@@ -160,6 +160,8 @@ connection carries newline-delimited JSON `Envelope`s in both directions
 {"type": "task", "task": {"id": "...", "capability": "...", "params": {}, "issued_at": "..."}}
 {"type": "task_event", "task_event": {"task_id": "...", "status": "queued|running|succeeded|failed|rejected", "message": "...", "detail": "...", "at": "..."}}
 {"type": "ack"}
+{"type": "renew_request", "renew_request": {"csr_pem": "..."}}
+{"type": "renew_response", "renew_response": {"cert_pem": "...", "error": ""}}
 ```
 
 Flow: gateway accepts → verifies cert → sends `ack` → agent sends `hello`, then
@@ -170,6 +172,18 @@ HTTP handler) until it sees a terminal event for the task ID it sent, or its con
 deadline expires. There is no message type for a free-form command — `capability` must
 be a name in `packages/capabilities`'s fixed registry, or the agent returns `rejected`
 without executing anything.
+
+**Certificate renewal**: independent of task dispatch, an agent whose 30-day client
+certificate is within 7 days of expiry sends `renew_request` with a freshly generated
+CSR (own keypair, `CommonName` ignored — the gateway binds the new cert to the
+`server_id` it already derived from *this session's* peer certificate, never from the
+CSR's requested subject). The gateway (`gateway.handleRenew`) signs a new cert with the
+same 30-day TTL, atomically makes it the server's active serial, and revokes the
+superseded serial — all before replying with `renew_response`. `error` is set instead
+of `cert_pem` if the CSR doesn't parse/verify or the server record can't be found; the
+current session is left open either way (revocation is enforced on the *next* handshake,
+not against an already-open connection), so a declined or delayed renewal never drops a
+healthy session.
 
 ## 4. Capability reference
 
