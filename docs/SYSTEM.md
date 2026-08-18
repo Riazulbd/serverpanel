@@ -103,8 +103,12 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | Maintenance mode | ⬜ not implemented |
 | Basic auth on a site | ⬜ not implemented |
 | Custom + Let's Encrypt SSL | ✅ `ssl.issue_letsencrypt` (certbot), `ssl.install_custom` |
-| Automatic SSL renewal | ⬜ not implemented (certbot's own renewal timer is not
-  wired up by `stack.install` yet) |
+| Automatic SSL renewal | 🚧 `stack.install` now explicitly enables and starts
+  `certbot.timer` (idempotent step, unit-tested); certificates are issued via
+  `certbot --nginx` so renewal reloads nginx automatically; `diagnostics.basic` reports
+  the timer's enabled/active state. No dashboard cert-expiry countdown UI yet, and the
+  systemd-timer step itself isn't exercised by real systemd in the automated suite (see
+  `TESTING.md`) |
 | WordPress auto-login/auto-update | ⬜ not implemented |
 | Application enable/disable | ✅ `site.set_status` |
 | Secure file manager | ✅ `file.list/read/write/delete`, scoped + symlink-safe |
@@ -164,9 +168,10 @@ Phase boundaries and full milestone/estimate tables are in `product-plan.md` §6
 is the condensed status:
 
 - **Phase 1 — secure working foundation:** ~90% of the *capability* surface exists and
-  is tested per-capability (see the tables above); the biggest real gaps are backup
-  **restore**, an automated test suite (now added, see `TESTING.md`), SSL auto-renewal,
-  and agent cert auto-rotation. Not "GA-ready" yet, but the architecture and security
+  is tested per-capability (see the tables above); the biggest real gaps are an
+  automated test suite (now added, see `TESTING.md`), agent cert auto-rotation, and a
+  durable background job queue. Backup **restore** and SSL auto-renewal wiring are now
+  done. Not "GA-ready" yet, but the architecture and security
   primitives it depends on (mTLS, allow-listed capabilities, per-app isolation, audit
   log) are real and proven, not stubs.
 - **Phase 2 — professional server management:** not started. Git deployment,
@@ -299,6 +304,9 @@ Current capability list: `system.ping`, `service.control`, `diagnostics.basic`,
 `db.delete`, `db.list`, `file.list`, `file.read`, `file.write`, `file.delete`,
 `backup.run`, `backup.restore`, `logs.tail`. Notably absent (by design, until reviewed
 and added): `git.deploy`, `cron.upsert`, `ssh.*`, `firewall.*`, `agent.self_update`.
+`stack.install`'s steps now also include enabling `certbot.timer` (systemd's built-in
+twice-daily Let's Encrypt renewal run), and `diagnostics.basic` reports that timer's
+health whenever certbot is present — see `SERVERAVATAR_PARITY.md` APP-016.
 
 ## 13. Installation and deployment
 
@@ -392,8 +400,13 @@ all ⬜, scoped to Phase 2 per `product-plan.md` §9.
 - Single-user model: no organizations/teams/RBAC yet.
 - The in-process CA, while functionally correct, is not yet isolated as its own
   tightly-scoped trust boundary (see `SECURITY.md` §2).
-- `systemctl start/stop/restart` and Let's Encrypt issuance have not been verified in
-  *this* environment (no systemd as PID 1, no public DNS) — see `TESTING.md` §What
+- No dashboard SSL certificate-expiry countdown — `diagnostics.basic` surfaces the
+  `certbot.timer` health (enabled/active), a leading indicator, but not the actual
+  per-domain expiry date; that would need a dedicated `ssl.status` capability or a
+  `certbot certificates` parse, not yet built.
+- `systemctl start/stop/restart`, `certbot.timer` enablement, and Let's Encrypt
+  issuance have not been verified in *this* environment (no systemd as PID 1, no
+  public DNS) — see `TESTING.md` §What
   hasn't been verified.
 - Dashboard mobile responsiveness (320–768px) has not been verified with real browser
   automation in this session — see `TESTING.md` §Known gaps.

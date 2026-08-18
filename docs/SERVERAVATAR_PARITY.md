@@ -59,7 +59,7 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Documentation page**: Server Management (stack/software install)
 - **Short description**: One-click install of nginx/PHP/database/supporting tools.
 - **Expected behavior**: select a stack profile, it installs idempotently, retryably.
-- **Our implementation**: `stack.install` capability — nginx, PHP 8.3-FPM, MariaDB, Redis, Git, Composer, WP-CLI, Certbot, UFW, Fail2Ban, all idempotent (checked via `dpkg-query` before each install step).
+- **Our implementation**: `stack.install` capability — nginx, PHP 8.3-FPM, MariaDB, Redis, Git, Composer, WP-CLI, Certbot (+ its `certbot.timer` auto-renewal timer, explicitly enabled rather than assumed — see APP-016), UFW, Fail2Ban, all idempotent (checked via `dpkg-query`/`systemctl is-enabled` before each install step).
 - **Frontend**: server-detail "Install Phase 1 stack" action button.
 - **Backend service**: `gateway.dispatch` → `packages/capabilities.handleStackInstall`.
 - **API endpoint(s)**: `POST /api/v1/servers/{id}/tasks` with `capability: stack.install`.
@@ -108,6 +108,53 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Completion date**: n/a
 - **Known differences**: no WordPress-specific toolkit yet (plugin/theme management, auto-login, blueprints, search-replace) — see the `INTENTIONALLY_NOT_APPLICABLE`/`NOT_STARTED` table under WordPress Toolkit.
 - **Reason**: initial pass only covers install; toolkit is Phase 2/3 scope.
+
+### APP-016 — Let's Encrypt SSL issuance + auto-renewal
+- **Category**: Application Management → SSL
+- **Documentation page**: Deploy Apps → SSL/HTTPS
+- **Short description**: Issue a free trusted certificate for a domain and keep it
+  renewed for as long as the site exists, with no manual re-issuance step.
+- **Expected behavior**: issuing a certificate is one action; renewal happens on its
+  own before expiry, with nginx picking up the renewed certificate without downtime.
+- **Our implementation**: `ssl.issue_letsencrypt` requests the certificate via
+  `certbot --nginx` (so certbot's own `/etc/letsencrypt/renewal/<domain>.conf` records
+  nginx as the renewal installer, and a renewal reloads nginx automatically — no
+  separate reload step needed). `stack.install` now enables and starts `certbot.timer`
+  as an explicit idempotent step (previously the package's default state was assumed,
+  not verified/enforced) so scheduled renewal actually runs twice daily as certbot
+  itself recommends. `diagnostics.basic` reports `certbot.timer`'s enabled/active state
+  whenever certbot is present, so a renewal timer that's stopped or masked (e.g. by a
+  manual `systemctl stop`) is visible instead of silently expiring a site's HTTPS.
+- **Frontend**: server-detail SSL issuance action; `diagnostics.basic` output surfaces
+  in the server-detail diagnostics panel.
+- **Backend service**: `gateway.dispatch` → `packages/capabilities.handleSSLIssueLetsEncrypt`
+  / `handleStackInstall` (renewal timer step) / `handleDiagnosticsBasic` (status).
+- **API endpoint(s)**: `POST /api/v1/servers/{id}/tasks` (`capability: ssl.issue_letsencrypt`
+  / `stack.install` / `diagnostics.basic`).
+- **Agent command**: `ssl.issue_letsencrypt`, `stack.install`, `diagnostics.basic`.
+- **DB tables**: none (certificate state lives in certbot's own on-disk store; the
+  control plane does not yet persist expiry dates — see Known differences).
+- **Required permission**: authenticated session.
+- **Security considerations**: `certbot --nginx` argv is fixed except for the
+  already-validated domain and caller-supplied notification email; no shell
+  interpolation. Renewal itself needs no new privileged surface — it reuses the same
+  certbot binary and installer already trusted at issuance time.
+- **Test coverage**: `go test` covers the renewal-timer status string
+  (`TestCertbotTimerStatus*` — table-driven, mocks `systemctl` via `PATH`); the
+  `stack.install` step itself (enabling a real systemd timer) is not exercised by the
+  automated suite, same limitation as every other `systemctl`/`apt`-dependent step —
+  manually verified in a prior session against a real Ubuntu 24.04 host, see
+  `TESTING.md` §2.
+- **Current status**: `PARTIAL`
+- **Completion date**: 2026-08-18 (renewal wiring); n/a (dashboard cert-expiry UI)
+- **Known differences**: no dashboard countdown/expiry display yet (would need the
+  control plane to persist `certbot certificates`' expiry date somewhere, e.g. a future
+  heartbeat field or dedicated `ssl.status` capability); no multi-domain/SAN cert UI;
+  no proactive alert on `certbot.timer` failure (see ALERT-* — alerting is `NOT_STARTED`
+  entirely, this diagnostic is pull-based only, not push).
+- **Reason**: renewal *working* was the security-relevant gap (a site silently losing
+  HTTPS after 90 days); visibility/alerting UI is lower priority and layers on top
+  without changing the underlying mechanism.
 
 ### DB-001 — Database create/delete/list with scoped users
 - **Category**: Database Management
@@ -253,7 +300,9 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | APP-013 | Log Monitoring Suite (traffic analytics) | `NOT_STARTED` | |
 | APP-014 | Application-level WAF / AI-bot blocker | `NOT_STARTED` | |
 | APP-015 | Custom SSL upload | `PARTIAL` | `ssl.install_custom` capability exists agent-side; no dedicated dashboard UI |
-| APP-016 | Let's Encrypt SSL + auto-renewal | `PARTIAL` | `ssl.issue_letsencrypt` implemented; certbot's own renewal timer not yet wired up by `stack.install` |
+
+APP-016 (Let's Encrypt SSL + auto-renewal) moved to a full detail block in §1 — see
+above.
 
 ### Database management — not yet started (DB-*)
 | ID | Feature | Status | Notes |
@@ -296,7 +345,7 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | Status | Count (detailed entries) | Count (summary-table rows) |
 |---|---|---|
 | `COMPLETE` | 3 (SRV-001, BAK-002, ACC-001) | 1 (PROV-006) |
-| `PARTIAL` | 3 (SRV-002, APP-001, APP-002, DB-001, BAK-001 — 5 total, see note) | 6 |
+| `PARTIAL` | 3 (SRV-002, APP-001, APP-002, DB-001, BAK-001, APP-016 — 6 total, see note) | 5 |
 | `NOT_STARTED` | 0 | ~55 |
 | `BLOCKED_EXTERNAL` | 0 (sub-scoped within BAK-001/BAK-002's db/full-scope MariaDB verification) | 0 |
 | `INTENTIONALLY_NOT_APPLICABLE` | 0 | 1 |
@@ -359,3 +408,8 @@ establish the tracking process and close the single highest-priority gap
   BAK-001/BAK-002 reflecting this session's backup-restore implementation. ~60
   capabilities enumerated overall (detailed + summary), the large majority honestly
   `NOT_STARTED`.
+- **2026-08-18**: expanded APP-016 (Let's Encrypt SSL + auto-renewal) from a
+  one-line summary-table row into a full detail block, reflecting this session's
+  `certbot.timer` auto-renewal wiring in `stack.install` and the new
+  `diagnostics.basic` renewal-health check. Updated SRV-002's implementation
+  description to mention the timer step.

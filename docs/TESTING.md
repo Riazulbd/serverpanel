@@ -30,8 +30,9 @@ stub.
 
 Capabilities that require real system services this environment can't safely or
 meaningfully fake are **not** exercised by the automated suite:
-`stack.install` (apt/systemd), `app.wordpress_install` (real `wp-cli` + a running
-MariaDB), `ssl.issue_letsencrypt` (real ACME/public DNS), `db.create/delete/list`
+`stack.install` (apt/systemd, including its `certbot.timer` enablement step —
+`certbotTimerStatus`'s own output-parsing logic *is* covered, see §3), `app.wordpress_install`
+(real `wp-cli` + a running MariaDB), `ssl.issue_letsencrypt` (real ACME/public DNS), `db.create/delete/list`
 (a running MariaDB), `service.control`'s actual `systemctl` invocation, and the agent's
 registration/connect/reconnect loop against a live gateway. `backup.run`'s and
 `backup.restore`'s **files** scope are exercised for real (real files, real archive,
@@ -52,11 +53,18 @@ next testing investment worth making, tracked below.
 
 ## 3. What has never been verified in any environment
 
-- `systemctl start/stop/restart` of installed services — this session's sandbox has no
-  systemd as PID 1. The code path is a standard `systemctl <action> <unit>` argv
-  invocation and should work unmodified on a real VPS, but hasn't been confirmed there.
-- Let's Encrypt issuance — no public DNS points at any environment this project has
-  been built/tested in.
+- `systemctl start/stop/restart` of installed services, and `systemctl enable --now
+  certbot.timer` (the auto-renewal wiring `stack.install` now performs) — this
+  session's sandbox has no systemd as PID 1. Both are standard `systemctl <verb> <unit>`
+  argv invocations and should work unmodified on a real VPS, but haven't been confirmed
+  there. What *is* unit-tested is the pure logic around them: `certbotTimerStatus`'s
+  interpretation of `is-enabled`/`is-active` output (`TestCertbotTimerStatus*` in
+  `packages/capabilities/capabilities_test.go`, exercised against a fake `systemctl`
+  script on `PATH` so all three timer states — healthy, disabled, enabled-but-inactive —
+  are covered without needing real systemd).
+- Let's Encrypt issuance and renewal — no public DNS points at any environment this
+  project has been built/tested in, so neither initial issuance nor an actual
+  `certbot.timer`-triggered renewal has been observed end-to-end.
 - Agent behavior across a real network disconnect/reconnect cycle, a real VPS reboot,
   or a real control-plane restart while agents are live.
 - Dashboard mobile responsiveness at 320/375/390/414/768px — no browser-automation

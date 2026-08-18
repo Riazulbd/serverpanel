@@ -148,8 +148,28 @@ func handleDiagnosticsBasic(ctx context.Context, params map[string]any, progress
 		findings = append(findings, fmt.Sprintf("%s: %s", unit, strings.TrimSpace(string(out))))
 	}
 
+	if _, err := os.Stat("/usr/bin/certbot"); err == nil {
+		findings = append(findings, "certbot.timer: "+certbotTimerStatus(ctx))
+	}
+
 	if len(findings) == 0 {
 		return "no managed services found to check", nil
 	}
 	return strings.Join(findings, "; "), nil
+}
+
+// certbotTimerStatus summarizes whether Let's Encrypt certificates issued by
+// ssl.issue_letsencrypt will actually auto-renew. Both is-enabled and
+// is-active are checked (rather than either alone) because a timer that's
+// enabled but not currently active — or vice versa, e.g. after a manual
+// `systemctl stop` — would otherwise silently stop renewing certificates
+// with no signal anywhere in the dashboard.
+func certbotTimerStatus(ctx context.Context) string {
+	enabled, _ := run(ctx, "systemctl", "is-enabled", "certbot.timer")
+	active, _ := run(ctx, "systemctl", "is-active", "certbot.timer")
+	enabled, active = strings.TrimSpace(enabled), strings.TrimSpace(active)
+	if enabled == "enabled" && active == "active" {
+		return "ok (enabled, active)"
+	}
+	return fmt.Sprintf("WARNING: certificates will not auto-renew (enabled=%s active=%s)", enabled, active)
 }

@@ -2,6 +2,37 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-18 — Let's Encrypt auto-renewal wiring
+
+- **Fixed a real gap flagged in `SYSTEM.md`/`SERVERAVATAR_PARITY.md` (APP-016)**:
+  certificates issued via `ssl.issue_letsencrypt` had no verified renewal path —
+  certbot's own `certbot.timer` was never explicitly enabled by `stack.install`, so a
+  site's HTTPS could silently expire 90 days after issuance with nothing surfacing the
+  problem anywhere. `stack.install` now has a new idempotent step that runs
+  `systemctl enable --now certbot.timer`. Certificates are already issued via
+  `certbot --nginx` (not just `certbot certonly`), which records nginx as the renewal
+  installer in certbot's own renewal config — so a timer-triggered renewal reloads
+  nginx with the new certificate automatically, no extra step needed.
+- Added a visibility check: `diagnostics.basic` now reports `certbot.timer`'s
+  enabled/active state whenever certbot is present on the host (`certbotTimerStatus` in
+  `packages/capabilities/capabilities.go`), so a timer that's disabled, masked, or
+  stopped after the fact (e.g. by an operator's manual `systemctl stop`) shows up in the
+  same diagnostics output already surfaced in the dashboard, instead of failing silently
+  until a certificate actually expires.
+- Added real unit tests for the new logic: `TestCertbotTimerStatus*` exercise all three
+  states (healthy, disabled, enabled-but-inactive) against a fake `systemctl` script
+  installed on `PATH`, and `TestDiagnosticsBasicIncludesCertbotTimerWhenCertbotPresent`
+  guards against ever claiming the finding exists when certbot isn't actually installed.
+  `go build ./...`, `go vet ./...`, and `go test ./...` all pass.
+- Updated `docs/SYSTEM.md`, `docs/TESTING.md`, and `docs/SERVERAVATAR_PARITY.md`
+  (APP-016 promoted from `NOT_STARTED`-in-summary-table to a full `PARTIAL` detail
+  block — the security-relevant renewal mechanism now works; a dashboard cert-expiry
+  countdown UI remains a documented gap, not silently dropped).
+- The `systemctl enable --now certbot.timer` step itself, like every other
+  apt/systemd-dependent `stack.install` step, is not exercised by real systemd in this
+  sandboxed environment — flagged explicitly in `TESTING.md` §3 rather than claimed as
+  verified.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the
