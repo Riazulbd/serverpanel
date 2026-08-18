@@ -138,6 +138,17 @@ CREATE TABLE IF NOT EXISTS sites (
 	created_at   TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS databases (
+	id         TEXT PRIMARY KEY,
+	server_id  TEXT NOT NULL REFERENCES servers(id),
+	site_id    TEXT NOT NULL DEFAULT '',
+	name       TEXT NOT NULL,
+	owner_user TEXT NOT NULL,
+	status     TEXT NOT NULL DEFAULT 'active',
+	created_at TEXT NOT NULL,
+	UNIQUE(server_id, name)
+);
+
 CREATE TABLE IF NOT EXISTS backups (
 	id         TEXT PRIMARY KEY,
 	server_id  TEXT NOT NULL REFERENCES servers(id),

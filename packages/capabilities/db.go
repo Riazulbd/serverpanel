@@ -3,11 +3,25 @@ package capabilities
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"regexp"
 
 	_ "github.com/go-sql-driver/mysql"
 )
+
+// dbCreateResult and dbDeleteResult are the structured details db.create/
+// db.delete report back, matching the pattern backup.run/backup.restore use
+// (packages/capabilities/backup.go) — a plain success string isn't enough
+// for the control plane to persist a durable, queryable database record.
+type dbCreateResult struct {
+	Name  string `json:"name"`
+	Owner string `json:"owner_user"`
+}
+
+type dbDeleteResult struct {
+	Name string `json:"name"`
+}
 
 // identifierRe is the allow-list for database/user names. MySQL has no
 // placeholder syntax for identifiers (only for values), so the standard
@@ -75,7 +89,8 @@ func handleDBCreate(ctx context.Context, params map[string]any, progress Progres
 		return "", fmt.Errorf("flush privileges: %w", err)
 	}
 
-	return fmt.Sprintf("database %q created, owned by user %q with grants scoped to that database only", name, owner), nil
+	out, _ := json.Marshal(dbCreateResult{Name: name, Owner: owner})
+	return string(out), nil
 }
 
 func handleDBDelete(ctx context.Context, params map[string]any, progress Progress) (string, error) {
@@ -83,6 +98,9 @@ func handleDBDelete(ctx context.Context, params map[string]any, progress Progres
 	owner, _ := params["owner_user"].(string)
 	if !identifierRe.MatchString(name) {
 		return "", fmt.Errorf("invalid database name %q", name)
+	}
+	if owner != "" && !identifierRe.MatchString(owner) {
+		return "", fmt.Errorf("invalid owner_user %q", owner)
 	}
 
 	db, err := mariaDBConn()
@@ -95,12 +113,10 @@ func handleDBDelete(ctx context.Context, params map[string]any, progress Progres
 		return "", fmt.Errorf("drop database: %w", err)
 	}
 	if owner != "" {
-		if !identifierRe.MatchString(owner) {
-			return "", fmt.Errorf("invalid owner_user %q", owner)
-		}
 		db.ExecContext(ctx, fmt.Sprintf("DROP USER IF EXISTS `%s`@'localhost'", owner))
 	}
-	return fmt.Sprintf("database %q deleted", name), nil
+	out, _ := json.Marshal(dbDeleteResult{Name: name})
+	return string(out), nil
 }
 
 func handleDBList(ctx context.Context, params map[string]any, progress Progress) (string, error) {

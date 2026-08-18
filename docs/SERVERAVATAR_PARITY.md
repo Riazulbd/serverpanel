@@ -121,11 +121,30 @@ actually exists — expand a row into a full block the moment work on it begins
 - **DB tables**: none on the control-plane side yet (no `databases` table — see Known differences).
 - **Required permission**: authenticated session.
 - **Security considerations**: identifier allow-list (`^[a-z][a-z0-9_]{0,30}$`) prevents SQL-identifier injection where placeholders can't be used; grants are always single-database-scoped.
-- **Test coverage**: manually verified in a prior session against a real MariaDB; not covered by `go test` (requires a running MariaDB — this environment has none).
+- **Test coverage**: `handleDBCreate`/`handleDBDelete`'s identifier/password validation boundary is covered by `packages/capabilities/db_test.go` (5 tests: invalid db name, invalid owner user, too-short password, both rejected before any MariaDB connection is attempted). The actual `CREATE DATABASE`/`GRANT`/`DROP DATABASE` statements were manually verified in a prior session against a real MariaDB; not re-exercised by `go test` in this environment (no MariaDB here).
 - **Current status**: `PARTIAL`
 - **Completion date**: n/a
-- **Known differences**: MongoDB support, a dedicated dashboard UI, and control-plane persistence of database records (so they show up per-site the way backups now do) don't exist yet.
-- **Reason**: capability-layer work landed before the control-plane persistence/UI layer that backups just got (see BAK-001) — same pattern, not yet applied here. Good candidate for the next iteration.
+- **Known differences**: MongoDB support and a dedicated phpMyAdmin/DB-admin-tool integration don't exist yet (see DB-002/DB-003 below). Control-plane persistence + dashboard UI now exist — see DB-005.
+- **Reason**: MongoDB and a DB-admin-tool integration remain explicitly Phase 2/3 scope (`product-plan.md` §9).
+
+### DB-005 — Control-plane persistence + dashboard UI for databases
+- **Category**: Database Management
+- **Documentation page**: Database Management → "Understanding Database Management"
+- **Short description**: Durable, listable, deletable database records with their own dashboard panel, mirroring what backups (BAK-001) already have.
+- **Expected behavior**: creating/deleting a database through the dashboard is a real, tracked operation — not just a one-off agent task dispatch with no record of what exists.
+- **Our implementation**: a `databases` table (`UNIQUE(server_id, name)`) plus `POST`/`GET /api/v1/servers/{id}/databases` and `DELETE /api/v1/servers/{id}/databases/{databaseId}` (`apps/controlplane/databases.go`), following the same dispatch-then-persist-on-success pattern as `handleCreateSite`/`handleCreateBackup`: `db.create`/`db.delete` only ever get dispatched with a name pre-validated against the identifier allow-list, and the row is only written/removed once the agent confirms the operation actually succeeded. A server-generated, cryptographically random 48-hex-character owner password is returned to the caller exactly once (in the create response) and is never persisted anywhere — consistent with this project's "no plaintext secrets at rest" rule. A "Databases" panel on the server-detail dashboard view lists databases, creates new ones (showing the generated password once, with an explicit "will not be shown again" warning), and deletes them with a destructive-action confirmation dialog.
+- **Frontend**: `web/index.html` — "Databases" section on `view-serverDetail` (`openNewDatabaseModal`, `createDatabase`, `renderDatabases`, `deleteDatabase`).
+- **Backend service**: `apiServer.handleCreateDatabase/handleListDatabases/handleDeleteDatabase` (`apps/controlplane/databases.go`).
+- **API endpoint(s)**: `POST /api/v1/servers/{id}/databases`, `GET /api/v1/servers/{id}/databases`, `DELETE /api/v1/servers/{id}/databases/{databaseId}`.
+- **Agent command**: `db.create`, `db.delete` (now return structured JSON detail — `{"name", "owner_user"}` — instead of a plain string, so the control plane can parse and persist the result; see DB-001).
+- **DB tables**: `databases` (`server_id`, `site_id` optional, `name`, `owner_user`, `status`, `created_at`).
+- **Required permission**: authenticated session; the database's own recorded `name`/`owner_user` are read server-side from the `databases` row for delete, never accepted as free-form client input for that call.
+- **Security considerations**: `name` is validated against `^[a-z][a-z0-9_]{0,30}$` at the API layer (defense in depth, before ever reaching a connected agent) as well as, independently, at the agent layer (DB-001); the owner password is generated with `crypto/rand`, never caller-supplied and never stored in plaintext (or at all) on the control plane.
+- **Test coverage**: `apps/controlplane/store_test.go` (`TestDatabaseCreateListGetDeleteRoundTrip`, `TestDatabaseNameIsUniquePerServer` — the latter verifying the `UNIQUE(server_id, name)` constraint scopes correctly per-server, not globally); `apps/controlplane/http_test.go` (`TestCreateDatabaseRejectsInvalidName`, `TestDeleteDatabaseRequiresARealRecord` — proving validation/not-found handling happens before any agent dispatch, and that a valid request against a disconnected agent fails as `502`, not silently).
+- **Current status**: `COMPLETE`
+- **Completion date**: 2026-08-18
+- **Known differences**: none from what this entry claims; MongoDB and a dedicated DB-admin-tool UI remain separate, `NOT_STARTED` items (DB-002/DB-003).
+- **Reason**: n/a.
 
 ### BAK-001 — On-demand backup (files/db/full)
 - **Category**: Backups
@@ -261,7 +280,6 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | DB-002 | MongoDB support | `NOT_STARTED` | |
 | DB-003 | phpMyAdmin / DB admin UI integration | `NOT_STARTED` | |
 | DB-004 | Database process/query monitoring | `NOT_STARTED` | |
-| DB-005 | Control-plane persistence + dashboard UI for databases (mirroring what BAK-001 just got) | `NOT_STARTED` | See DB-001's "Known differences" |
 
 ### WordPress Toolkit (WP-*)
 | ID | Feature | Status |
@@ -295,9 +313,9 @@ capability surface (per task-brief §3/§101), not just what's already built.
 
 | Status | Count (detailed entries) | Count (summary-table rows) |
 |---|---|---|
-| `COMPLETE` | 3 (SRV-001, BAK-002, ACC-001) | 1 (PROV-006) |
+| `COMPLETE` | 4 (SRV-001, BAK-002, ACC-001, DB-005) | 1 (PROV-006) |
 | `PARTIAL` | 3 (SRV-002, APP-001, APP-002, DB-001, BAK-001 — 5 total, see note) | 6 |
-| `NOT_STARTED` | 0 | ~55 |
+| `NOT_STARTED` | 0 | ~54 |
 | `BLOCKED_EXTERNAL` | 0 (sub-scoped within BAK-001/BAK-002's db/full-scope MariaDB verification) | 0 |
 | `INTENTIONALLY_NOT_APPLICABLE` | 0 | 1 |
 
@@ -354,6 +372,14 @@ establish the tracking process and close the single highest-priority gap
 
 ## Change history
 
+- **2026-08-18**: closed DB-005 (control-plane persistence + dashboard UI for
+  databases) — the specific follow-up DB-001's "Known differences" flagged as the next
+  candidate. Added a `databases` table, `db.create`/`db.delete` now return structured
+  JSON (matching the backup capabilities' pattern) instead of a plain string, three new
+  API endpoints, a "Databases" dashboard panel, and automated test coverage (identifier/
+  password validation, store round-trip + per-server uniqueness, HTTP validation/
+  not-found/dispatch-ordering). DB-001 updated to reflect DB-005 closing its persistence
+  gap.
 - **2026-08-17**: initial version. Established the tracking process; recorded
   SRV-001/002, APP-001/002, DB-001, ACC-001 (pre-existing work) at accurate status, and
   BAK-001/BAK-002 reflecting this session's backup-restore implementation. ~60

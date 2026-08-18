@@ -2,6 +2,43 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-18 — Database control-plane persistence and dashboard UI
+
+- **Closed DB-005** (`docs/SERVERAVATAR_PARITY.md`), the specific next-iteration gap the
+  previous entry's DB-001 write-up flagged: databases created via `db.create` existed
+  only as one-off agent task results, with no durable record and no dashboard UI —
+  the same gap backups had before `backup.run`/`backup.restore` got control-plane
+  persistence.
+- Added a `databases` table (`server_id`, optional `site_id`, `name`, `owner_user`,
+  `status`, `created_at`, `UNIQUE(server_id, name)`) and store methods
+  (`createDatabaseRecord`/`listDatabases`/`getDatabase`/`deleteDatabaseRecord`, each
+  scoped by server ID the same way `getSite`/`getBackup` are).
+- Changed `db.create`/`db.delete` (`packages/capabilities/db.go`) to return structured
+  JSON detail (`{"name", "owner_user"}`) instead of a formatted string, matching the
+  pattern `backup.run`/`backup.restore` already use — the control plane needs a
+  parseable result to persist, not just a success message. Also fixed `handleDBDelete`
+  to validate `owner_user` against the identifier allow-list *before* opening a MariaDB
+  connection (it previously validated after the `DROP DATABASE`, so a bad owner name
+  could still trigger a real drop before being rejected).
+- Wired database management into the control plane end-to-end
+  (`apps/controlplane/databases.go`): `POST`/`GET /api/v1/servers/{id}/databases`,
+  `DELETE /api/v1/servers/{id}/databases/{databaseId}`, all following the same
+  dispatch-then-persist(or-remove)-only-on-agent-success pattern as sites/backups. The
+  owner password is generated control-plane-side with `crypto/rand` (48 hex chars),
+  never caller-supplied, never stored anywhere, and returned to the caller exactly
+  once. A "Databases" panel was added to the server-detail dashboard view (create
+  modal showing the generated password once with an explicit "won't be shown again"
+  warning, a databases table, delete with a destructive-action confirmation dialog).
+- Added 5 new capability-layer tests (`packages/capabilities/db_test.go`: invalid
+  database name/owner user rejected for both create and delete, too-short password
+  rejected — all exercised without a real MariaDB connection, since validation runs
+  before the connection is opened), 2 new store tests (`TestDatabaseCreateListGetDeleteRoundTrip`,
+  `TestDatabaseNameIsUniquePerServer`), and 2 new HTTP tests
+  (`TestCreateDatabaseRejectsInvalidName`, `TestDeleteDatabaseRequiresARealRecord`).
+  Full suite green, `go vet` clean.
+- Updated `SYSTEM.md`, `API.md`, and `SERVERAVATAR_PARITY.md` (DB-001 and new DB-005
+  entries, progress-summary counts) to reflect the change.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

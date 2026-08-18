@@ -297,3 +297,59 @@ func TestBackupCreateListGetRoundTrip(t *testing.T) {
 		t.Fatal("expected getBackup to refuse a backup ID under the wrong server")
 	}
 }
+
+func TestDatabaseCreateListGetDeleteRoundTrip(t *testing.T) {
+	st := newTestStore(t)
+	serverID, _, _ := st.createServer("web-9", "", nil, time.Hour, "admin@example.com")
+	site, err := st.createSite(serverID, "c.example.com", "sp_c", "/home/sites/sp_c", "wordpress", "8.3")
+	if err != nil {
+		t.Fatalf("createSite: %v", err)
+	}
+
+	rec, err := st.createDatabaseRecord(serverID, site.ID, "app_db", "app_db")
+	if err != nil {
+		t.Fatalf("createDatabaseRecord: %v", err)
+	}
+	if rec.ID == "" || rec.Status != "active" || rec.Name != "app_db" || rec.OwnerUser != "app_db" {
+		t.Fatalf("unexpected database record: %+v", rec)
+	}
+
+	list := st.listDatabases(serverID)
+	if len(list) != 1 || list[0].Name != "app_db" {
+		t.Fatalf("listDatabases = %+v, want one entry named app_db", list)
+	}
+
+	got, ok := st.getDatabase(serverID, rec.ID)
+	if !ok || got.SiteID != site.ID {
+		t.Fatalf("getDatabase = %+v, ok=%v, want it to round-trip site_id=%s", got, ok, site.ID)
+	}
+
+	otherServer, _, _ := st.createServer("web-10", "", nil, time.Hour, "admin@example.com")
+	if _, ok := st.getDatabase(otherServer, rec.ID); ok {
+		t.Fatal("expected getDatabase to refuse a database ID under the wrong server")
+	}
+
+	if err := st.deleteDatabaseRecord(serverID, rec.ID); err != nil {
+		t.Fatalf("deleteDatabaseRecord: %v", err)
+	}
+	if _, ok := st.getDatabase(serverID, rec.ID); ok {
+		t.Fatal("expected getDatabase to find nothing after deleteDatabaseRecord")
+	}
+}
+
+func TestDatabaseNameIsUniquePerServer(t *testing.T) {
+	st := newTestStore(t)
+	serverID, _, _ := st.createServer("web-11", "", nil, time.Hour, "admin@example.com")
+
+	if _, err := st.createDatabaseRecord(serverID, "", "dup_db", "dup_db"); err != nil {
+		t.Fatalf("createDatabaseRecord: %v", err)
+	}
+	if _, err := st.createDatabaseRecord(serverID, "", "dup_db", "dup_db"); err == nil {
+		t.Fatal("expected a second database with the same name on the same server to be rejected")
+	}
+
+	otherServer, _, _ := st.createServer("web-12", "", nil, time.Hour, "admin@example.com")
+	if _, err := st.createDatabaseRecord(otherServer, "", "dup_db", "dup_db"); err != nil {
+		t.Fatalf("expected the same database name to be allowed on a different server, got: %v", err)
+	}
+}
