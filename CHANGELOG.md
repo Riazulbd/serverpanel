@@ -2,6 +2,49 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-18 — Database management: control-plane persistence, API, dashboard UI
+
+- **Closed the gap flagged in the previous entry** ("DB-001 ... good candidate for the
+  next iteration"): `db.create`/`db.delete` were already implemented agent-side, but had
+  no control-plane persistence, dedicated API, or dashboard UI — the same gap
+  `backup.run`/`backup.restore` had before the 2026-08-17 pass, closed the same way.
+- New `databases` table (`apps/controlplane/db.go`) — `server_id`, `name`, `owner_user`,
+  `status`, `created_at`, `UNIQUE(server_id, name)` (guards against a retried
+  `db.create` — idempotent on the agent side — producing two control-plane rows for the
+  same underlying database).
+- New `store` methods: `createDatabase`/`listDatabases`/`getDatabase`/
+  `getDatabaseByName`/`deleteDatabase`, each scoped by server ID the same way
+  `getSite`/`getBackup` are, plus `errDatabaseAlreadyRecorded` for the duplicate-name
+  case.
+- New endpoints (`apps/controlplane/databases.go`): `GET`/`POST /api/v1/servers/{id}/databases`,
+  `DELETE /api/v1/servers/{id}/databases/{dbId}`. `POST` validates `name`/`owner_user`
+  against the same identifier allow-list `packages/capabilities/db.go` enforces
+  agent-side (defense in depth, not a replacement for it), generates a 24-byte random
+  owner password server-side (never caller-supplied, never persisted — MariaDB is the
+  only place it lives), dispatches `db.create`, and only on agent success persists the
+  record and returns the password exactly once. `DELETE` reads the database's own
+  recorded `name`/`owner_user` (never a caller-supplied name) before dispatching
+  `db.delete`.
+- New "Databases" panel in the server-detail dashboard view: list table, "+ New
+  database" modal, one-time credential display (mirrors the install-command-shown-once
+  pattern server creation already uses), per-row delete with a confirmation dialog.
+- Added `TestDatabaseCreateListGetDeleteRoundTrip` (store layer: create/list/get/delete,
+  cross-server addressing rejection, duplicate-name rejection) and
+  `TestCreateDatabaseRejectsInvalidNameAndMissingAgent`/
+  `TestDeleteDatabaseRequiresARecordedDatabase` (HTTP layer: validation happens before
+  dispatch, same pattern the backup HTTP tests already established). Manually
+  smoke-tested end-to-end against a running control plane in this session
+  (signup/login/create-server/list/create/delete-validation paths, dashboard HTML
+  serves the new panel).
+- Updated `docs/SYSTEM.md` (new "Database management" feature table, `databases` row in
+  the schema table), `docs/API.md` (new endpoint docs), and `docs/SERVERAVATAR_PARITY.md`
+  (DB-001 promoted to a full `COMPLETE`/`BLOCKED_EXTERNAL` detail block; DB-005 folded
+  into it).
+- **Known gap carried forward, not new**: the real MariaDB round trip for
+  `db.create`/`db.delete` themselves is still only manually verified from a prior
+  session (this environment has no MariaDB) — same `BLOCKED_EXTERNAL` caveat as
+  BAK-001/BAK-002's db/full-scope paths.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the
