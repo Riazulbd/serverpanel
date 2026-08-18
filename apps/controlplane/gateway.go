@@ -173,8 +173,34 @@ func (g *gateway) handleConn(conn net.Conn) {
 					}
 				}
 			}
+		case proto.MsgRenewRequest:
+			if env.RenewRequest != nil {
+				g.handleRenew(sess, serverID, *env.RenewRequest)
+			}
 		}
 	}
+}
+
+// handleRenew issues a replacement client certificate for an agent that is
+// already connected (and therefore already proved its identity via the mTLS
+// handshake that got it here — see handleConn above). No bootstrap token is
+// involved: the live session itself is the credential. The certificate
+// being replaced is never revoked as part of this — it simply expires
+// naturally — so a failed or lost renewal response never strands the agent
+// with no way to reconnect.
+func (g *gateway) handleRenew(sess *agentSession, serverID string, req proto.RenewRequest) {
+	resp := proto.RenewResponse{}
+	certPEM, serial, err := g.ca.signAgentCSR([]byte(req.CSRPEM), serverID, agentCertTTL)
+	if err != nil {
+		resp.Error = err.Error()
+		g.store.log(serverID, "", "agent.cert_renew_failed", err.Error())
+	} else {
+		resp.CertPEM = string(certPEM)
+		g.store.recordCertRenewal(serverID, serial.String())
+	}
+	sess.mu.Lock()
+	_ = sess.enc.Encode(proto.Envelope{Type: proto.MsgRenewResponse, RenewResponse: &resp})
+	sess.mu.Unlock()
 }
 
 // dispatch sends a task to a connected agent and waits (bounded by ctx) for

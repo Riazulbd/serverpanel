@@ -172,6 +172,16 @@ func (s *store) markIssuedCert(serverID, serial string) {
 	s.log(serverID, "", "agent.registered", fmt.Sprintf("cert_serial=%s", serial))
 }
 
+// recordCertRenewal updates the tracked cert_serial after a live agent
+// renews its own client certificate (see gateway.go's handleRenew).
+// Deliberately does not touch status/last_seen (unlike markIssuedCert,
+// which is only ever called before a first connection exists) since the
+// agent renewing is, by definition, already connected.
+func (s *store) recordCertRenewal(serverID, serial string) {
+	s.db.Exec(`UPDATE servers SET cert_serial = ? WHERE id = ?`, serial, serverID)
+	s.log(serverID, "", "agent.cert_renewed", fmt.Sprintf("cert_serial=%s", serial))
+}
+
 func (s *store) isRevoked(serial string) bool {
 	var n int
 	s.db.QueryRow(`SELECT COUNT(1) FROM revoked_certs WHERE serial = ?`, serial).Scan(&n)

@@ -48,11 +48,11 @@ actually exists — expand a row into a full block the moment work on it begins
 - **DB tables**: `servers`, `bootstrap_tokens`, `revoked_certs`.
 - **Required permission**: authenticated session (single-user model today — see ORG-001).
 - **Security considerations**: single-use/short-lived hashed bootstrap tokens; certificate identity independently derived from the mTLS handshake, never trusted from agent-asserted data; revocation checked every handshake.
-- **Test coverage**: `apps/controlplane/http_test.go` (`TestServerCreateListRevokeFlow`, `TestRegisterEndpointRejectsBadToken`), `apps/controlplane/store_test.go`.
+- **Test coverage**: `apps/controlplane/http_test.go` (`TestServerCreateListRevokeFlow`, `TestRegisterEndpointRejectsBadToken`), `apps/controlplane/store_test.go`, `apps/controlplane/gateway_test.go` (`TestHandleRenewIssuesFreshCertBoundToServerID`, `TestHandleRenewRejectsMalformedCSRWithoutIssuingACert`), `apps/agent/renew_test.go`.
 - **Current status**: `COMPLETE`
-- **Completion date**: 2026-08-14
-- **Known differences**: no agent certificate auto-renewal before 30-day expiry yet.
-- **Reason**: scoped out of the initial secure-foundation pass; tracked in `SYSTEM.md` §21.
+- **Completion date**: 2026-08-18
+- **Known differences**: none remaining for the connect/register/renew lifecycle itself; agent self-update (replacing the running binary) is a separate, still-unstarted capability — see SYSTEM.md §21.
+- **Reason**: n/a — certificate auto-renewal (this row's prior gap) shipped 2026-08-18; see `SECURITY.md` §2 and `CHANGELOG.md`.
 
 ### SRV-002 — Hosting stack installation (LEMP)
 - **Category**: Server Management

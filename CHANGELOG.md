@@ -2,6 +2,45 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-18 — Agent certificate auto-renewal
+
+- **Implemented agent mTLS certificate auto-renewal**, closing the security-relevant
+  gap flagged in `SECURITY.md` §2 and `SYSTEM.md` §21: agents previously had to be
+  manually re-registered with a brand new bootstrap token every 30 days, or they'd
+  silently drop off the fleet the moment their certificate expired.
+- New wire messages `renew_request`/`renew_response` (`packages/proto/proto.go`), sent
+  over an agent's already-authenticated mTLS session — no bootstrap token or other
+  shared secret is reused for renewal. `gateway.handleRenew`
+  (`apps/controlplane/gateway.go`) signs a fresh cert bound to the session's
+  already-verified `server_id`, deliberately ignoring whatever CommonName the CSR
+  itself requests (the same defense `signAgentCSR` already applies at initial
+  registration), and records the new serial via `store.recordCertRenewal` without
+  disturbing the agent's live connected status. The certificate being replaced is
+  never proactively revoked — it just expires on its own schedule — so a lost or
+  failed renewal response can never strand an agent with no way back in.
+- Agent side (`apps/agent/renew.go`, `connect.go`): a new `renewalLoop` goroutine
+  checks once on connect and then hourly whether the current cert has fewer than 10
+  days left (`certRenewalWindow`); if so it generates a fresh key/CSR, sends
+  `renew_request`, and on a successful response verifies the returned certificate
+  actually matches the key it generated (`tls.X509KeyPair`) *before* writing anything
+  to disk. The new identity is persisted via temp-file-then-rename (never a partial
+  write) with a best-effort `.bak` copy of the previous cert/key kept as a manual
+  recovery path, and the in-memory `identity` is updated so the very next reconnect
+  uses it automatically.
+- Fixed a latent concurrency bug as part of this change: `heartbeatLoop` and every
+  concurrent `handleTask` goroutine were both calling `Encode` on the same
+  `*json.Encoder` with no synchronization, which could interleave two messages'
+  bytes on the wire. Both now go through a shared mutex-guarded `envelopeWriter`,
+  which the new renewal path also uses.
+- Added `apps/controlplane/gateway_test.go` (issuance bound to the authenticated
+  server ID over a real `net.Pipe` session, and rejection of a malformed CSR without
+  touching the stored cert serial) and `apps/agent/renew_test.go` (renewal-window
+  logic, CSR self-consistency, and the atomic-write/backup behavior of persisting a
+  renewed identity) — 8 new tests, all passing alongside the existing 61.
+- Docs: `SECURITY.md` §2, `SYSTEM.md` (feature table + known limitations),
+  `OPERATIONS.md` troubleshooting, `API.md` (wire protocol), `TESTING.md`, and
+  `SERVERAVATAR_PARITY.md` (SRV-001) all updated to reflect the closed gap.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

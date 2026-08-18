@@ -52,8 +52,9 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | User/organization management | 🚧 single-user model only; no orgs/teams yet |
 | Multiple-server management | ✅ create/list/get/revoke, search/filter in UI |
 | Secure agent install/registration | ✅ bootstrap token → mTLS cert exchange |
-| Agent identity, cert rotation, revocation | 🚧 issuance + revocation done; no
-  auto-renewal before expiry yet (see `SECURITY.md` §2) |
+| Agent identity, cert rotation, revocation | ✅ issuance, revocation, and auto-renewal
+  before the 30-day expiry (agent-initiated over the live mTLS session, ~10 days out —
+  see `SECURITY.md` §2) all implemented |
 | Server health monitoring | ✅ heartbeat: uptime, load, mem%, disk% |
 | Server groups/tags/metadata | ✅ `group`, `tags[]` on server records |
 | Background job queue | ⬜ task dispatch is synchronous request/response today,
@@ -279,7 +280,10 @@ See `SECURITY.md` in full. Summary: single-use, short-lived (15 min default),
 hashed-at-rest bootstrap tokens exchanged exactly once for a 30-day mTLS client
 certificate bound (by `CommonName`) to the server's ID; the gateway independently
 derives identity from the certificate on every connection (never trusts anything the
-agent asserts in-band) and checks a revocation list on every handshake.
+agent asserts in-band) and checks a revocation list on every handshake. Before that
+30-day certificate expires, the agent renews it itself over the already-authenticated
+session (`renew_request`/`renew_response`, `SECURITY.md` §2) — no bootstrap token
+needed for renewal, only for a first registration or after a missed renewal window.
 
 ## 12. Privileged operations and allow-list
 
@@ -384,8 +388,9 @@ all ⬜, scoped to Phase 2 per `product-plan.md` §9.
 - No backup scheduling/retention policy — backups are on-demand only.
 - No on-disk agent task journal — a task in flight when the agent process restarts is
   lost, not resumed (see `ARCHITECTURE.md` §4 "As built").
-- No agent certificate auto-renewal before its 30-day expiry (see `SECURITY.md` §2).
-- No agent self-update mechanism (see `SECURITY.md` §3).
+- No agent self-update mechanism (see `SECURITY.md` §3) — agent cert auto-renewal
+  (replacing the mTLS identity, not the binary) is implemented; replacing the running
+  agent binary itself is not.
 - No background job queue — task dispatch is synchronous and bounded by a 120s HTTP
   timeout; this will not scale past a moderate number of concurrent long-running tasks
   (e.g. many simultaneous `stack.install` runs) without becoming a queue.

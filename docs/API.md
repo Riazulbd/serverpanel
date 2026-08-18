@@ -160,6 +160,8 @@ connection carries newline-delimited JSON `Envelope`s in both directions
 {"type": "task", "task": {"id": "...", "capability": "...", "params": {}, "issued_at": "..."}}
 {"type": "task_event", "task_event": {"task_id": "...", "status": "queued|running|succeeded|failed|rejected", "message": "...", "detail": "...", "at": "..."}}
 {"type": "ack"}
+{"type": "renew_request", "renew_request": {"csr_pem": "..."}}
+{"type": "renew_response", "renew_response": {"cert_pem": "...", "error": ""}}
 ```
 
 Flow: gateway accepts → verifies cert → sends `ack` → agent sends `hello`, then
@@ -170,6 +172,17 @@ HTTP handler) until it sees a terminal event for the task ID it sent, or its con
 deadline expires. There is no message type for a free-form command — `capability` must
 be a name in `packages/capabilities`'s fixed registry, or the agent returns `rejected`
 without executing anything.
+
+`renew_request`/`renew_response` are the agent's own certificate-renewal exchange over
+this same authenticated session (see `SECURITY.md` §2): the agent generates a fresh key
+and CSR when its current cert has under 10 days left (`certRenewalWindow` in
+`apps/agent/renew.go`), the gateway signs a new 30-day cert bound to the session's
+already-verified `server_id` (`gateway.handleRenew`, `ca.go`'s `agentCertTTL`) — never
+to whatever CommonName the CSR itself requests — and the agent persists it (after
+verifying the returned cert actually matches the key it generated) for use on the next
+reconnect. No bootstrap token is involved; the live mTLS session is the credential. A
+`renew_response` with a non-empty `error` means the current certificate is untouched
+and the agent will simply retry on its next hourly check.
 
 ## 4. Capability reference
 
