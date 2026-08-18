@@ -102,9 +102,14 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | Site cloning, cross-server migration | ⬜ Phase 2 |
 | Maintenance mode | ⬜ not implemented |
 | Basic auth on a site | ⬜ not implemented |
-| Custom + Let's Encrypt SSL | ✅ `ssl.issue_letsencrypt` (certbot), `ssl.install_custom` |
-| Automatic SSL renewal | ⬜ not implemented (certbot's own renewal timer is not
-  wired up by `stack.install` yet) |
+| Custom + Let's Encrypt SSL | ✅ `ssl.issue_letsencrypt` (certbot) and `ssl.install_custom`
+  (now cert/key-match + hostname + expiry validated, and actually wired into the site's
+  nginx vhost — previously it only wrote files to disk), both with a dedicated dashboard
+  panel and `ssl.status` for reading back what's actually installed |
+| Automatic SSL renewal | 🚧 relies on certbot's own systemd renewal timer (installed by
+  `stack.install`'s `certbot` package, and remembers the nginx installer for
+  `--nginx`-issued certs, so it reloads nginx itself); no control-plane-driven renewal
+  job or proactive expiry alerting yet — needs the durable background job queue |
 | WordPress auto-login/auto-update | ⬜ not implemented |
 | Application enable/disable | ✅ `site.set_status` |
 | Secure file manager | ✅ `file.list/read/write/delete`, scoped + symlink-safe |
@@ -262,8 +267,9 @@ bcrypt (cost 12); nothing is stored in plaintext.
 
 Full list with request/response shapes in `API.md`. Summary: `/api/v1/auth/*`
 (signup/login/logout/TOTP enroll+verify/MFA challenge/me), `/api/v1/servers*` (CRUD,
-revoke, task dispatch, sites, audit), `/agents/register` (the one unauthenticated
-agent-facing endpoint, secured by the bootstrap token itself), `/healthz`.
+revoke, task dispatch, sites, backups, SSL issue/install/status, audit), `/agents/register`
+(the one unauthenticated agent-facing endpoint, secured by the bootstrap token itself),
+`/healthz`.
 
 ## 10. Background jobs
 
@@ -295,8 +301,8 @@ in `packages/capabilities/capabilities_test.go`), not just convention.
 
 Current capability list: `system.ping`, `service.control`, `diagnostics.basic`,
 `stack.install`, `site.create`, `site.set_php_version`, `site.set_status`,
-`app.wordpress_install`, `ssl.issue_letsencrypt`, `ssl.install_custom`, `db.create`,
-`db.delete`, `db.list`, `file.list`, `file.read`, `file.write`, `file.delete`,
+`app.wordpress_install`, `ssl.issue_letsencrypt`, `ssl.install_custom`, `ssl.status`,
+`db.create`, `db.delete`, `db.list`, `file.list`, `file.read`, `file.write`, `file.delete`,
 `backup.run`, `backup.restore`, `logs.tail`. Notably absent (by design, until reviewed
 and added): `git.deploy`, `cron.upsert`, `ssh.*`, `firewall.*`, `agent.self_update`.
 

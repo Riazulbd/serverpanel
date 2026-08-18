@@ -263,6 +263,48 @@ func TestGetSiteIsScopedToServerID(t *testing.T) {
 	}
 }
 
+func TestSetSiteSSLPersistsAndIsScopedToServerID(t *testing.T) {
+	st := newTestStore(t)
+	serverA, _, _ := st.createServer("web-ssl-a", "", nil, time.Hour, "admin@example.com")
+	serverB, _, _ := st.createServer("web-ssl-b", "", nil, time.Hour, "admin@example.com")
+	site, err := st.createSite(serverA, "ssl.example.com", "sp_ssl", "/home/sites/sp_ssl", "static", "")
+	if err != nil {
+		t.Fatalf("createSite: %v", err)
+	}
+	if site.SSLStatus != "" || !site.SSLExpiresAt.IsZero() {
+		t.Fatalf("expected a freshly created site to have no SSL status recorded, got %+v", site)
+	}
+
+	notAfter := time.Now().Add(90 * 24 * time.Hour).UTC()
+	if err := st.setSiteSSL(serverA, site.ID, "letsencrypt", notAfter); err != nil {
+		t.Fatalf("setSiteSSL: %v", err)
+	}
+
+	// A write scoped to the wrong server must not touch the real record.
+	if err := st.setSiteSSL(serverB, site.ID, "custom", notAfter); err != nil {
+		t.Fatalf("setSiteSSL (wrong server): %v", err)
+	}
+
+	got, ok := st.getSite(serverA, site.ID)
+	if !ok {
+		t.Fatal("getSite: site not found")
+	}
+	if got.SSLStatus != "letsencrypt" {
+		t.Fatalf("SSLStatus = %q, want letsencrypt (a write scoped to another server must not have applied)", got.SSLStatus)
+	}
+	if got.SSLExpiresAt.Unix() != notAfter.Unix() {
+		t.Fatalf("SSLExpiresAt = %v, want %v", got.SSLExpiresAt, notAfter)
+	}
+	if got.SSLCheckedAt.IsZero() {
+		t.Fatal("expected SSLCheckedAt to be set")
+	}
+
+	listed := st.listSites(serverA)
+	if len(listed) != 1 || listed[0].SSLStatus != "letsencrypt" {
+		t.Fatalf("listSites did not carry the SSL status through: %+v", listed)
+	}
+}
+
 func TestBackupCreateListGetRoundTrip(t *testing.T) {
 	st := newTestStore(t)
 	serverID, _, _ := st.createServer("web-7", "", nil, time.Hour, "admin@example.com")

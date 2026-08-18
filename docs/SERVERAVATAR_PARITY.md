@@ -163,6 +163,42 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Known differences**: same-server restore only — there is no capability to restore a backup onto a *different* server (that needs a transfer step first).
 - **Reason**: cross-server restore is coupled to cross-server migration/cloning, both explicitly Phase 2 (`product-plan.md` §9); tracked as a follow-up, not silently dropped.
 
+### APP-016 — Let's Encrypt SSL, issuance + status
+- **Category**: Application Management → SSL
+- **Documentation page**: SSL Certificates → "Free SSL (Let's Encrypt)"
+- **Short description**: Issue a Let's Encrypt certificate for a site's domain and know what's currently installed and when it expires.
+- **Our implementation**: `ssl.issue_letsencrypt` (agent) runs certbot's `--nginx` plugin against the domain (fixed argv, no shell); certbot's own nginx plugin edits the site's vhost in place to add the HTTPS listener and redirect, and remembers the nginx installer for its own future renewals. A new `ssl.status` capability reads back whatever certificate is actually on disk (`/etc/letsencrypt/live/<domain>/fullchain.pem`, parsed with `crypto/x509` — not trusted from certbot's stdout) and reports source/expiry/issuer; every issuance now calls this immediately afterward so what's recorded is what's actually installed, not what was requested.
+- **Frontend**: site-detail "SSL certificate" panel — status line (installed/none, expiry countdown, a `warn`-styled countdown under 14 days), "Issue Let's Encrypt certificate" and "Check status" actions.
+- **Backend service**: `apiServer.handleIssueLetsEncryptSSL`, `apiServer.handleRefreshSSLStatus`, `apiServer.dispatchSSLStatus`/`persistSSLStatus` (`apps/controlplane/ssl.go`).
+- **API endpoint(s)**: `POST /api/v1/servers/{id}/sites/{siteId}/ssl/letsencrypt`, `POST /api/v1/servers/{id}/sites/{siteId}/ssl/status`.
+- **Agent command**: `ssl.issue_letsencrypt`, `ssl.status`.
+- **DB tables**: `sites.ssl_status`, `sites.ssl_expires_at`, `sites.ssl_checked_at` (added via `runMigrations`/`addColumnIfMissing`, so an existing database file picks the columns up on next start).
+- **Required permission**: authenticated session.
+- **Security considerations**: domain is validated against the same allow-list regex `site.create` uses before it ever reaches certbot's argv; certificate status is always re-derived from the agent's filesystem, never trusted as a cached value, so a certbot renewal or manual `certbot delete` that happens outside this control plane is reflected the next time status is checked rather than silently going stale.
+- **Test coverage**: `packages/capabilities/ssl_test.go` (`TestHandleSSLIssueLetsEncryptRejectsInvalidDomain`, `TestHandleSSLIssueLetsEncryptRequiresEmail`, `TestHandleSSLStatusRejectsInvalidDomain`, `TestReadCertStatusReportsNoneWhenNothingIsInstalled`); `apps/controlplane/http_test.go` (`TestSSLEndpointsRequireARealSite`, `TestSSLEndpointsValidateBeforeDispatch`); `apps/controlplane/store_test.go` (`TestSetSiteSSLPersistsAndIsScopedToServerID`). The full certbot ACME round trip (a real Let's Encrypt issuance against a publicly resolvable domain) is not exercised by `go test` — `BLOCKED_EXTERNAL` (needs a real domain + DNS + outbound port 80/443).
+- **Current status**: `PARTIAL`
+- **Completion date**: 2026-08-18 (dashboard wiring, status tracking, and tests); real ACME issuance remains `BLOCKED_EXTERNAL`.
+- **Known differences**: certbot's own systemd renewal timer (installed by the `certbot` apt package `stack.install` already pulls in) is relied on for actual auto-renewal rather than a control-plane-driven renewal job; the control plane doesn't yet proactively alert on upcoming expiry (the dashboard only shows a warning when the page is open) and there's no multi-domain/SAN certificate support (`site.create` is single-domain today, tracked under APP-003).
+- **Reason**: a control-plane-scheduled renewal/alerting job needs the durable background job queue called out as a Phase 1 architecture gap (`SYSTEM.md` §2 "Background job queue") — building it just for SSL renewal ahead of that would be a one-off workaround rather than the real fix; certbot's own timer is a safe interim default since it already reloads nginx on renewal for `--nginx`-issued certs.
+
+### APP-015 — Custom SSL upload
+- **Category**: Application Management → SSL
+- **Documentation page**: SSL Certificates → "Custom SSL"
+- **Short description**: Install a customer-provided certificate/key pair for a site.
+- **Our implementation**: `ssl.install_custom` (agent) now actually activates the certificate, not just writes it to disk: the certificate and key are verified to match (`crypto/tls.X509KeyPair`) and to cover the requested domain (`x509.Certificate.VerifyHostname`) *before* anything is written, an already-expired certificate is rejected outright, and — the real gap this pass closed — the cert/key paths are wired into the site's existing nginx vhost (`injectHTTPSListen`, a pure text transform covering both first-install and idempotent re-install/renewal cases) with `nginx -t` verified before reload and an automatic revert to the last-known-good vhost if the test fails.
+- **Frontend**: site-detail "SSL certificate" panel — "Install custom certificate" modal (cert/key textareas).
+- **Backend service**: `apiServer.handleInstallCustomSSL` (`apps/controlplane/ssl.go`).
+- **API endpoint(s)**: `POST /api/v1/servers/{id}/sites/{siteId}/ssl/custom`.
+- **Agent command**: `ssl.install_custom`.
+- **DB tables**: `sites.ssl_status`/`ssl_expires_at`/`ssl_checked_at` (shared with APP-016).
+- **Required permission**: authenticated session.
+- **Security considerations**: certificate/key mismatch and hostname-coverage checks happen before any file write, closing what was previously a silent-failure gap (a mismatched or non-matching cert could be "installed" with no functional HTTPS and no error); the private key is written `0600`, is only ever transmitted over the already-authenticated session-cookie API + mTLS agent channel, and is never written to the audit log.
+- **Test coverage**: `packages/capabilities/ssl_test.go` (`TestHandleSSLInstallCustomRejectsInvalidDomain`, `TestHandleSSLInstallCustomRejectsMismatchedKey`, `TestHandleSSLInstallCustomRejectsWrongHostname`, `TestHandleSSLInstallCustomRejectsExpiredCert`, `TestInjectHTTPSListenAddsListenAndCertDirectives`, `TestInjectHTTPSListenIsIdempotentAndUpdatesInPlace`, `TestInjectHTTPSListenLeavesUnrecognizedVhostsAlone`); `apps/controlplane/http_test.go` (`TestSSLEndpointsValidateBeforeDispatch`). The nginx-reload/`nginx -t` path itself needs a real nginx install to exercise — `BLOCKED_EXTERNAL` in this environment; the vhost-text-transform it depends on is fully unit-tested without one.
+- **Current status**: `PARTIAL`
+- **Completion date**: 2026-08-18
+- **Known differences**: no "force HTTPS" redirect is added for a custom-cert install (Let's Encrypt issuance gets one via certbot's `--redirect`; custom install deliberately leaves the existing plain-HTTP behavior alone rather than assuming every caller wants a redirect); no SSL "uninstall" capability yet (a mistaken/expiring custom cert can be replaced by installing a new one, but not cleanly removed back to HTTP-only).
+- **Reason**: force-HTTPS-as-a-toggle and SSL uninstall are both small, well-scoped follow-ups tracked for the next SSL-focused iteration, not scoped into this pass so the higher-priority "SSL exists but does nothing" correctness gap could close first.
+
 ### ACC-001 — Authentication, 2FA, session management
 - **Category**: Account Management
 - **Documentation page**: Account Management → "Update Account Info"
@@ -252,8 +288,6 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | APP-012 | Additional one-click installers (Laravel, Joomla, Mautic, Moodle, PrestaShop, Akaunting, Nextcloud, Statamic, Craft CMS, n8n, Node-RED, Uptime Kuma, NodeBB) | `NOT_STARTED` | WordPress is the only one-click installer today |
 | APP-013 | Log Monitoring Suite (traffic analytics) | `NOT_STARTED` | |
 | APP-014 | Application-level WAF / AI-bot blocker | `NOT_STARTED` | |
-| APP-015 | Custom SSL upload | `PARTIAL` | `ssl.install_custom` capability exists agent-side; no dedicated dashboard UI |
-| APP-016 | Let's Encrypt SSL + auto-renewal | `PARTIAL` | `ssl.issue_letsencrypt` implemented; certbot's own renewal timer not yet wired up by `stack.install` |
 
 ### Database management — not yet started (DB-*)
 | ID | Feature | Status | Notes |
@@ -296,8 +330,8 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | Status | Count (detailed entries) | Count (summary-table rows) |
 |---|---|---|
 | `COMPLETE` | 3 (SRV-001, BAK-002, ACC-001) | 1 (PROV-006) |
-| `PARTIAL` | 3 (SRV-002, APP-001, APP-002, DB-001, BAK-001 — 5 total, see note) | 6 |
-| `NOT_STARTED` | 0 | ~55 |
+| `PARTIAL` | 7 (SRV-002, APP-001, APP-002, APP-015, APP-016, DB-001, BAK-001 — see note) | 4 |
+| `NOT_STARTED` | 0 | ~53 |
 | `BLOCKED_EXTERNAL` | 0 (sub-scoped within BAK-001/BAK-002's db/full-scope MariaDB verification) | 0 |
 | `INTENTIONALLY_NOT_APPLICABLE` | 0 | 1 |
 
@@ -359,3 +393,15 @@ establish the tracking process and close the single highest-priority gap
   BAK-001/BAK-002 reflecting this session's backup-restore implementation. ~60
   capabilities enumerated overall (detailed + summary), the large majority honestly
   `NOT_STARTED`.
+- **2026-08-18**: promoted APP-015/APP-016 (SSL) from summary-table `PARTIAL` rows to full
+  detail blocks. This closed a real correctness gap, not just a documentation one: SSL
+  capabilities existed agent-side but had no control-plane API/UI at all (unreachable
+  outside a raw generic-task-dispatch call), and `ssl.install_custom` wrote the
+  certificate/key to disk without ever wiring them into nginx — so a "successful" custom
+  install left the site still serving plain HTTP. Both are now fixed: dedicated
+  `POST .../ssl/{letsencrypt,custom,status}` endpoints, a dashboard SSL panel, cert/key
+  match + hostname + expiry validation before any file write, an `ssl.status` capability
+  that reads the agent's actual filesystem state rather than trusting a handler's own
+  report, and `sites.ssl_status`/`ssl_expires_at`/`ssl_checked_at` persistence via a new
+  migration. 14 new tests added (`packages/capabilities/ssl_test.go`,
+  `apps/controlplane/http_test.go`, `apps/controlplane/store_test.go`).

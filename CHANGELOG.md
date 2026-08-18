@@ -2,6 +2,47 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-18 — SSL: wire up the dashboard, fix custom-cert install
+
+- **Closed a real correctness gap in `ssl.install_custom`**: it previously wrote the
+  certificate/key to disk and stopped — nothing ever pointed nginx at them, so a
+  "successful" custom SSL install left the site serving plain HTTP with no error to
+  say so. It now verifies the certificate and key actually match
+  (`crypto/tls.X509KeyPair`) and cover the requested domain
+  (`x509.Certificate.VerifyHostname`), rejects an already-expired certificate, and —
+  only once all of that passes — wires the cert into the site's existing nginx vhost
+  (`injectHTTPSListen`, a pure text transform that adds the `listen ... ssl` and
+  `ssl_certificate*` directives on first install and updates them in place on a
+  re-install/renewal, so a retry never produces a duplicate-directive `nginx -t`
+  failure), verifies `nginx -t`, and reverts to the last-known-good vhost if it fails
+  rather than leaving nginx broken.
+- **Added `ssl.status`**, a new capability that reports what certificate is actually
+  installed for a domain (source, expiry, issuer) by reading the certificate file
+  itself — never trusted from a handler's own report of what it did. Both
+  `ssl.issue_letsencrypt` and `ssl.install_custom` now call this internally and return
+  it as their result, so what the control plane records is always a live read of the
+  agent's filesystem.
+- **Wired SSL into the control plane end-to-end** — previously the capabilities existed
+  agent-side with no way to reach them except a raw generic-task-dispatch call and no
+  UI at all. Added three endpoints (`POST /api/v1/servers/{id}/sites/{siteId}/ssl/
+  {letsencrypt,custom,status}`), a `sites.ssl_status`/`ssl_expires_at`/`ssl_checked_at`
+  migration, and a dashboard "SSL certificate" panel per site (status line with an
+  expiry countdown that turns into a warning under 14 days, "Issue Let's Encrypt
+  certificate", "Install custom certificate" modal, "Check status").
+- Added 14 new tests: `packages/capabilities/ssl_test.go` (cert/key-mismatch,
+  wrong-hostname, expired-cert, and invalid-domain rejection; the vhost text-transform's
+  add/idempotent-update/leave-unrecognized-files-alone behavior), `apps/controlplane/
+  http_test.go` (site-scoping and validate-before-dispatch boundary tests), and
+  `apps/controlplane/store_test.go` (`setSiteSSL` persistence and cross-server
+  scoping). Full suite: 75 test functions, `go vet`/`gofmt` clean. Manually verified in
+  a live-server + headless-browser smoke test (login → open site detail → SSL status
+  line renders installed/expiring/none states correctly → custom-cert modal opens and
+  closes) since no real agent-connected server was available in this environment to
+  exercise the actual `certbot`/`nginx` round trip end-to-end — that remains
+  `BLOCKED_EXTERNAL` per `SERVERAVATAR_PARITY.md` APP-015/APP-016.
+- Updated `SYSTEM.md`, `API.md`, and `SERVERAVATAR_PARITY.md` (APP-015/APP-016 promoted
+  from summary-table rows to full detail blocks, both `PARTIAL`).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

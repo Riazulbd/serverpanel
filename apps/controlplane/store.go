@@ -334,21 +334,44 @@ func (s *store) auditLog() []auditEntry {
 }
 
 type siteRecord struct {
-	ID         string
-	ServerID   string
-	Domain     string
-	SystemUser string
-	Docroot    string
-	AppType    string
-	PHPVersion string
-	Status     string
-	CreatedAt  time.Time
+	ID           string
+	ServerID     string
+	Domain       string
+	SystemUser   string
+	Docroot      string
+	AppType      string
+	PHPVersion   string
+	Status       string
+	CreatedAt    time.Time
+	SSLStatus    string // "", "letsencrypt", or "custom"
+	SSLExpiresAt time.Time
+	SSLCheckedAt time.Time
+}
+
+const siteColumns = `id, server_id, domain, system_user, docroot, app_type, php_version, status, created_at,
+		 ssl_status, ssl_expires_at, ssl_checked_at`
+
+func scanSite(row interface{ Scan(...any) error }) (*siteRecord, error) {
+	var rec siteRecord
+	var createdAt, sslExpiresAt, sslCheckedAt string
+	if err := row.Scan(&rec.ID, &rec.ServerID, &rec.Domain, &rec.SystemUser, &rec.Docroot,
+		&rec.AppType, &rec.PHPVersion, &rec.Status, &createdAt,
+		&rec.SSLStatus, &sslExpiresAt, &sslCheckedAt); err != nil {
+		return nil, err
+	}
+	rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+	if sslExpiresAt != "" {
+		rec.SSLExpiresAt, _ = time.Parse(time.RFC3339Nano, sslExpiresAt)
+	}
+	if sslCheckedAt != "" {
+		rec.SSLCheckedAt, _ = time.Parse(time.RFC3339Nano, sslCheckedAt)
+	}
+	return &rec, nil
 }
 
 func (s *store) listSites(serverID string) []*siteRecord {
 	rows, err := s.db.Query(
-		`SELECT id, server_id, domain, system_user, docroot, app_type, php_version, status, created_at
-		 FROM sites WHERE server_id = ? ORDER BY created_at DESC`, serverID)
+		`SELECT `+siteColumns+` FROM sites WHERE server_id = ? ORDER BY created_at DESC`, serverID)
 	if err != nil {
 		return nil
 	}
@@ -356,14 +379,11 @@ func (s *store) listSites(serverID string) []*siteRecord {
 
 	var out []*siteRecord
 	for rows.Next() {
-		var rec siteRecord
-		var createdAt string
-		if err := rows.Scan(&rec.ID, &rec.ServerID, &rec.Domain, &rec.SystemUser, &rec.Docroot,
-			&rec.AppType, &rec.PHPVersion, &rec.Status, &createdAt); err != nil {
+		rec, err := scanSite(rows)
+		if err != nil {
 			continue
 		}
-		rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
-		out = append(out, &rec)
+		out = append(out, rec)
 	}
 	return out
 }
@@ -391,16 +411,30 @@ func (s *store) createSite(serverID, domain, systemUser, docroot, appType, phpVe
 // site X's docroot if X actually belongs to server B).
 func (s *store) getSite(serverID, siteID string) (*siteRecord, bool) {
 	row := s.db.QueryRow(
-		`SELECT id, server_id, domain, system_user, docroot, app_type, php_version, status, created_at
-		 FROM sites WHERE id = ? AND server_id = ?`, siteID, serverID)
-	var rec siteRecord
-	var createdAt string
-	if err := row.Scan(&rec.ID, &rec.ServerID, &rec.Domain, &rec.SystemUser, &rec.Docroot,
-		&rec.AppType, &rec.PHPVersion, &rec.Status, &createdAt); err != nil {
+		`SELECT `+siteColumns+` FROM sites WHERE id = ? AND server_id = ?`, siteID, serverID)
+	rec, err := scanSite(row)
+	if err != nil {
 		return nil, false
 	}
-	rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
-	return &rec, true
+	return rec, true
+}
+
+// setSiteSSL persists the certificate status the agent's own ssl.status
+// (or a just-run ssl.issue_letsencrypt/ssl.install_custom) reported for a
+// site's domain. status is "" when no certificate is installed — the
+// control plane's cached copy is only ever a display convenience; the
+// agent's filesystem remains the source of truth and this is refreshed
+// from it, never computed locally.
+func (s *store) setSiteSSL(serverID, siteID, status string, notAfter time.Time) error {
+	var notAfterStr string
+	if !notAfter.IsZero() {
+		notAfterStr = notAfter.Format(time.RFC3339Nano)
+	}
+	_, err := s.db.Exec(
+		`UPDATE sites SET ssl_status = ?, ssl_expires_at = ?, ssl_checked_at = ? WHERE id = ? AND server_id = ?`,
+		status, notAfterStr, time.Now().UTC().Format(time.RFC3339Nano), siteID, serverID,
+	)
+	return err
 }
 
 type backupRecord struct {

@@ -46,6 +46,9 @@ protected route; there is no route that skips it by omission.
 | `GET` | `/api/v1/servers/{id}/sites/{siteId}/backups` | List backups for a site, newest first |
 | `POST` | `/api/v1/servers/{id}/sites/{siteId}/backups` | Dispatch `backup.run` and persist the resulting backup record |
 | `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a previously recorded backup |
+| `POST` | `/api/v1/servers/{id}/sites/{siteId}/ssl/letsencrypt` | Dispatch `ssl.issue_letsencrypt` for the site's domain, then persist the confirmed status |
+| `POST` | `/api/v1/servers/{id}/sites/{siteId}/ssl/custom` | Dispatch `ssl.install_custom` (cert/key body), then persist the confirmed status |
+| `POST` | `/api/v1/servers/{id}/sites/{siteId}/ssl/status` | Dispatch `ssl.status` and persist whatever the agent reports is actually installed |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -137,6 +140,39 @@ isn't connected; `422` if `backup.restore` itself failed on the agent (the agent
 error message explains why, and any checkpoint already taken is named in it so it's
 never a silent loss).
 
+### `POST /api/v1/servers/{id}/sites/{siteId}/ssl/letsencrypt`
+```json
+{"email": "you@example.com"}
+```
+Dispatches `ssl.issue_letsencrypt` with `domain` taken from the site's own recorded
+`Domain` (never caller-supplied) and the given `email`, 3-minute dispatch timeout.
+On success, immediately dispatches `ssl.status` for the same domain and persists
+*that* (not certbot's own report) as the site's SSL status. → `200` with the
+`sslStatusResponse` JSON (`domain`, `source`, `not_after`, `days_remaining`, `issuer`).
+`400` if `email` is missing; `404` if the site doesn't exist on that server; `502` if
+the agent isn't connected; `422` if `ssl.issue_letsencrypt` failed on the agent.
+
+### `POST /api/v1/servers/{id}/sites/{siteId}/ssl/custom`
+```json
+{"cert_pem": "-----BEGIN CERTIFICATE-----...", "key_pem": "-----BEGIN PRIVATE KEY-----..."}
+```
+Dispatches `ssl.install_custom` with `domain` taken from the site's recorded `Domain`.
+The agent verifies the cert/key match and cover the domain, and are not already
+expired, *before* writing anything to disk, then wires the cert into the site's nginx
+vhost and verifies `nginx -t` before reloading (reverting on failure). → `200` with the
+`sslStatusResponse` JSON. `400` if `cert_pem`/`key_pem` are missing; `404` if the site
+doesn't exist; `502` if the agent isn't connected; `422` if `ssl.install_custom` failed
+on the agent (mismatched cert/key, wrong hostname, expired cert, or a failed nginx
+config test all surface here with a specific message — never a generic failure).
+
+### `POST /api/v1/servers/{id}/sites/{siteId}/ssl/status`
+No request body. Dispatches `ssl.status` for the site's recorded domain and persists
+whatever the agent reports — the source of truth for "what's installed" is always the
+agent's own filesystem, re-read on every call, never the control plane's cache of a
+past issuance. → `200` with the `sslStatusResponse` JSON (`source: "none"` when no
+certificate is installed). `404` if the site doesn't exist; `502` if the agent isn't
+connected or `ssl.status` failed on the agent.
+
 ### `POST /agents/register`
 ```json
 {"token": "<bootstrap token>", "csr_pem": "<PEM-encoded CSR>"}
@@ -177,8 +213,8 @@ The full allow-listed capability names `packages/capabilities.Default()` registe
 (see `SYSTEM.md` §12 for the allow-list rationale): `system.ping`, `service.control`,
 `diagnostics.basic`, `stack.install`, `site.create`, `site.set_php_version`,
 `site.set_status`, `app.wordpress_install`, `ssl.issue_letsencrypt`,
-`ssl.install_custom`, `db.create`, `db.delete`, `db.list`, `file.list`, `file.read`,
-`file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`.
+`ssl.install_custom`, `ssl.status`, `db.create`, `db.delete`, `db.list`, `file.list`,
+`file.read`, `file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`.
 
 ### `backup.restore`
 ```json
