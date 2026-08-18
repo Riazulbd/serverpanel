@@ -124,8 +124,27 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Test coverage**: manually verified in a prior session against a real MariaDB; not covered by `go test` (requires a running MariaDB — this environment has none).
 - **Current status**: `PARTIAL`
 - **Completion date**: n/a
-- **Known differences**: MongoDB support, a dedicated dashboard UI, and control-plane persistence of database records (so they show up per-site the way backups now do) don't exist yet.
-- **Reason**: capability-layer work landed before the control-plane persistence/UI layer that backups just got (see BAK-001) — same pattern, not yet applied here. Good candidate for the next iteration.
+- **Known differences**: MongoDB support and a dedicated DB admin tool (phpMyAdmin-equivalent) don't exist yet. Control-plane persistence + dashboard UI now exist — see DB-005.
+- **Reason**: MongoDB/admin-tool integration are separate, larger pieces of work (DB-002/DB-003 below), intentionally not bundled into this pass.
+
+### DB-005 — Database persistence, dashboard UI, and secure credential display
+- **Category**: Database Management
+- **Documentation page**: Database Management → "Understanding Database Management"
+- **Short description**: A database created through the panel stays visible in the panel, and its credentials can be safely retrieved later.
+- **Expected behavior**: create a database from the dashboard; it appears in a list; its owner password can be viewed on demand without being displayed by default; deleting it from the dashboard actually drops it on the server.
+- **Our implementation**: `handleCreateDatabase`/`handleListDatabases`/`handleRevealDatabasePassword`/`handleDeleteDatabase` (`apps/controlplane/databases.go`) wrap the pre-existing `db.create`/`db.delete` capabilities in the same dispatch-then-persist-on-success pattern `backups.go` uses. The control plane — never the caller — generates the owner username and a 24-byte random password; the password is sealed with AES-256-GCM (`secrets.go`'s `secretBox`) before being written to SQLite, shown in plaintext exactly once at creation, and retrievable again only via the separate `/reveal` endpoint.
+- **Frontend**: server-detail "Databases" panel — create-database modal, table with reveal-password/delete actions per row.
+- **Backend service**: `apiServer.handleCreateDatabase` et al. (`apps/controlplane/databases.go`), `secretBox` (`apps/controlplane/secrets.go`).
+- **API endpoint(s)**: `GET`/`POST /api/v1/servers/{id}/databases`, `POST /api/v1/servers/{id}/databases/{dbId}/reveal`, `DELETE /api/v1/servers/{id}/databases/{dbId}`.
+- **Agent command**: `db.create`, `db.delete` (pre-existing; no new agent-side capability was needed).
+- **DB tables**: `databases` (`server_id`, `site_id` optional, `name`, `owner_user`, `owner_password_enc`, `status`, `created_at`).
+- **Required permission**: authenticated session.
+- **Security considerations**: database name validated against the same identifier allow-list the agent itself enforces, rejected client-side before any dispatch; owner password never caller-supplied (control-plane-generated, 24 random bytes); encrypted at rest with a key persisted 0600 outside the database file, so the SQLite file alone doesn't disclose credentials; every password reveal is a separate, audit-logged action, not a side effect of listing.
+- **Test coverage**: `apps/controlplane/secrets_test.go` (encrypt/decrypt round-trip across a simulated restart, tampered-ciphertext rejection, cross-instance key isolation), `apps/controlplane/store_test.go` (`TestDatabaseCreateListGetDeleteRoundTrip`), `apps/controlplane/http_test.go` (`TestDatabaseEndpoints`, `TestDatabaseRevealReturnsThePasswordAndAuditLogsTheAccess`). All automated and passing; a real MariaDB round trip for the underlying `db.create`/`db.delete` dispatch itself remains manually-verified-only, same caveat as DB-001.
+- **Current status**: `COMPLETE`
+- **Completion date**: 2026-08-18
+- **Known differences**: none beyond what DB-001 already documents (no MongoDB, no admin-tool integration).
+- **Reason**: n/a — this closes the gap DB-001 flagged, rather than deferring anything new.
 
 ### BAK-001 — On-demand backup (files/db/full)
 - **Category**: Backups
@@ -261,7 +280,6 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | DB-002 | MongoDB support | `NOT_STARTED` | |
 | DB-003 | phpMyAdmin / DB admin UI integration | `NOT_STARTED` | |
 | DB-004 | Database process/query monitoring | `NOT_STARTED` | |
-| DB-005 | Control-plane persistence + dashboard UI for databases (mirroring what BAK-001 just got) | `NOT_STARTED` | See DB-001's "Known differences" |
 
 ### WordPress Toolkit (WP-*)
 | ID | Feature | Status |
@@ -295,9 +313,9 @@ capability surface (per task-brief §3/§101), not just what's already built.
 
 | Status | Count (detailed entries) | Count (summary-table rows) |
 |---|---|---|
-| `COMPLETE` | 3 (SRV-001, BAK-002, ACC-001) | 1 (PROV-006) |
+| `COMPLETE` | 4 (SRV-001, BAK-002, ACC-001, DB-005) | 1 (PROV-006) |
 | `PARTIAL` | 3 (SRV-002, APP-001, APP-002, DB-001, BAK-001 — 5 total, see note) | 6 |
-| `NOT_STARTED` | 0 | ~55 |
+| `NOT_STARTED` | 0 | ~54 |
 | `BLOCKED_EXTERNAL` | 0 (sub-scoped within BAK-001/BAK-002's db/full-scope MariaDB verification) | 0 |
 | `INTENTIONALLY_NOT_APPLICABLE` | 0 | 1 |
 
@@ -354,6 +372,9 @@ establish the tracking process and close the single highest-priority gap
 
 ## Change history
 
+- **2026-08-18**: DB-005 (database persistence, dashboard UI, secure credential
+  display) implemented and moved to `COMPLETE`; DB-001's known-differences note
+  updated to reflect it. See `CHANGELOG.md` 2026-08-18 entry for the full breakdown.
 - **2026-08-17**: initial version. Established the tracking process; recorded
   SRV-001/002, APP-001/002, DB-001, ACC-001 (pre-existing work) at accurate status, and
   BAK-001/BAK-002 reflecting this session's backup-restore implementation. ~60

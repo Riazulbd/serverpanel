@@ -33,5 +33,9 @@ func newTestAPIServer(t *testing.T) *apiServer {
 		t.Fatalf("loadOrCreateAgentCA: %v", err)
 	}
 	gw := newGateway(ca, st)
-	return &apiServer{store: st, ca: ca, gw: gw, gatewayAddr: "127.0.0.1:0", tokenTTL: 15 * time.Minute}
+	secrets, err := loadOrCreateSecretKey(filepath.Join(dir, "secrets.key"))
+	if err != nil {
+		t.Fatalf("loadOrCreateSecretKey: %v", err)
+	}
+	return &apiServer{store: st, ca: ca, gw: gw, gatewayAddr: "127.0.0.1:0", tokenTTL: 15 * time.Minute, secrets: secrets}
 }

@@ -2,6 +2,48 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-18 — Database management persistence, dashboard UI, and secrets-at-rest
+
+- **Closed the DB-005 parity gap** (`docs/SERVERAVATAR_PARITY.md`): the `db.create`/
+  `db.delete`/`db.list` agent capabilities existed since Phase 1 but had no
+  control-plane persistence or dashboard UI — a database created through them was
+  invisible to the panel the moment the task response was gone. Applied the same
+  dispatch-then-persist-on-success pattern `backups.go` established: new `databases`
+  store methods (`createDatabase`/`listDatabases`/`getDatabase`/`deleteDatabase`, each
+  scoped by server ID the same way `getSite`/`getBackup` are), a new `databases` table,
+  and four new endpoints (`GET`/`POST /api/v1/servers/{id}/databases`,
+  `POST .../databases/{dbId}/reveal`, `DELETE .../databases/{dbId}`).
+- **Added `secrets.go`** — an AES-256-GCM `secretBox`, keyed by a 256-bit key persisted
+  0600 next to the agent CA (`loadOrCreateSecretKey`, mirroring `loadOrCreateAgentCA`'s
+  own restart-survives-without-invalidating-everything pattern). Database owner
+  passwords are now the first secret sealed with it before ever reaching SQLite — the
+  one deliberate exception to "everything is bcrypt-hashed or SHA-256-hashed," because
+  a database password (unlike a login password) is legitimately something an operator
+  needs to retrieve later to configure an application. The control plane, not the
+  caller, generates both the owner username and a 24-byte random password for every
+  new database; the plaintext password is returned exactly once, at creation (same
+  one-time-display pattern as `createServer`'s bootstrap token), and any later retrieval
+  goes through the separate, audit-logged `.../reveal` endpoint.
+- Added a "Databases" panel to the server-detail dashboard view (databases are
+  server-scoped, not site-scoped, since one MariaDB instance serves a whole server):
+  create-database modal, a table with reveal-password and delete actions, and inline
+  result/error display matching the existing Backups panel's UX.
+- Added 3 new `secrets.go` tests (encrypt/decrypt round-trip across a simulated
+  control-plane restart, tampered-ciphertext rejection via GCM's auth tag, and
+  cross-instance key isolation), 1 new store test (database CRUD round trip +
+  cross-server scoping, mirroring `TestBackupCreateListGetRoundTrip`), and 2 new HTTP
+  tests (endpoint validation/404 boundaries, and an end-to-end reveal test verifying
+  both the decrypted password and its audit-log entry). Full suite green,
+  `go vet`/`go build` clean. Manually smoke-tested end-to-end against a running
+  control-plane binary (signup → login → create server → reject invalid name (400) →
+  reject unknown site (404) → dispatch with no agent connected (502, proving
+  validation runs before dispatch) → list → dashboard HTML loads with the new panel
+  present).
+- Updated `SYSTEM.md` (new "Database management" feature table, schema table, API
+  summary, security-model summary), `API.md` (full request/response reference for the
+  four new endpoints), and `docs/SERVERAVATAR_PARITY.md` (DB-005 promoted from
+  `NOT_STARTED` to a full `COMPLETE` detail entry; DB-001 updated to reference it).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

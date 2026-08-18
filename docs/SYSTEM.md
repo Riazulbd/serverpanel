@@ -114,6 +114,16 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | Application logs / advanced log viewer | 🚧 `logs.tail` (redacted) exists; no
   filtering/search UI yet |
 
+### Database management
+| Feature | Status |
+|---|---|
+| Create/delete/list MariaDB database + scoped owner user | ✅ `db.create`/`db.delete`/`db.list`, least-privilege single-database grants |
+| Control-plane persistence + dashboard UI | ✅ `databases` table, server-detail "Databases" panel (create/list/delete) |
+| Secure credential display | ✅ owner password is AES-256-GCM-encrypted at rest (`secrets.go`); shown in plaintext once at creation, and again only via the explicit, audit-logged `.../databases/{id}/reveal` endpoint |
+| MongoDB support | ⬜ not implemented |
+| phpMyAdmin / DB admin UI integration | ⬜ not implemented |
+| Database process/query monitoring | ⬜ not implemented |
+
 ### Git deployment
 All ⬜ — explicitly scoped to Phase 2 (`product-plan.md` §9). No Git deployment,
 webhook push-to-deploy, deploy keys, or rollback exist in this codebase yet.
@@ -253,17 +263,22 @@ EXISTS`, applied on every `openDB` call — idempotent, no separate migration to
 | `audit_log` | append-only: seq, timestamp, server, actor, action, detail |
 | `sites` | id, server, domain, system user, docroot, app type, PHP version, status |
 | `backups` | id, server, site, scope, path, size, sha256, status, created_at |
+| `databases` | id, server, site (optional), name, owner user, encrypted owner password, status, created_at |
 
 No ORM — every query is a small, explicit SQL statement in `store.go`. All secrets
 (session tokens, bootstrap tokens) are stored only as SHA-256 hashes; passwords use
-bcrypt (cost 12); nothing is stored in plaintext.
+bcrypt (cost 12); nothing is stored in plaintext, with one deliberate exception —
+database owner passwords, which a caller can legitimately need to retrieve later (to
+configure an app's `wp-config.php`/`.env`), so they're stored AES-256-GCM-encrypted
+(`secrets.go`'s `secretBox`) rather than hashed. Nothing else is stored in plaintext.
 
 ## 9. API endpoints
 
 Full list with request/response shapes in `API.md`. Summary: `/api/v1/auth/*`
 (signup/login/logout/TOTP enroll+verify/MFA challenge/me), `/api/v1/servers*` (CRUD,
-revoke, task dispatch, sites, audit), `/agents/register` (the one unauthenticated
-agent-facing endpoint, secured by the bootstrap token itself), `/healthz`.
+revoke, task dispatch, sites, backups, databases, audit), `/agents/register` (the one
+unauthenticated agent-facing endpoint, secured by the bootstrap token itself),
+`/healthz`.
 
 ## 10. Background jobs
 
@@ -357,7 +372,11 @@ See `SECURITY.md`. One-line summary: capability allow-list (no shell-exec RPC), 
 with short-lived certs and immediate revocation, per-app OS-level isolation
 (system user + php-fpm pool + `open_basedir` + disabled functions + scoped DB grants),
 bcrypt + TOTP for dashboard auth, append-only audit log, path-traversal/symlink-escape
-defenses on the file manager (`resolveScopedPath`).
+defenses on the file manager (`resolveScopedPath`), AES-256-GCM encryption at rest for
+stored secrets that must remain retrievable (currently: database owner passwords —
+`secrets.go`'s `secretBox`, keyed by a 256-bit key persisted 0600 next to the agent CA
+and reused for any future secret needing the same "retrievable, not just verifiable"
+property — cloud-provider credentials, storage-adapter keys, Git deploy tokens).
 
 ## 19. Backup and restore model
 

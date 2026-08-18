@@ -287,6 +287,131 @@ func TestCreateBackupRejectsInvalidScope(t *testing.T) {
 	}
 }
 
+func TestDatabaseEndpoints(t *testing.T) {
+	secureCookies = false
+	defer func() { secureCookies = true }()
+
+	a := newTestAPIServer(t)
+	h := a.routes()
+
+	doJSON(t, h, "POST", "/api/v1/auth/signup", map[string]string{
+		"Email": "ops3@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	rec := doJSON(t, h, "POST", "/api/v1/auth/login", map[string]string{
+		"Email": "ops3@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	cookie := sessionCookie(rec)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers", map[string]any{"Name": "web-13"}, cookie)
+	var created struct {
+		ServerID string `json:"server_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+
+	// Invalid name is rejected before any dispatch is attempted.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/databases",
+		map[string]any{"name": "Not-Valid!"}, cookie)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("create database with invalid name: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// A referenced site that doesn't exist is rejected before dispatch too.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/databases",
+		map[string]any{"name": "wp_example", "site_id": "site_nonexistent"}, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("create database for nonexistent site: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// A well-formed request against a server with no connected agent fails
+	// as a gateway/dispatch error, not a validation error — proving
+	// validation happens before dispatch, same as backups.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/databases",
+		map[string]any{"name": "wp_example"}, cookie)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("create database with no agent connected: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// List/reveal/delete against a nonexistent database all 404, never a
+	// dispatch attempt against a database the control plane never recorded.
+	rec = doJSON(t, h, "GET", "/api/v1/servers/"+created.ServerID+"/databases", nil, cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list databases: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var listed []map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &listed)
+	if len(listed) != 0 {
+		t.Fatalf("list databases after a failed create = %+v, want empty", listed)
+	}
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/databases/db_nonexistent/reveal", nil, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("reveal nonexistent database: status = %d, want 404", rec.Code)
+	}
+	rec = doJSON(t, h, "DELETE", "/api/v1/servers/"+created.ServerID+"/databases/db_nonexistent", nil, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("delete nonexistent database: status = %d, want 404", rec.Code)
+	}
+}
+
+func TestDatabaseRevealReturnsThePasswordAndAuditLogsTheAccess(t *testing.T) {
+	secureCookies = false
+	defer func() { secureCookies = true }()
+
+	a := newTestAPIServer(t)
+	h := a.routes()
+
+	doJSON(t, h, "POST", "/api/v1/auth/signup", map[string]string{
+		"Email": "ops4@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	rec := doJSON(t, h, "POST", "/api/v1/auth/login", map[string]string{
+		"Email": "ops4@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	cookie := sessionCookie(rec)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers", map[string]any{"Name": "web-14"}, cookie)
+	var created struct {
+		ServerID string `json:"server_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+
+	// Create the record directly through the store (bypassing dispatch,
+	// which needs a live agent connection this test doesn't have) so the
+	// HTTP-level reveal path itself can be exercised end-to-end.
+	encPassword, err := a.secrets.encrypt("plaintext-owner-password")
+	if err != nil {
+		t.Fatalf("encrypt: %v", err)
+	}
+	db, err := a.store.createDatabase(created.ServerID, "", "wp_reveal", "wp_reveal", encPassword)
+	if err != nil {
+		t.Fatalf("createDatabase: %v", err)
+	}
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/databases/"+db.ID+"/reveal", nil, cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("reveal database password: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var revealed struct {
+		OwnerUser string `json:"owner_user"`
+		Password  string `json:"password"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &revealed)
+	if revealed.Password != "plaintext-owner-password" || revealed.OwnerUser != "wp_reveal" {
+		t.Fatalf("revealed = %+v, want the decrypted original credential", revealed)
+	}
+
+	entries := a.store.auditLog()
+	found := false
+	for _, e := range entries {
+		if e.Action == "database.password_revealed" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("expected a database.password_revealed audit-log entry")
+	}
+}
+
 func TestRegisterEndpointRejectsBadToken(t *testing.T) {
 	a := newTestAPIServer(t)
 	h := a.routes()
