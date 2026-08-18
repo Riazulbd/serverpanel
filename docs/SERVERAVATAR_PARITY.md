@@ -109,6 +109,43 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Known differences**: no WordPress-specific toolkit yet (plugin/theme management, auto-login, blueprints, search-replace) — see the `INTENTIONALLY_NOT_APPLICABLE`/`NOT_STARTED` table under WordPress Toolkit.
 - **Reason**: initial pass only covers install; toolkit is Phase 2/3 scope.
 
+### APP-016 — Let's Encrypt SSL issuance + auto-renewal
+- **Category**: Application Management → SSL
+- **Documentation page**: Application Management → SSL/TLS certificates
+- **Short description**: Issue a free, auto-renewing SSL certificate for an application's domain.
+- **Expected behavior**: one click issues a certificate; it renews itself before expiring without further user action.
+- **Our implementation**: `ssl.issue_letsencrypt` (certbot `--nginx` plugin, fixed non-interactive argv) issues the certificate; `stack.install` now enables+starts `certbot.timer` (idempotent — re-checked via `systemctl is-enabled` on every install run) so `certbot renew` actually runs twice daily going forward. Renewal reuses each certificate's original authenticator+installer plugin combo, which reloads nginx itself — no separate deploy-hook was needed. A new `ssl.status` capability parses the real X.509 `NotAfter` off the certificate file on disk (never `certbot certificates` shell output) so the control plane's recorded expiry reflects what's actually installed, including certs renewed by the timer outside of any control-plane-initiated call.
+- **Frontend**: site-detail "SSL" panel — status badge with issuer/expiry/days-remaining, "Issue Let's Encrypt" button, "Refresh" button.
+- **Backend service**: `apiServer.handleIssueLetsEncryptSSL`, `apiServer.refreshSSLStatus` (dispatch-then-persist, same pattern as backups/sites).
+- **API endpoint(s)**: `POST /api/v1/servers/{id}/sites/{siteId}/ssl/letsencrypt`, `GET /api/v1/servers/{id}/sites/{siteId}/ssl`.
+- **Agent command**: `ssl.issue_letsencrypt`, `ssl.status`.
+- **DB tables**: `ssl_certificates` (one row per server/site/domain, upserted on every issue/refresh — expiry history isn't retained, only current state).
+- **Required permission**: authenticated session.
+- **Security considerations**: the ACME account email is always the authenticated caller's own account email, never a caller-supplied value; certbot's fixed argv accepts only the site's own already-validated domain.
+- **Test coverage**: `packages/capabilities/ssl_test.go` (`TestScanManagedCerts_ExpiringAndExpired`, `TestHandleSSLStatus_DomainFilter`, `TestHandleSSLStatus_NoCertsReturnsEmptyList` — expiry parsing against real generated X.509 certs); `apps/controlplane/ssl_test.go` (`TestSSLEndpointsRequireARealSite`, `TestInstallCustomSSLRejectsMissingParams`, `TestUpsertSSLCertificateReplacesExistingRow`).
+- **Current status**: `PARTIAL`
+- **Completion date**: n/a
+- **Known differences**: no real end-to-end verification against a live Ubuntu host with a real ACME issuance + a real `certbot renew` cycle in this session (no live VPS/DNS-controlled domain available here) — the expiry-parsing, persistence, and API/dashboard layers are tested directly instead; multi-domain (SAN) certificates and a proactive "expiring soon" alert/notification are not implemented yet (the latter depends on the notification-channel work under Integrations, still `NOT_STARTED`).
+- **Reason**: matches this project's existing convention for host-dependent capabilities (see SRV-002) — real apt/systemd/certbot behavior isn't something `go test` can exercise in this environment; a from-scratch Ubuntu install pass (`docs/SYSTEM.md` "real installation testing") is the right place to close that gap.
+
+### APP-015 — Custom SSL certificate upload
+- **Category**: Application Management → SSL
+- **Documentation page**: Application Management → SSL/TLS certificates (custom certificate)
+- **Short description**: Install a customer-supplied certificate/private key pair for a domain.
+- **Our implementation**: `ssl.install_custom` writes both PEM blobs with restrictive permissions and verifies with `nginx -t` before ever reloading — a malformed pair never reaches a live reload. Now wired into the dashboard ("Upload custom cert" modal) and persisted via the same `ssl_certificates` table/expiry-refresh flow as APP-016.
+- **Frontend**: site-detail "SSL" panel, "Upload custom cert" modal (cert + key textareas).
+- **Backend service**: `apiServer.handleInstallCustomSSL`.
+- **API endpoint(s)**: `POST /api/v1/servers/{id}/sites/{siteId}/ssl/custom`.
+- **Agent command**: `ssl.install_custom`, `ssl.status`.
+- **DB tables**: `ssl_certificates`.
+- **Required permission**: authenticated session.
+- **Security considerations**: certificate/key are never logged; `nginx -t` gate means a bad pair can't take a working vhost down.
+- **Test coverage**: `apps/controlplane/ssl_test.go` (`TestInstallCustomSSLRejectsMissingParams`, `TestSSLEndpointsRequireARealSite`); `packages/capabilities` custom-cert expiry parsing covered by `TestScanManagedCerts_ExpiringAndExpired`.
+- **Current status**: `PARTIAL`
+- **Completion date**: n/a
+- **Known differences**: no certificate/key *matching* validation before install (a mismatched pair still fails safely at `nginx -t`, but the error only surfaces after the write); no real-host end-to-end test in this session, same reason as APP-016.
+- **Reason**: cert/key mismatch pre-validation is a small follow-up, not blocking; tracked here rather than silently dropped.
+
 ### DB-001 — Database create/delete/list with scoped users
 - **Category**: Database Management
 - **Documentation page**: Database Management → "Understanding Database Management"
@@ -252,8 +289,6 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | APP-012 | Additional one-click installers (Laravel, Joomla, Mautic, Moodle, PrestaShop, Akaunting, Nextcloud, Statamic, Craft CMS, n8n, Node-RED, Uptime Kuma, NodeBB) | `NOT_STARTED` | WordPress is the only one-click installer today |
 | APP-013 | Log Monitoring Suite (traffic analytics) | `NOT_STARTED` | |
 | APP-014 | Application-level WAF / AI-bot blocker | `NOT_STARTED` | |
-| APP-015 | Custom SSL upload | `PARTIAL` | `ssl.install_custom` capability exists agent-side; no dedicated dashboard UI |
-| APP-016 | Let's Encrypt SSL + auto-renewal | `PARTIAL` | `ssl.issue_letsencrypt` implemented; certbot's own renewal timer not yet wired up by `stack.install` |
 
 ### Database management — not yet started (DB-*)
 | ID | Feature | Status | Notes |

@@ -485,6 +485,97 @@ func scanBackup(row rowScanner) (*backupRecord, error) {
 	return &rec, nil
 }
 
+type sslCertificateRecord struct {
+	ID           string
+	ServerID     string
+	SiteID       string
+	Domain       string
+	Issuer       string
+	ExpiresAt    time.Time
+	LastSyncedAt time.Time
+	CreatedAt    time.Time
+}
+
+// upsertSSLCertificate records (or refreshes) the certificate the control
+// plane knows about for one site. There is at most one row per
+// (server_id, site_id, domain): a later issuance/status refresh replaces
+// the prior row's issuer/expiry rather than accumulating history, since
+// what's live on disk right now — not the chain of past certs — is what
+// SSL-expiry alerting and the dashboard need.
+func (s *store) upsertSSLCertificate(serverID, siteID, domain, issuer string, expiresAt time.Time) (*sslCertificateRecord, error) {
+	existing, ok := s.getSSLCertificateByDomain(serverID, siteID, domain)
+	now := time.Now().UTC()
+	if ok {
+		_, err := s.db.Exec(
+			`UPDATE ssl_certificates SET issuer = ?, expires_at = ?, last_synced_at = ? WHERE id = ?`,
+			issuer, expiresAt.UTC().Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), existing.ID,
+		)
+		if err != nil {
+			return nil, err
+		}
+		existing.Issuer, existing.ExpiresAt, existing.LastSyncedAt = issuer, expiresAt.UTC(), now
+		return existing, nil
+	}
+
+	rec := &sslCertificateRecord{
+		ID: randID("ssl"), ServerID: serverID, SiteID: siteID, Domain: domain, Issuer: issuer,
+		ExpiresAt: expiresAt.UTC(), LastSyncedAt: now, CreatedAt: now,
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO ssl_certificates (id, server_id, site_id, domain, issuer, expires_at, last_synced_at, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		rec.ID, rec.ServerID, rec.SiteID, rec.Domain, rec.Issuer,
+		rec.ExpiresAt.Format(time.RFC3339Nano), rec.LastSyncedAt.Format(time.RFC3339Nano), rec.CreatedAt.Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return nil, err
+	}
+	return rec, nil
+}
+
+func (s *store) getSSLCertificateByDomain(serverID, siteID, domain string) (*sslCertificateRecord, bool) {
+	row := s.db.QueryRow(
+		`SELECT id, server_id, site_id, domain, issuer, expires_at, last_synced_at, created_at
+		 FROM ssl_certificates WHERE server_id = ? AND site_id = ? AND domain = ?`, serverID, siteID, domain)
+	rec, err := scanSSLCertificate(row)
+	if err != nil {
+		return nil, false
+	}
+	return rec, true
+}
+
+func (s *store) listSSLCertificates(serverID, siteID string) []*sslCertificateRecord {
+	rows, err := s.db.Query(
+		`SELECT id, server_id, site_id, domain, issuer, expires_at, last_synced_at, created_at
+		 FROM ssl_certificates WHERE server_id = ? AND site_id = ? ORDER BY created_at DESC`, serverID, siteID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var out []*sslCertificateRecord
+	for rows.Next() {
+		rec, err := scanSSLCertificate(rows)
+		if err != nil {
+			continue
+		}
+		out = append(out, rec)
+	}
+	return out
+}
+
+func scanSSLCertificate(row rowScanner) (*sslCertificateRecord, error) {
+	var rec sslCertificateRecord
+	var expiresAt, lastSyncedAt, createdAt string
+	if err := row.Scan(&rec.ID, &rec.ServerID, &rec.SiteID, &rec.Domain, &rec.Issuer, &expiresAt, &lastSyncedAt, &createdAt); err != nil {
+		return nil, err
+	}
+	rec.ExpiresAt, _ = time.Parse(time.RFC3339Nano, expiresAt)
+	rec.LastSyncedAt, _ = time.Parse(time.RFC3339Nano, lastSyncedAt)
+	rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+	return &rec, nil
+}
+
 func randID(prefix string) string {
 	n, _ := rand.Int(rand.Reader, big.NewInt(1<<62))
 	return fmt.Sprintf("%s_%x", prefix, n)

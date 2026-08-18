@@ -46,6 +46,9 @@ protected route; there is no route that skips it by omission.
 | `GET` | `/api/v1/servers/{id}/sites/{siteId}/backups` | List backups for a site, newest first |
 | `POST` | `/api/v1/servers/{id}/sites/{siteId}/backups` | Dispatch `backup.run` and persist the resulting backup record |
 | `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a previously recorded backup |
+| `GET` | `/api/v1/servers/{id}/sites/{siteId}/ssl` | Dispatch `ssl.status` live and persist the refreshed expiry |
+| `POST` | `/api/v1/servers/{id}/sites/{siteId}/ssl/letsencrypt` | Dispatch `ssl.issue_letsencrypt` for the site's domain |
+| `POST` | `/api/v1/servers/{id}/sites/{siteId}/ssl/custom` | Dispatch `ssl.install_custom` with a caller-supplied cert/key pair |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -137,6 +140,39 @@ isn't connected; `422` if `backup.restore` itself failed on the agent (the agent
 error message explains why, and any checkpoint already taken is named in it so it's
 never a silent loss).
 
+### `POST /api/v1/servers/{id}/sites/{siteId}/ssl/letsencrypt`
+No request body. Dispatches `ssl.issue_letsencrypt` with `domain` taken from the
+site's own recorded domain and `email` set to the *authenticated caller's own account
+email* (never a caller-supplied value) — that's whose inbox gets Let's Encrypt's
+expiry/urgent-renewal notices. 3-minute dispatch timeout (ACME challenge round trip +
+nginx reload). On success, immediately re-dispatches `ssl.status` to record the new
+certificate's real expiry (see below) rather than trusting a fixed 90-day assumption.
+→ `201` with the `sslCertificateRecord` JSON (`ID`, `ServerID`, `SiteID`, `Domain`,
+`Issuer`, `ExpiresAt`, `LastSyncedAt`, `CreatedAt`) — or, in the rare case the issuance
+itself succeeded but the follow-up status refresh failed, `201 {"domain", "warning"}`
+(the certificate is live either way; only the control plane's cached record of its
+expiry may be stale until the next `GET .../ssl`). `404` if the site doesn't exist on
+that server; `502` if the agent isn't connected; `422` if `ssl.issue_letsencrypt`
+itself failed on the agent (e.g. DNS doesn't point at this server yet, rate-limited).
+
+### `POST /api/v1/servers/{id}/sites/{siteId}/ssl/custom`
+```json
+{"cert_pem": "-----BEGIN CERTIFICATE-----...", "key_pem": "-----BEGIN PRIVATE KEY-----..."}
+```
+Both fields required (`400` otherwise). Dispatches `ssl.install_custom`; on success,
+refreshes and persists the certificate's real expiry the same way the Let's Encrypt
+endpoint does. Same response shape and status codes as above.
+
+### `GET /api/v1/servers/{id}/sites/{siteId}/ssl`
+Dispatches `ssl.status` live (30s timeout) rather than only reading the cached
+`ssl_certificates` row, so the dashboard reflects what's actually on disk even after
+certbot's own renewal timer silently replaces a certificate outside any
+control-plane-initiated call — and persists the refreshed result as a side effect. →
+`200` with the `sslCertificateRecord` JSON, or `200 {"domain", "installed": false}`
+when no certificate is installed for this domain yet (a normal state for a freshly
+created site, not an error). `404` if the site doesn't exist on that server; `502` if
+the agent isn't connected or `ssl.status` itself failed.
+
 ### `POST /agents/register`
 ```json
 {"token": "<bootstrap token>", "csr_pem": "<PEM-encoded CSR>"}
@@ -177,8 +213,21 @@ The full allow-listed capability names `packages/capabilities.Default()` registe
 (see `SYSTEM.md` §12 for the allow-list rationale): `system.ping`, `service.control`,
 `diagnostics.basic`, `stack.install`, `site.create`, `site.set_php_version`,
 `site.set_status`, `app.wordpress_install`, `ssl.issue_letsencrypt`,
-`ssl.install_custom`, `db.create`, `db.delete`, `db.list`, `file.list`, `file.read`,
-`file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`.
+`ssl.install_custom`, `ssl.status`, `db.create`, `db.delete`, `db.list`, `file.list`,
+`file.read`, `file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`.
+
+### `ssl.status`
+```json
+{"domain": "example.com"}
+```
+`domain` is an optional filter; omitted, it reports every certificate this agent
+knows about. Never shells out to `certbot certificates` — it parses the X.509
+`NotAfter` field directly out of the certificate files on disk
+(`/etc/letsencrypt/live/<domain>/cert.pem` for Let's Encrypt,
+`/etc/serverpanel-agent/ssl/<domain>/fullchain.pem` for custom-uploaded certs), so it
+reports the literal truth of what nginx is currently serving regardless of which
+issuance path created it. Returns a JSON array of
+`{"domain", "issuer": "letsencrypt"|"custom", "expires_at", "days_remaining", "expired"}`.
 
 ### `backup.restore`
 ```json

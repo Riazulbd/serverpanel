@@ -140,6 +140,28 @@ func phase1LEMPSteps() []installStep {
 			},
 		},
 		{
+			Name: "certbot auto-renewal timer",
+			// The certbot Debian/Ubuntu package ships a certbot.timer unit
+			// that runs `certbot renew` twice daily, but whether it's
+			// enabled is a packaging default we don't control — explicitly
+			// enabling+starting it here is what actually closes the "SSL
+			// auto-renewal" gap rather than relying on it. `certbot renew`
+			// re-invokes each certificate's original authenticator+installer
+			// plugin combo (the --nginx plugin used by
+			// ssl.issue_letsencrypt), which reloads nginx itself on success —
+			// no separate deploy-hook is needed for that.
+			Check: func(ctx context.Context) bool {
+				out, _ := run(ctx, "systemctl", "is-enabled", "certbot.timer")
+				return strings.TrimSpace(out) == "enabled"
+			},
+			Run: func(ctx context.Context) error {
+				if _, err := run(ctx, "systemctl", "enable", "--now", "certbot.timer"); err != nil {
+					return fmt.Errorf("enable certbot.timer: %w", err)
+				}
+				return nil
+			},
+		},
+		{
 			Name:  "ufw",
 			Check: func(ctx context.Context) bool { return isPackageInstalled(ctx, "ufw") },
 			Run:   func(ctx context.Context) error { _, err := aptInstall(ctx, "ufw"); return err },

@@ -2,6 +2,32 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-18 — SSL auto-renewal, expiry visibility, dashboard SSL panel
+
+- **Closed the SSL auto-renewal gap** flagged in the previous entry: `stack.install`
+  now enables+starts `certbot.timer` (idempotent, re-checked on every install run), so
+  certbot's own twice-daily `certbot renew` actually runs going forward. Renewal
+  reuses each cert's original authenticator+installer plugin combo, which reloads
+  nginx itself — no separate deploy-hook needed.
+- **New `ssl.status` agent capability** (`packages/capabilities/ssl.go`): reports every
+  managed certificate's real expiry by parsing the X.509 `NotAfter` field directly off
+  the certificate file on disk (`crypto/x509`, not shelled-out `certbot certificates`
+  output) — works identically for Let's Encrypt and custom-uploaded certs, and reflects
+  renewals the timer performs outside any control-plane-initiated call.
+- **SSL wired end-to-end into the control plane for the first time**: new
+  `ssl_certificates` table, `POST /api/v1/servers/{id}/sites/{siteId}/ssl/letsencrypt`,
+  `POST .../ssl/custom`, `GET .../ssl` (dispatch-then-persist pattern, same as
+  backups/sites), and a dashboard "SSL" panel on the site detail page (issue/upload
+  buttons, live status badge with issuer/expiry/days-remaining).
+- Tests: `packages/capabilities/ssl_test.go` (expiry parsing against real generated
+  X.509 certs, domain filtering, empty-state); `apps/controlplane/ssl_test.go`
+  (site-scoping 404s, parameter validation before dispatch, upsert-replaces-existing-row
+  persistence semantics).
+- Updated `docs/SYSTEM.md`, `docs/API.md`, `docs/SERVERAVATAR_PARITY.md` (APP-015/
+  APP-016 promoted from compact-table `PARTIAL` rows to full detail blocks — still
+  `PARTIAL`, not `COMPLETE`, since a real end-to-end ACME issuance + renewal cycle
+  against a live Ubuntu host hasn't been run in this environment).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

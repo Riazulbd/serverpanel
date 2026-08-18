@@ -150,4 +150,15 @@ CREATE TABLE IF NOT EXISTS backups (
 	status     TEXT NOT NULL,
 	created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS ssl_certificates (
+	id             TEXT PRIMARY KEY,
+	server_id      TEXT NOT NULL REFERENCES servers(id),
+	site_id        TEXT NOT NULL,
+	domain         TEXT NOT NULL,
+	issuer         TEXT NOT NULL,
+	expires_at     TEXT NOT NULL DEFAULT '',
+	last_synced_at TEXT NOT NULL,
+	created_at     TEXT NOT NULL
+);
 `
