@@ -73,7 +73,7 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | PHP-FPM, multiple PHP versions | 🚧 php-fpm pool-per-site works; only 8.3 is
   installed by `stack.install` today, though `site.set_php_version` and pool paths are
   already version-parameterized |
-| MariaDB/MySQL | ✅ install + per-DB least-privilege grants |
+| MariaDB/MySQL | ✅ install + per-DB least-privilege grants; control-plane persistence + dashboard UI (create/list/delete, scoped per site) also now implemented |
 | Redis, Git, Composer, WP-CLI | ✅ installed by `stack.install` |
 | Node.js | ⬜ Phase 3 |
 | UFW firewall, Fail2Ban | 🚧 installed with safe defaults; no rule-editing UI |
@@ -253,6 +253,7 @@ EXISTS`, applied on every `openDB` call — idempotent, no separate migration to
 | `audit_log` | append-only: seq, timestamp, server, actor, action, detail |
 | `sites` | id, server, domain, system user, docroot, app type, PHP version, status |
 | `backups` | id, server, site, scope, path, size, sha256, status, created_at |
+| `databases` | id, server, site, name, owner_user, status, created_at (`UNIQUE(server_id, name)`; owner password is deliberately never persisted — see §9/§18) |
 
 No ORM — every query is a small, explicit SQL statement in `store.go`. All secrets
 (session tokens, bootstrap tokens) are stored only as SHA-256 hashes; passwords use
@@ -262,8 +263,9 @@ bcrypt (cost 12); nothing is stored in plaintext.
 
 Full list with request/response shapes in `API.md`. Summary: `/api/v1/auth/*`
 (signup/login/logout/TOTP enroll+verify/MFA challenge/me), `/api/v1/servers*` (CRUD,
-revoke, task dispatch, sites, audit), `/agents/register` (the one unauthenticated
-agent-facing endpoint, secured by the bootstrap token itself), `/healthz`.
+revoke, task dispatch, sites, backups, databases, audit), `/agents/register` (the one
+unauthenticated agent-facing endpoint, secured by the bootstrap token itself),
+`/healthz`.
 
 ## 10. Background jobs
 
@@ -480,6 +482,13 @@ sizing, and two persistence bugs where a successful operation wasn't actually sa
 - **Backup before restore** — `backup.run` shipped in this codebase before any restore
   capability; flagged clearly (§19, §21) rather than left as a silent gap, since
   "backups exist" without "restore works" is a false sense of safety if not documented.
+- **Database owner passwords are generated, shown once, and never persisted** — the
+  control plane has no per-field encryption-at-rest mechanism yet (see §18/`SECURITY.md`),
+  so rather than store a plaintext or weakly-protected application credential in the
+  SQLite file, `handleCreateDatabase` generates a random password, has the agent set it,
+  returns it to the caller exactly once in the creation response, and retains nothing
+  recoverable — the same "don't keep a secret you don't have a safe way to protect"
+  reasoning already applied to bootstrap/session tokens (stored only as hashes).
 - **No proprietary Webuzo/ServerAvatar code, branding, or assets** — every protocol,
   UI, and mechanism here is independently designed against open standards (mTLS,
   systemd, ACME/Let's Encrypt, RFC 6238 TOTP).

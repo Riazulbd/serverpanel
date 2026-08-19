@@ -2,6 +2,41 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-19 — Database management: control-plane persistence, API, dashboard UI
+
+- **Wired `db.create`/`db.delete`/`db.list` into the control plane end-to-end**,
+  closing the gap DB-001 in `docs/SERVERAVATAR_PARITY.md` had flagged as the
+  recommended next iteration (the same dispatch-then-persist-on-success pattern
+  `backup.run`/`site.create` already use). Added a `databases` table
+  (`server_id`, `site_id`, `name`, `owner_user`, `status`, `created_at`,
+  `UNIQUE(server_id, name)`), new `store` methods (`createDatabase`/`listDatabases`/
+  `getDatabase`/`deleteDatabase`, each scoped by server ID like `getSite`/`getBackup`),
+  and three new endpoints: `GET`/`POST /api/v1/servers/{id}/sites/{siteId}/databases`,
+  `DELETE /api/v1/servers/{id}/databases/{databaseId}` (`apps/controlplane/databases.go`).
+- **Deliberately never persists the database owner's password.** It's generated
+  server-side (`crypto/rand`, 24 bytes), sent to the agent to actually set on the new
+  MariaDB user, and returned to the caller exactly once in the creation response — the
+  control plane has no per-field encryption-at-rest mechanism yet, so the safer default
+  is to retain nothing recoverable rather than store a plaintext application credential.
+  Both the control plane and the agent independently re-validate the database
+  name/owner-user against the same identifier allow-list (`^[a-z][a-z0-9_]{0,30}$`)
+  before it ever reaches a `CREATE DATABASE`/`CREATE USER` statement — defense in depth
+  on an identifier MySQL gives no placeholder syntax for.
+- Added a "Databases" panel to the site-detail dashboard view: a create-database modal
+  (name + optional owner user), a databases table, and a delete action with a
+  destructive-action confirmation dialog — the generated password is surfaced once in
+  the result banner immediately after creation, with an explicit "save it now" warning.
+- Added 2 new store tests (`TestDatabaseCreateListGetDeleteRoundTrip` — round trip,
+  cross-server scoping, duplicate-name rejection via the new unique constraint, delete)
+  and 1 new HTTP test (`TestDatabaseEndpointsRequireARealSiteAndValidName` — 404 on
+  unknown site/database, 400 on invalid identifiers before dispatch ever happens, 502
+  with no agent connected). Full suite green, `go vet`/`gofmt` clean. The underlying
+  `db.create`/`db.delete`/`db.list` capabilities' real-MariaDB behavior remains
+  manually-verified-only in this environment (no MariaDB here), consistent with how
+  BAK-001/BAK-002's db-scope path is already documented.
+- Updated `docs/API.md`, `docs/SYSTEM.md`, and `docs/SERVERAVATAR_PARITY.md` (DB-001
+  moved to `COMPLETE`; the former DB-005 placeholder row folded into it).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the
