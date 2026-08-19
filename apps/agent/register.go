@@ -64,22 +64,81 @@ func loadIdentity(dataDir string) (*identity, error) {
 	return &identity{ServerID: meta.ServerID, CertPEM: certPEM, KeyPEM: keyPEM, CAPEM: caPEM, GatewayAddr: meta.GatewayAddr}, nil
 }
 
+// newKeyAndCSR generates a fresh ECDSA key pair and a matching PKCS#10 CSR.
+// The requested Subject CommonName is never trusted by the CA (see
+// apps/controlplane/ca.go signAgentCSR) — it always sets CommonName from
+// the already-validated server_id instead — so its value here is purely
+// informational. Shared by both first-time registration and certificate
+// renewal so a renewed certificate is backed by a brand new private key,
+// not a reused one.
+func newKeyAndCSR(commonName string) (*ecdsa.PrivateKey, []byte, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, nil, fmt.Errorf("generate key: %w", err)
+	}
+	csrTmpl := &x509.CertificateRequest{Subject: pkix.Name{CommonName: commonName}}
+	csrDER, err := x509.CreateCertificateRequest(rand.Reader, csrTmpl, key)
+	if err != nil {
+		return nil, nil, fmt.Errorf("create CSR: %w", err)
+	}
+	return key, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER}), nil
+}
+
+func pemEncodeECKey(key *ecdsa.PrivateKey) ([]byte, error) {
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		return nil, err
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), nil
+}
+
+// certValidity parses a PEM-encoded certificate and returns its validity
+// window, used by the renewal loop to decide when a renewal is due.
+func certValidity(certPEM []byte) (notBefore, notAfter time.Time, err error) {
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("invalid certificate PEM")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return time.Time{}, time.Time{}, err
+	}
+	return cert.NotBefore, cert.NotAfter, nil
+}
+
+// persistRenewedCert overwrites the on-disk certificate and key with a
+// freshly renewed pair, atomically enough for this use (same directory,
+// rename over the old file) that a crash mid-write can't leave a
+// half-written cert file that the next start-up trusts.
+func persistRenewedCert(dataDir string, certPEM, keyPEM []byte) error {
+	certPath, keyPath, _, _ := identityPaths(dataDir)
+	if err := writeFileAtomic(certPath, certPEM, 0600); err != nil {
+		return fmt.Errorf("persist renewed certificate: %w", err)
+	}
+	if err := writeFileAtomic(keyPath, keyPEM, 0600); err != nil {
+		return fmt.Errorf("persist renewed key: %w", err)
+	}
+	return nil
+}
+
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, perm); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
 // register performs the one-time bootstrap-token-for-certificate exchange
 // against the control plane's public API (plain server-TLS; the agent has
 // no client cert yet — that's the whole point of this call). The bootstrap
 // token is read once from the caller-supplied value and is never written to
 // disk or logged; only the resulting certificate and identifiers persist.
 func register(apiAddr, token, dataDir string) (*identity, error) {
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	key, csrPEM, err := newKeyAndCSR("pending-registration")
 	if err != nil {
-		return nil, fmt.Errorf("generate key: %w", err)
+		return nil, err
 	}
-	csrTmpl := &x509.CertificateRequest{Subject: pkix.Name{CommonName: "pending-registration"}}
-	csrDER, err := x509.CreateCertificateRequest(rand.Reader, csrTmpl, key)
-	if err != nil {
-		return nil, fmt.Errorf("create CSR: %w", err)
-	}
-	csrPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
 
 	reqBody, _ := json.Marshal(map[string]string{"token": token, "csr_pem": string(csrPEM)})
 	httpClient := &http.Client{Timeout: 30 * time.Second}
@@ -103,11 +162,10 @@ func register(apiAddr, token, dataDir string) (*identity, error) {
 		return nil, fmt.Errorf("parse registration response: %w", err)
 	}
 
-	keyDER, err := x509.MarshalECPrivateKey(key)
+	keyPEM, err := pemEncodeECKey(key)
 	if err != nil {
 		return nil, err
 	}
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
 
 	if err := os.MkdirAll(dataDir, 0700); err != nil {
 		return nil, fmt.Errorf("create data dir: %w", err)

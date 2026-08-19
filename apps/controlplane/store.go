@@ -172,6 +172,16 @@ func (s *store) markIssuedCert(serverID, serial string) {
 	s.log(serverID, "", "agent.registered", fmt.Sprintf("cert_serial=%s", serial))
 }
 
+// markRenewedCert records a cert rotated via the renewal flow (unlike
+// markIssuedCert, it must not touch status: the agent renews while its
+// session is still live and connected, so flipping it to "offline" here
+// would show an actively-connected server as down until its next
+// heartbeat).
+func (s *store) markRenewedCert(serverID, serial string) {
+	s.db.Exec(`UPDATE servers SET cert_serial = ? WHERE id = ?`, serial, serverID)
+	s.log(serverID, "", "agent.cert_renewed", fmt.Sprintf("cert_serial=%s", serial))
+}
+
 func (s *store) isRevoked(serial string) bool {
 	var n int
 	s.db.QueryRow(`SELECT COUNT(1) FROM revoked_certs WHERE serial = ?`, serial).Scan(&n)

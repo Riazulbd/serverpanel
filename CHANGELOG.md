@@ -2,6 +2,54 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-19 — Agent certificate auto-renewal
+
+- **Implemented agent client-certificate auto-renewal**, closing the top
+  security-critical gap flagged in `SECURITY.md` §2 and `SYSTEM.md` §21: agents no
+  longer need manual re-registration every 30 days. At two-thirds of the way through
+  its current certificate's validity (day 20 of a 30-day cert), the agent
+  (`apps/agent/connect.go` `renewalLoop`) generates a fresh ECDSA key pair and CSR
+  and sends a new `cert_renew_req` message over its already-open, already
+  -mTLS-authenticated connection — no shared long-lived secret is reused, the
+  still-valid certificate itself is the credential. The gateway
+  (`apps/controlplane/gateway.go` `handleCertRenew`) signs a new certificate bound to
+  the same `server_id`, records it (`store.markRenewedCert` — deliberately distinct
+  from `markIssuedCert`, since it must not reset a live server's status to
+  "offline"), and returns it via `cert_renew_resp`. The agent persists the renewed
+  cert/key to disk with an atomic write-then-rename; the live TCP connection keeps
+  using the old (still-valid, never revoked) certificate until its next reconnect,
+  which is when the renewed one takes effect — a renewal in flight can never disrupt
+  an active session.
+- Added two new proto message types (`cert_renew_req`/`cert_renew_resp`,
+  `packages/proto/proto.go`) and a shared `agentCertTTL` constant
+  (`apps/controlplane/ca.go`) used by both initial registration and renewal so the
+  two paths can't silently drift apart.
+- Split `gateway.listenAndServe` into `listen`/`serve` so tests can bind an ephemeral
+  port and drive the real mTLS wire protocol end-to-end instead of only unit-testing
+  individual handlers; along the way, fixed a pre-existing busy-loop bug where a
+  closed listener would spin `Accept()` forever re-logging the same error instead of
+  returning.
+- Fixed a latent goroutine-lifetime bug found while wiring this up: `heartbeatLoop`
+  and (now) `renewalLoop` previously ran on the agent's process-lifetime context, so
+  a broken connection didn't reliably stop them before the next reconnect attempt
+  started reading the same `identity` fields those goroutines could still be
+  writing. `runConnection` now derives a per-connection `context.Context` and uses a
+  `sync.WaitGroup` to guarantee both loops have actually exited before the next
+  connection attempt touches `id.CertPEM`/`id.KeyPEM` — confirmed race-free under
+  `go test -race`.
+- Added 9 new tests: 2 real end-to-end mTLS wire-protocol tests
+  (`apps/controlplane/gateway_test.go` — a full renewal round trip verified against
+  the real CA and store, and a malformed-CSR rejection that doesn't drop the
+  session), 1 store-level test confirming renewal doesn't clobber connected status
+  (`apps/controlplane/store_test.go`), and 6 new tests in a new `apps/agent` test
+  package covering renewal-timing math, CSR/key generation, and atomic cert
+  persistence (`apps/agent/cert_test.go`). Full suite: 70 test functions across
+  three packages, `go vet`/`gofmt`/`go test -race` all clean.
+- Updated `SECURITY.md` §2 (now `implemented`, not `partially implemented`),
+  `SYSTEM.md`, `API.md` (wire-protocol message reference), `OPERATIONS.md`
+  (troubleshooting entry), `TESTING.md`, and `SERVERAVATAR_PARITY.md` (new SRV-012
+  entry; SRV-001's "known differences" note removed since it's now resolved).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

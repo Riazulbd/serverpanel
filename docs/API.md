@@ -160,6 +160,8 @@ connection carries newline-delimited JSON `Envelope`s in both directions
 {"type": "task", "task": {"id": "...", "capability": "...", "params": {}, "issued_at": "..."}}
 {"type": "task_event", "task_event": {"task_id": "...", "status": "queued|running|succeeded|failed|rejected", "message": "...", "detail": "...", "at": "..."}}
 {"type": "ack"}
+{"type": "cert_renew_req", "cert_renew_req": {"csr_pem": "..."}}
+{"type": "cert_renew_resp", "cert_renew_resp": {"cert_pem": "...", "error": ""}}
 ```
 
 Flow: gateway accepts → verifies cert → sends `ack` → agent sends `hello`, then
@@ -170,6 +172,17 @@ HTTP handler) until it sees a terminal event for the task ID it sent, or its con
 deadline expires. There is no message type for a free-form command — `capability` must
 be a name in `packages/capabilities`'s fixed registry, or the agent returns `rejected`
 without executing anything.
+
+Separately from tasks, the agent also drives its own certificate renewal over this
+same connection: at two-thirds of the way through its current cert's 30-day validity,
+it generates a fresh key pair and CSR and sends `cert_renew_req` unprompted. The
+gateway signs a new certificate bound to the same `server_id` (authenticated purely by
+the fact that this request arrived over an already-verified, not-yet-revoked mTLS
+session — no separate credential) and replies with `cert_renew_resp`. A non-empty
+`error` means the gateway declined (e.g. a malformed CSR); the session itself is never
+dropped because of a declined renewal, and the agent simply retries later. See
+`SECURITY.md` §2 and `apps/agent/connect.go` `renewalLoop` /
+`apps/controlplane/gateway.go` `handleCertRenew`.
 
 ## 4. Capability reference
 

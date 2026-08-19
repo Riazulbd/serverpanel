@@ -178,6 +178,32 @@ func TestSetConnectedPreservesRevokedStatus(t *testing.T) {
 	}
 }
 
+func TestMarkRenewedCertPreservesConnectedStatus(t *testing.T) {
+	st := newTestStore(t)
+	id, _, err := st.createServer("web-5", "", nil, time.Hour, "admin@example.com")
+	if err != nil {
+		t.Fatalf("createServer: %v", err)
+	}
+	st.markIssuedCert(id, "10")
+	st.setConnected(id, true)
+
+	// Unlike markIssuedCert (only ever called pre-connection, at
+	// registration), markRenewedCert fires while the agent is actively
+	// connected and must not knock the server back to "offline".
+	st.markRenewedCert(id, "11")
+
+	rec, ok := st.get(id)
+	if !ok {
+		t.Fatal("server should still exist")
+	}
+	if rec.CertSerial != "11" {
+		t.Fatalf("cert_serial = %q, want %q", rec.CertSerial, "11")
+	}
+	if rec.Status != statusConnected {
+		t.Fatalf("status after markRenewedCert = %q, want %q", rec.Status, statusConnected)
+	}
+}
+
 func TestRecordHeartbeatAndList(t *testing.T) {
 	st := newTestStore(t)
 	id, _, err := st.createServer("web-5", "staging", []string{"a", "b"}, time.Hour, "admin@example.com")

@@ -15,6 +15,14 @@ import (
 	"time"
 )
 
+// agentCertTTL is how long an issued agent client certificate is valid for,
+// both at initial registration and at every subsequent renewal. It is
+// intentionally short (see docs/SECURITY.md §2) so a leaked certificate has
+// a bounded blast radius; the agent renews well before this expires (see
+// apps/agent/connect.go renewalLoop), so this never requires operator
+// action in normal operation.
+const agentCertTTL = 30 * 24 * time.Hour
+
 // agentCA is a minimal internal certificate authority used to issue
 // short-lived client certificates to registered agents, and a server
 // certificate for the gateway's own TLS listener. In production this

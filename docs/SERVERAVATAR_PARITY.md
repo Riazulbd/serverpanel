@@ -47,12 +47,29 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Agent command**: n/a (registration precedes capability dispatch).
 - **DB tables**: `servers`, `bootstrap_tokens`, `revoked_certs`.
 - **Required permission**: authenticated session (single-user model today — see ORG-001).
-- **Security considerations**: single-use/short-lived hashed bootstrap tokens; certificate identity independently derived from the mTLS handshake, never trusted from agent-asserted data; revocation checked every handshake.
+- **Security considerations**: single-use/short-lived hashed bootstrap tokens; certificate identity independently derived from the mTLS handshake, never trusted from agent-asserted data; revocation checked every handshake. The 30-day client certificate this exchange issues auto-renews itself before expiry — see SRV-012.
 - **Test coverage**: `apps/controlplane/http_test.go` (`TestServerCreateListRevokeFlow`, `TestRegisterEndpointRejectsBadToken`), `apps/controlplane/store_test.go`.
 - **Current status**: `COMPLETE`
 - **Completion date**: 2026-08-14
-- **Known differences**: no agent certificate auto-renewal before 30-day expiry yet.
-- **Reason**: scoped out of the initial secure-foundation pass; tracked in `SYSTEM.md` §21.
+- **Known differences**: none.
+
+### SRV-012 — Agent certificate auto-renewal
+- **Category**: Server Management / Security
+- **Documentation page**: n/a — ServerAvatar does not document its own agent-transport internals; this is our own PKI hygiene requirement, not a ported feature.
+- **Short description**: the agent's 30-day mTLS client certificate renews itself automatically, well before expiry, with no operator action.
+- **Expected behavior**: an agent that stays connected (or reconnects periodically) never needs manual re-registration due to certificate expiry.
+- **Our implementation**: at two-thirds of the way through its current cert's validity (day 20 of 30), the agent generates a fresh key pair + CSR and sends `cert_renew_req` over its already-open, already-authenticated mTLS session; the gateway signs a new certificate bound to the same `server_id` and returns it via `cert_renew_resp`. The agent persists the renewed cert/key to disk (atomic write-then-rename); the live connection keeps using the old (still-valid) cert until its next reconnect. The original certificate is never revoked by renewal.
+- **Frontend**: n/a (fully automatic, no UI surface).
+- **Backend service**: `gateway.handleCertRenew`, `agentCA.signAgentCSR` (`apps/controlplane`).
+- **API endpoint(s)**: n/a — carried over the agent gateway wire protocol (`cert_renew_req`/`cert_renew_resp`), not the public HTTP API. See `API.md` §3.
+- **Agent command**: `apps/agent/connect.go` `renewalLoop`.
+- **DB tables**: `servers.cert_serial` updated via `store.markRenewedCert` (status left untouched — renewal must not look like a disconnect).
+- **Required permission**: n/a — authenticated implicitly by the live mTLS session itself.
+- **Security considerations**: renewal reuses no long-lived shared secret (the still-valid cert *is* the credential); each renewal also rotates the private key, not just the cert's validity window; a rejected/malformed renewal request gets a structured error without dropping the session; the pre-renewal cert stays valid and unrevoked so a live connection is never disrupted by its own renewal.
+- **Test coverage**: `apps/controlplane/gateway_test.go` (`TestCertRenewalOverLiveConnection`, `TestCertRenewalRejectsMalformedCSRWithoutDroppingSession` — real mTLS listener, real CA, real wire protocol, not mocked), `apps/controlplane/store_test.go` (`TestMarkRenewedCertPreservesConnectedStatus`), `apps/agent/cert_test.go` (renewal-timing math, CSR/key generation, atomic persistence).
+- **Current status**: `COMPLETE`
+- **Completion date**: 2026-08-19
+- **Known differences**: none applicable (not a ported ServerAvatar-documented feature). The full 30-day real-time renewal cycle is not exercised end-to-end in CI (impractical to let 30 real days elapse); the wire protocol and scheduling math it depends on are.
 
 ### SRV-002 — Hosting stack installation (LEMP)
 - **Category**: Server Management
@@ -295,7 +312,7 @@ capability surface (per task-brief §3/§101), not just what's already built.
 
 | Status | Count (detailed entries) | Count (summary-table rows) |
 |---|---|---|
-| `COMPLETE` | 3 (SRV-001, BAK-002, ACC-001) | 1 (PROV-006) |
+| `COMPLETE` | 4 (SRV-001, SRV-012, BAK-002, ACC-001) | 1 (PROV-006) |
 | `PARTIAL` | 3 (SRV-002, APP-001, APP-002, DB-001, BAK-001 — 5 total, see note) | 6 |
 | `NOT_STARTED` | 0 | ~55 |
 | `BLOCKED_EXTERNAL` | 0 (sub-scoped within BAK-001/BAK-002's db/full-scope MariaDB verification) | 0 |
