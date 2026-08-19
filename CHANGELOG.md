@@ -2,6 +2,36 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-19 — SSL auto-renewal wired up
+
+- **Closed the "no SSL auto-renewal" gap** flagged since the 2026-08-14 build-out and
+  tracked as `PARTIAL` in `docs/SERVERAVATAR_PARITY.md` (APP-016). `stack.install` gained
+  a new idempotent step, "certbot auto-renewal timer" (`packages/capabilities/stack.go`),
+  that runs `systemctl enable --now certbot.timer` right after installing certbot —
+  the package ships a systemd timer that runs its renewal check twice a day, but
+  installing the package alone doesn't reliably leave it enabled, and nothing was
+  re-checking it afterward.
+- **Added `ssl.renewal_status`** (`packages/capabilities/ssl.go`), a new read-only
+  capability that reports the timer's enabled/active state and, for every certificate
+  `certbot certificates` currently knows about, its raw expiry text, an RFC3339
+  timestamp when parseable, and days-remaining. The parser (`parseCertbotCertificates`)
+  is deliberately tolerant of certbot's unstable text output — an unparseable expiry
+  line degrades that one certificate to "days left unknown" rather than dropping it or
+  failing the whole call. Registered in the capability registry and reachable from the
+  dashboard via a new "Check SSL auto-renewal" button on the server-detail screen (using
+  the existing generic task-dispatch panel, the same pattern as "Run diagnostics").
+- Added 5 new capability-layer tests (`ssl_test.go`: certbot-output parsing with
+  multiple certificates, empty output, an unparseable-expiry certificate, the
+  certbot-not-installed precondition, and registry registration) and 2 new structural
+  tests (`stack_test.go`: every `phase1LEMPSteps` entry has a unique name and non-nil
+  `Check`/`Run`, and the renewal-timer step is ordered after the certbot install step).
+  Full suite: 68 test functions (up from 61), `go vet`/`gofmt` clean.
+- Updated `SYSTEM.md`, `API.md`, `TESTING.md`, and `SERVERAVATAR_PARITY.md` (APP-016
+  promoted to a full detail block) to reflect the new capability and its honest scope:
+  the timer-enablement step and status-reporting logic are implemented and tested; the
+  timer actually firing on schedule against a real systemd host is not yet verified in
+  this environment (no systemd as PID 1, no public DNS) and remains `BLOCKED_EXTERNAL`.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

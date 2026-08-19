@@ -140,6 +140,25 @@ func phase1LEMPSteps() []installStep {
 			},
 		},
 		{
+			Name: "certbot auto-renewal timer",
+			// The certbot package ships a systemd timer that runs its
+			// renewal check twice a day, but installing the package does
+			// not reliably leave it enabled on every image — and nothing
+			// re-checks it afterward, so a certificate issued via
+			// ssl.issue_letsencrypt could silently expire. Enable it
+			// explicitly as its own idempotent step rather than assuming
+			// the package's default; ssl.renewal_status lets an operator
+			// verify this on an already-installed server too.
+			Check: func(ctx context.Context) bool {
+				out, err := run(ctx, "systemctl", "is-active", "certbot.timer")
+				return err == nil && strings.TrimSpace(out) == "active"
+			},
+			Run: func(ctx context.Context) error {
+				_, err := run(ctx, "systemctl", "enable", "--now", "certbot.timer")
+				return err
+			},
+		},
+		{
 			Name:  "ufw",
 			Check: func(ctx context.Context) bool { return isPackageInstalled(ctx, "ufw") },
 			Run:   func(ctx context.Context) error { _, err := aptInstall(ctx, "ufw"); return err },

@@ -177,8 +177,28 @@ The full allow-listed capability names `packages/capabilities.Default()` registe
 (see `SYSTEM.md` §12 for the allow-list rationale): `system.ping`, `service.control`,
 `diagnostics.basic`, `stack.install`, `site.create`, `site.set_php_version`,
 `site.set_status`, `app.wordpress_install`, `ssl.issue_letsencrypt`,
-`ssl.install_custom`, `db.create`, `db.delete`, `db.list`, `file.list`, `file.read`,
-`file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`.
+`ssl.install_custom`, `ssl.renewal_status`, `db.create`, `db.delete`, `db.list`,
+`file.list`, `file.read`, `file.write`, `file.delete`, `backup.run`, `backup.restore`,
+`logs.tail`.
+
+### `ssl.renewal_status`
+```json
+{}
+```
+Read-only. Returns whether certbot's systemd renewal timer (`certbot.timer`) is enabled
+and active, plus every certificate `certbot certificates` currently knows about, each
+with its raw expiry string, an RFC3339 `expires_at` (when parseable), and `days_left`/
+`days_left_known`:
+```json
+{"timer_installed": true, "timer_enabled": true, "timer_active": true,
+ "certificates": [{"name": "example.com", "domains": ["example.com", "www.example.com"],
+   "expiry_raw": "2026-11-10 12:00:00+00:00 (VALID: 83 days)",
+   "expires_at": "2026-11-10T12:00:00Z", "days_left": 83, "days_left_known": true}],
+ "checked_at": "2026-08-19T00:00:00Z"}
+```
+Fails fast with a clear error if certbot isn't installed (`stack.install` installs it
+and, as of this capability, also enables its renewal timer as one of its idempotent
+steps). Never mutates certbot or systemd state.
 
 ### `backup.restore`
 ```json

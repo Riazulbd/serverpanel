@@ -163,6 +163,24 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Known differences**: same-server restore only — there is no capability to restore a backup onto a *different* server (that needs a transfer step first).
 - **Reason**: cross-server restore is coupled to cross-server migration/cloning, both explicitly Phase 2 (`product-plan.md` §9); tracked as a follow-up, not silently dropped.
 
+### APP-016 — Let's Encrypt SSL issuance + auto-renewal
+- **Category**: Application Management → SSL
+- **Documentation page**: Applications → SSL Certificates
+- **Short description**: Issue a Let's Encrypt certificate for a domain and keep it renewed automatically before expiry.
+- **Our implementation**: `ssl.issue_letsencrypt` (certbot's nginx plugin, fixed argv) issues/installs the certificate; `stack.install` now includes an idempotent "certbot auto-renewal timer" step that runs `systemctl enable --now certbot.timer` (the twice-daily renewal check certbot's own package ships but does not reliably leave enabled); a new read-only `ssl.renewal_status` capability reports the timer's enabled/active state plus, per certificate known to certbot, its expiry date and days remaining, by parsing `certbot certificates` output.
+- **Frontend**: server-detail "Check SSL auto-renewal" action button (generic task-dispatch panel, same pattern as "Run diagnostics").
+- **Backend service**: `gateway.dispatch` → `packages/capabilities.handleSSLIssueLetsEncrypt` / `handleSSLRenewalStatus`; `phase1LEMPSteps` in `packages/capabilities/stack.go`.
+- **API endpoint(s)**: `POST /api/v1/servers/{id}/tasks` (`capability: ssl.issue_letsencrypt` or `ssl.renewal_status`) — generic dispatch, same as the other SSL/diagnostics capabilities; no dedicated endpoint.
+- **Agent command**: `ssl.issue_letsencrypt`, `ssl.renewal_status`; the renewal-timer step runs as part of `stack.install`.
+- **DB tables**: none — certificate/renewal state is not persisted on the control plane; `ssl.renewal_status` reads it live from the agent each time it's dispatched.
+- **Required permission**: authenticated session.
+- **Security considerations**: `ssl.renewal_status` is read-only (never mutates certbot/timer state) and, like every capability, only ever shells out with a fixed argv; `certbot certificates`' human-readable output is parsed defensively (`parseCertbotCertificates` never fails the whole call on an unparseable expiry line — it just marks that one certificate's days-left as unknown, rather than one certbot output-format change breaking the capability entirely).
+- **Test coverage**: `packages/capabilities/ssl_test.go` (`TestParseCertbotCertificates`, `TestParseCertbotCertificatesEmptyOutput`, `TestParseCertbotCertificatesUnparseableExpiryDoesNotDropCert`, `TestSSLRenewalStatusRequiresCertbot`, `TestDispatchSSLRenewalStatusIsRegistered`); `packages/capabilities/stack_test.go` (`TestPhase1LEMPStepsUniqueNamesAndShape`, `TestPhase1LEMPStepsRenewalTimerAfterCertbot`). Real certbot/systemd renewal behavior (the timer actually firing and renewing a real certificate) is not exercised by `go test` in this environment (no systemd as PID 1, no public DNS) — manually verified in a prior session for issuance; the timer-enablement step itself has not yet been verified against a real systemd host in *this* session, tracked the same way the rest of `stack.install`'s systemd-dependent steps already are (see `TESTING.md`).
+- **Current status**: `PARTIAL` (issuance + renewal-timer enablement + status reporting are implemented and unit-tested; end-to-end "certificate actually auto-renews on schedule on a real host" is `BLOCKED_EXTERNAL` — needs a real systemd host with public DNS, which this environment doesn't have)
+- **Completion date**: n/a (see status)
+- **Known differences**: no SSL-expiration alerting yet (that's ALERT-* scope, still `NOT_STARTED`); `ssl.renewal_status` is dispatched on demand, not polled/scheduled by the control plane.
+- **Reason**: closing "auto-renewal is not wired up" (the previously documented gap) only required the timer-enablement step and a way to verify it; alerting on top of that status is a separate, larger feature (notification channels) that remains explicitly out of scope for this pass.
+
 ### ACC-001 — Authentication, 2FA, session management
 - **Category**: Account Management
 - **Documentation page**: Account Management → "Update Account Info"
@@ -253,7 +271,6 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | APP-013 | Log Monitoring Suite (traffic analytics) | `NOT_STARTED` | |
 | APP-014 | Application-level WAF / AI-bot blocker | `NOT_STARTED` | |
 | APP-015 | Custom SSL upload | `PARTIAL` | `ssl.install_custom` capability exists agent-side; no dedicated dashboard UI |
-| APP-016 | Let's Encrypt SSL + auto-renewal | `PARTIAL` | `ssl.issue_letsencrypt` implemented; certbot's own renewal timer not yet wired up by `stack.install` |
 
 ### Database management — not yet started (DB-*)
 | ID | Feature | Status | Notes |
@@ -296,9 +313,9 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | Status | Count (detailed entries) | Count (summary-table rows) |
 |---|---|---|
 | `COMPLETE` | 3 (SRV-001, BAK-002, ACC-001) | 1 (PROV-006) |
-| `PARTIAL` | 3 (SRV-002, APP-001, APP-002, DB-001, BAK-001 — 5 total, see note) | 6 |
-| `NOT_STARTED` | 0 | ~55 |
-| `BLOCKED_EXTERNAL` | 0 (sub-scoped within BAK-001/BAK-002's db/full-scope MariaDB verification) | 0 |
+| `PARTIAL` | 6 (SRV-002, APP-001, APP-002, DB-001, BAK-001, APP-016 — 6 total, see note) | 5 |
+| `NOT_STARTED` | 0 | ~54 |
+| `BLOCKED_EXTERNAL` | 0 (sub-scoped within BAK-001/BAK-002's db/full-scope MariaDB verification and APP-016's real-timer-firing verification) | 0 |
 | `INTENTIONALLY_NOT_APPLICABLE` | 0 | 1 |
 
 *Note: BAK-001 and BAK-002 are each simultaneously `COMPLETE` for their files-scope path
@@ -354,6 +371,11 @@ establish the tracking process and close the single highest-priority gap
 
 ## Change history
 
+- **2026-08-19**: promoted APP-016 (Let's Encrypt SSL auto-renewal) from a summary-table
+  `PARTIAL` row to a full detail block, reflecting this session's implementation: an
+  idempotent `stack.install` step that enables certbot's systemd renewal timer, plus a
+  new read-only `ssl.renewal_status` capability that reports the timer's state and each
+  certificate's days-until-expiry.
 - **2026-08-17**: initial version. Established the tracking process; recorded
   SRV-001/002, APP-001/002, DB-001, ACC-001 (pre-existing work) at accurate status, and
   BAK-001/BAK-002 reflecting this session's backup-restore implementation. ~60

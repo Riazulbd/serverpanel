@@ -164,6 +164,7 @@
         <div class="actions-grid">
           <button onclick="dispatchQuick('system.ping', {})">Ping</button>
           <button onclick="dispatchQuick('diagnostics.basic', {})">Run diagnostics</button>
+          <button onclick="dispatchQuick('ssl.renewal_status', {})">Check SSL auto-renewal</button>
           <button class="primary" onclick="dispatchQuick('stack.install', {profile:'phase1-lemp'})">Install Phase 1 stack (nginx/PHP/MariaDB/Redis)</button>
           <button class="danger" onclick="revokeServer()">Revoke &amp; disconnect</button>
         </div>
