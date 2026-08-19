@@ -2,6 +2,60 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-19 — Database control-plane persistence + dashboard UI, real MariaDB test coverage
+
+- **Closed DB-005** (`docs/SERVERAVATAR_PARITY.md`): databases created via `db.create` are
+  now persisted as first-class `databases` rows (`apps/controlplane/db.go` schema,
+  `store.go` `createDatabaseRecord`/`listDatabases`/`getDatabaseRecord`/
+  `deleteDatabaseRecord`, all scoped by server ID the same way sites/backups are) instead
+  of existing only as an ephemeral task result — the same dispatch-then-persist-on-success
+  pattern `handleCreateSite`/`handleCreateBackup` already use. New endpoints:
+  `GET`/`POST /api/v1/servers/{id}/sites/{siteId}/databases`,
+  `DELETE /api/v1/servers/{id}/databases/{databaseId}`.
+- The control plane now generates the database owner's password itself
+  (`crypto/rand`, 24 bytes) instead of expecting the caller to supply one, and returns it
+  exactly once in the create response — the same "shown once, never persisted" pattern
+  already used for bootstrap install tokens. The `databases` table stores the owner
+  *username* only, never a password or password hash.
+- Added a "Databases" panel to the site-detail dashboard view (create modal with
+  one-time password display, list table, delete with a destructive-action confirmation).
+- `packages/capabilities/db.go`'s `db.create`/`db.delete` now return structured JSON
+  (`dbResult{name, owner_user}`) instead of a human-readable string, matching
+  `backupResult`/the site-create result shape, so the control plane can parse them.
+- **Installed a real MariaDB instance in this session's environment** (previously absent,
+  which is why DB-001/BAK-001/BAK-002's db-scope paths were only manually verified in a
+  prior session) and added `packages/capabilities/db_test.go`: 4 new tests, including a
+  real create → connect-as-owner → verify least-privilege isolation (owner user can use
+  its own database but is rejected from an unrelated one) → delete round trip against a
+  live server — the first automated test coverage `db.go` has ever had. Tests skip
+  cleanly (not fail) when no MariaDB is reachable, matching the existing
+  `ensureTestSystemUser`/`newTestSiteRoot` environment-skip pattern.
+- Added 2 new control-plane tests (`TestDatabaseCreateListGetDeleteRoundTrip` in
+  `store_test.go`, `TestDatabaseEndpointsValidateBeforeDispatch` in `http_test.go`,
+  covering not-found/validation/dispatch-ordering boundaries the same way the backup
+  endpoint tests do).
+- **Found and fixed a real bug in `backup.run`/`backup.restore`'s db/full-scope path**
+  (`packages/capabilities/backup.go`), caught by writing the first-ever real-MariaDB
+  round-trip test against it (`TestHandleBackupRunAndRestoreDBScopeRoundTrip`,
+  `TestHandleBackupRunFullScopeArchivesBothDBAndFiles`): `handleBackupRun` was archiving
+  the `mysqldump` output at its absolute temp-file path (e.g.
+  `/tmp/sp-backup-XXXXXX/dbname.sql`), so the resulting tar entry was nested under that
+  *specific* randomly-generated temp directory name. `handleBackupRestore` looks for the
+  dump at `<its own fresh temp dir>/dbname.sql` — since `os.MkdirTemp` generates a new
+  random name on every call, backup-time and restore-time temp dirs never match, so the
+  dump could never actually be found and every db/full-scope restore would have failed
+  with "archive does not contain a database dump". This was invisible until now because
+  no environment with a real `mysqldump`/`mysql` to exercise it was available in any
+  prior session (tracked honestly as `BLOCKED_EXTERNAL`/manually-verified-only in
+  `SERVERAVATAR_PARITY.md`) — files-scope restore worked and was real-tested, masking
+  that db-scope was not. Fixed by taring the dump with `tar -C workDir dbname.sql`
+  (a flat, reproducible entry name) instead of its absolute path; files-scope is
+  unaffected (its path is a fixed, known value at both backup and restore time, unlike
+  the throwaway dump temp dir). Both new tests pass against a real MariaDB instance.
+- Full suite: 69 test functions, `go build`/`go vet`/`gofmt -l`/`go test ./...` clean.
+- Updated `docs/SERVERAVATAR_PARITY.md` (DB-001, DB-005, BAK-001, BAK-002 now
+  `COMPLETE`) and `docs/SYSTEM.md`.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

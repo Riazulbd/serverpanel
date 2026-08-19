@@ -93,7 +93,17 @@ func handleBackupRun(ctx context.Context, params map[string]any, progress Progre
 		if err := os.WriteFile(dumpPath, []byte(out), 0600); err != nil {
 			return "", fmt.Errorf("write dump: %w", err)
 		}
-		tarInputs = append(tarInputs, dumpPath)
+		// "-C workDir dbName.sql" (not the absolute dumpPath) so the dump
+		// lands in the archive as a flat "dbName.sql" entry. tar strips the
+		// leading "/" from absolute paths but keeps the rest of the
+		// directory structure — using the absolute path here would bake in
+		// workDir's own randomly-generated name (a fresh os.MkdirTemp result
+		// every call, backup and restore alike), which a later restore could
+		// never reproduce and so could never find the dump it just
+		// extracted. siteRoot below is different: it's a fixed, known path
+		// at both backup and restore time, so nesting it at its absolute
+		// path is fine (handleBackupRestore's extractedRoot relies on it).
+		tarInputs = append(tarInputs, "-C", workDir, dbName+".sql")
 	}
 
 	if scope == "files" || scope == "full" {

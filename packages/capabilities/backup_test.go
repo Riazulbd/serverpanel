@@ -4,7 +4,9 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"database/sql"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -185,6 +187,151 @@ func TestHandleBackupRestoreFilesRoundTripReplacesContent(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, "new-file-not-in-backup.txt")); !os.IsNotExist(err) {
 		t.Fatal("expected the file added after the backup to be gone after restore")
 	}
+}
+
+// TestHandleBackupRunAndRestoreDBScopeRoundTrip exercises the db-scope path
+// of handleBackupRun/handleBackupRestore against a real MariaDB instance —
+// closing the gap SYSTEM.md/SERVERAVATAR_PARITY.md previously recorded as
+// "not exercised by go test in this environment (no MariaDB here)". Seeds a
+// row, dumps it via handleBackupRun, corrupts the live table, then proves
+// handleBackupRestore's mysqldump/mysql-import round trip actually brings
+// the original row back (including taking a pre-restore checkpoint).
+func TestHandleBackupRunAndRestoreDBScopeRoundTrip(t *testing.T) {
+	admin := requireMariaDB(t)
+	newTestBackupBaseDir(t)
+
+	dbName := fmt.Sprintf("sp_bktest_%d", randSuffix())
+	if _, err := admin.Exec(fmt.Sprintf("CREATE DATABASE `%s`", dbName)); err != nil {
+		t.Fatalf("create test database: %v", err)
+	}
+	t.Cleanup(func() { admin.Exec(fmt.Sprintf("DROP DATABASE IF EXISTS `%s`", dbName)) })
+
+	dbConn, err := sql.Open("mysql", "root@unix(/var/run/mysqld/mysqld.sock)/"+dbName)
+	if err != nil {
+		t.Fatalf("open test database connection: %v", err)
+	}
+	defer dbConn.Close()
+	if _, err := dbConn.Exec("CREATE TABLE widgets (id INT PRIMARY KEY, name VARCHAR(64))"); err != nil {
+		t.Fatalf("create test table: %v", err)
+	}
+	if _, err := dbConn.Exec("INSERT INTO widgets (id, name) VALUES (1, 'original')"); err != nil {
+		t.Fatalf("seed test row: %v", err)
+	}
+
+	backupOut, err := handleBackupRun(context.Background(), map[string]any{"scope": "db", "db_name": dbName}, func(string) {})
+	if err != nil {
+		t.Fatalf("handleBackupRun (db scope): %v", err)
+	}
+	var backup backupResult
+	if err := json.Unmarshal([]byte(backupOut), &backup); err != nil {
+		t.Fatalf("parse backup result: %v", err)
+	}
+	if backup.Scope != "db" || backup.SizeBytes == 0 {
+		t.Fatalf("unexpected db-scope backup result: %+v", backup)
+	}
+
+	// Simulate the database changing (or being damaged) after the backup.
+	if _, err := dbConn.Exec("UPDATE widgets SET name = 'corrupted' WHERE id = 1"); err != nil {
+		t.Fatalf("corrupt live row: %v", err)
+	}
+	if _, err := dbConn.Exec("INSERT INTO widgets (id, name) VALUES (2, 'should not survive restore')"); err != nil {
+		t.Fatalf("seed extra row: %v", err)
+	}
+
+	restoreOut, err := handleBackupRestore(context.Background(), map[string]any{
+		"scope": "db", "db_name": dbName, "archive_path": backup.Path, "expected_sha256": backup.SHA256,
+	}, func(string) {})
+	if err != nil {
+		t.Fatalf("handleBackupRestore (db scope): %v", err)
+	}
+	var restore restoreResult
+	if err := json.Unmarshal([]byte(restoreOut), &restore); err != nil {
+		t.Fatalf("parse restore result: %v", err)
+	}
+	if len(restore.Checkpoints) != 1 {
+		t.Fatalf("expected exactly one pre-restore checkpoint, got %v", restore.Checkpoints)
+	}
+	if _, err := os.Stat(restore.Checkpoints[0]); err != nil {
+		t.Fatalf("checkpoint archive should exist on disk: %v", err)
+	}
+
+	var name string
+	if err := dbConn.QueryRow("SELECT name FROM widgets WHERE id = 1").Scan(&name); err != nil {
+		t.Fatalf("query restored row: %v", err)
+	}
+	if name != "original" {
+		t.Fatalf("restored widgets.name = %q, want %q", name, "original")
+	}
+	var count int
+	dbConn.QueryRow("SELECT COUNT(1) FROM widgets WHERE id = 2").Scan(&count)
+	if count != 0 {
+		t.Fatal("expected the row added after the backup to be gone after restore (mysqldump dumps the whole database, restore replaces it)")
+	}
+}
+
+// TestHandleBackupRunFullScopeArchivesBothDBAndFiles proves the "full"
+// scope's combined tar invocation (db dump flattened via "-C workDir",
+// site files kept nested at their absolute path — see handleBackupRun)
+// produces one archive containing both, each restorable independently.
+func TestHandleBackupRunFullScopeArchivesBothDBAndFiles(t *testing.T) {
+	admin := requireMariaDB(t)
+	newTestBackupBaseDir(t)
+	root := newTestSiteRoot(t)
+	if err := os.WriteFile(filepath.Join(root, "index.php"), []byte("<?php echo 'full-scope';"), 0640); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+
+	dbName := fmt.Sprintf("sp_fulltest_%d", randSuffix())
+	if _, err := admin.Exec(fmt.Sprintf("CREATE DATABASE `%s`", dbName)); err != nil {
+		t.Fatalf("create test database: %v", err)
+	}
+	t.Cleanup(func() { admin.Exec(fmt.Sprintf("DROP DATABASE IF EXISTS `%s`", dbName)) })
+	dbConn, err := sql.Open("mysql", "root@unix(/var/run/mysqld/mysqld.sock)/"+dbName)
+	if err != nil {
+		t.Fatalf("open test database connection: %v", err)
+	}
+	defer dbConn.Close()
+	if _, err := dbConn.Exec("CREATE TABLE widgets (id INT PRIMARY KEY)"); err != nil {
+		t.Fatalf("create test table: %v", err)
+	}
+
+	out, err := handleBackupRun(context.Background(), map[string]any{
+		"scope": "full", "site_root": root, "db_name": dbName,
+	}, func(string) {})
+	if err != nil {
+		t.Fatalf("handleBackupRun (full scope): %v", err)
+	}
+	var backup backupResult
+	if err := json.Unmarshal([]byte(out), &backup); err != nil {
+		t.Fatalf("parse backup result: %v", err)
+	}
+
+	entries := listTarGzEntries(t, backup.Path)
+	if !containsExact(entries, dbName+".sql") {
+		t.Fatalf("full-scope archive entries = %v, want a flat %q entry", entries, dbName+".sql")
+	}
+	wantFileEntry := strings.TrimPrefix(root, "/") + "/index.php"
+	if !containsExact(entries, wantFileEntry) {
+		t.Fatalf("full-scope archive entries = %v, want %q", entries, wantFileEntry)
+	}
+}
+
+func listTarGzEntries(t *testing.T, path string) []string {
+	t.Helper()
+	out, err := exec.Command("tar", "-tzf", path).CombinedOutput()
+	if err != nil {
+		t.Fatalf("list archive entries: %v: %s", err, out)
+	}
+	return strings.Fields(string(out))
+}
+
+func containsExact(entries []string, want string) bool {
+	for _, e := range entries {
+		if e == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestExtractTarGzSafelyRejectsPathTraversal(t *testing.T) {

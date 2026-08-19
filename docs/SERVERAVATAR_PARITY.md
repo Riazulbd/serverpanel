@@ -121,11 +121,30 @@ actually exists — expand a row into a full block the moment work on it begins
 - **DB tables**: none on the control-plane side yet (no `databases` table — see Known differences).
 - **Required permission**: authenticated session.
 - **Security considerations**: identifier allow-list (`^[a-z][a-z0-9_]{0,30}$`) prevents SQL-identifier injection where placeholders can't be used; grants are always single-database-scoped.
-- **Test coverage**: manually verified in a prior session against a real MariaDB; not covered by `go test` (requires a running MariaDB — this environment has none).
-- **Current status**: `PARTIAL`
-- **Completion date**: n/a
-- **Known differences**: MongoDB support, a dedicated dashboard UI, and control-plane persistence of database records (so they show up per-site the way backups now do) don't exist yet.
-- **Reason**: capability-layer work landed before the control-plane persistence/UI layer that backups just got (see BAK-001) — same pattern, not yet applied here. Good candidate for the next iteration.
+- **Test coverage**: `packages/capabilities/db_test.go` — `TestHandleDBCreateAndDeleteRoundTrip` (real MariaDB: create → connect as the new owner user → verify it can use its own database → verify it is *rejected* from an unrelated database → delete → verify both the database and user are gone), `TestHandleDBListExcludesSystemDatabases`, plus 2 identifier-validation-rejection tests. Runs for real in any environment with MariaDB reachable over the local unix socket (this session installed one to close the gap); skips cleanly elsewhere.
+- **Current status**: `COMPLETE`
+- **Completion date**: 2026-08-19
+- **Known differences**: MongoDB support and a dedicated phpMyAdmin-equivalent admin UI don't exist yet (see DB-002/DB-003 below).
+- **Reason**: n/a — see DB-005 for the persistence/UI layer this entry originally deferred.
+
+### DB-005 — Control-plane persistence + dashboard UI for databases
+- **Category**: Database Management
+- **Documentation page**: Database Management → "Understanding Database Management"
+- **Short description**: Databases created via `db.create` show up as durable, per-site records in the dashboard, the way sites/backups already do — not just as an ephemeral task result.
+- **Expected behavior**: create a database from the dashboard, see it listed under the site afterward, delete it from the dashboard.
+- **Our implementation**: `apps/controlplane/databases.go` — the same dispatch-then-persist-on-success pattern `handleCreateSite`/`handleCreateBackup` use. The control plane generates the owner's password itself (`crypto/rand`, 24 bytes) and returns it exactly once in the create response (the same "shown once, never persisted" pattern the bootstrap install token uses) — the `databases` table stores the owner *username* only, never a password or hash. `db.create`/`db.delete` were changed to return structured JSON (`dbResult{name, owner_user}`) instead of a human-readable string so the control plane can parse them.
+- **Frontend**: site-detail "Databases" panel — create modal (name/owner username fields, one-time password display), databases table, delete button with a destructive-action confirmation.
+- **Backend service**: `apiServer.handleCreateDatabase`/`handleListDatabases`/`handleDeleteDatabase`.
+- **API endpoint(s)**: `GET`/`POST /api/v1/servers/{id}/sites/{siteId}/databases`, `DELETE /api/v1/servers/{id}/databases/{databaseId}`.
+- **Agent command**: `db.create`, `db.delete` (existing capabilities; result shape changed, allow-list unchanged).
+- **DB tables**: `databases` (`server_id`, `site_id`, `name`, `owner_user`, `engine`, `status`, `created_at`).
+- **Required permission**: authenticated session.
+- **Security considerations**: delete dispatches `db.delete` with the `name`/`owner_user` read server-side from the stored record, never accepted as free-form client input (same pattern `handleRestoreBackup` uses for backups), so a caller can only ever delete a database this control plane actually created and recorded; the owner password is never logged (audit entries record only that a database/owner user were created, not the credential) and never written to any table.
+- **Test coverage**: `apps/controlplane/store_test.go` (`TestDatabaseCreateListGetDeleteRoundTrip`, including cross-server-scoping rejection), `apps/controlplane/http_test.go` (`TestDatabaseEndpointsValidateBeforeDispatch` — not-found/validation-before-dispatch boundaries).
+- **Current status**: `COMPLETE`
+- **Completion date**: 2026-08-19
+- **Known differences**: none against DB-001's original scope; database *records* don't yet support rename or an explicit engine selector beyond `mariadb` (MongoDB support is tracked separately as DB-002).
+- **Reason**: n/a.
 
 ### BAK-001 — On-demand backup (files/db/full)
 - **Category**: Backups
@@ -139,11 +158,11 @@ actually exists — expand a row into a full block the moment work on it begins
 - **DB tables**: `backups` (`server_id`, `site_id`, `scope`, `path`, `db_name`, `size_bytes`, `sha256`, `status`, `created_at`).
 - **Required permission**: authenticated session.
 - **Security considerations**: backup archives are written only under a fixed system directory (`/var/backups/serverpanel`); SHA-256 is computed and recorded at creation time so a later restore can verify integrity before trusting the file.
-- **Test coverage**: `packages/capabilities/backup_test.go` (`TestHandleBackupRunRejectsBadScope`, `TestHandleBackupRunFilesRoundTripsAndChecksums`); `apps/controlplane/store_test.go` (`TestBackupCreateListGetRoundTrip`); `apps/controlplane/http_test.go` (`TestCreateBackupRejectsInvalidScope`, `TestBackupEndpointsRequireARealSite`). Files scope tested against a real filesystem; db/full scope (real `mysqldump`) not exercised by `go test` in this environment (no MariaDB here) — manually verified in a prior session.
-- **Current status**: `COMPLETE` (files scope, fully automated); `PARTIAL` overall (db/full scope automated-tested only at the validation layer, not a real `mysqldump` round trip in this environment)
-- **Completion date**: 2026-08-17 (files scope); db/full scope's real-MariaDB verification remains `BLOCKED_EXTERNAL` in this environment.
+- **Test coverage**: `packages/capabilities/backup_test.go` (`TestHandleBackupRunRejectsBadScope`, `TestHandleBackupRunFilesRoundTripsAndChecksums`, `TestHandleBackupRunAndRestoreDBScopeRoundTrip`, `TestHandleBackupRunFullScopeArchivesBothDBAndFiles`); `apps/controlplane/store_test.go` (`TestBackupCreateListGetRoundTrip`); `apps/controlplane/http_test.go` (`TestCreateBackupRejectsInvalidScope`, `TestBackupEndpointsRequireARealSite`). Files scope and db/full scope (real `mysqldump`, against a real MariaDB instance installed in this session's environment) are both now exercised for real by `go test`.
+- **Current status**: `COMPLETE`
+- **Completion date**: 2026-08-17 (files scope); 2026-08-19 (db/full scope — see BAK-002's detail block for the archive-layout bug this pass found and fixed while writing the first real db-scope test).
 - **Known differences**: no scheduling/retention policy (on-demand only); no remote storage adapters (S3/R2/B2/Spaces/Wasabi — local disk only); backups are not encrypted at rest (rely on host filesystem permissions).
-- **Reason**: scheduling/retention/remote-storage/encryption are explicitly Phase 2 (`product-plan.md` §9); this pass's scope was closing the restore gap first (see BAK-002), which was the higher-priority documented blocker.
+- **Reason**: scheduling/retention/remote-storage/encryption are explicitly Phase 2 (`product-plan.md` §9).
 
 ### BAK-002 — Backup restore
 - **Category**: Backups
@@ -157,11 +176,12 @@ actually exists — expand a row into a full block the moment work on it begins
 - **DB tables**: reads `backups` (no new table — a restore doesn't itself create a `backups` row, though the pre-restore checkpoint it takes does).
 - **Required permission**: authenticated session; restore parameters (`archive_path`, `scope`, `db_name`, `expected_sha256`) are read server-side from the stored `backups` row, never accepted as free-form client input, so a caller can only ever restore a backup that was actually created and recorded.
 - **Security considerations**: this is the highest-blast-radius capability in the registry (it can overwrite a live database and an entire site's files), so it gets defense in depth beyond the file-manager pattern: archive-location confinement, checksum verification, a from-scratch safe tar extractor (not the `tar` binary), a mandatory pre-restore checkpoint that can't be skipped, and streamed (not argv-passed) SQL import.
-- **Test coverage**: `packages/capabilities/backup_test.go` — 7 tests covering archive-location rejection, path-traversal-in-archive-path rejection, checksum-mismatch rejection, a full files backup→corrupt→restore round trip against a real throwaway system user (verifying both restored content and checkpoint creation), and three `extractTarGzSafely` unit tests (path traversal, absolute path, size-limit enforcement). `apps/controlplane` HTTP/store tests cover the endpoint's not-found/validation boundaries. Real `mysql`-import round trip not exercised in this environment (no MariaDB) — `BLOCKED_EXTERNAL`.
-- **Current status**: `COMPLETE` (files scope; db/full scope's SQL-import step is `BLOCKED_EXTERNAL` for real-MariaDB verification, same as BAK-001)
-- **Completion date**: 2026-08-17
+- **Test coverage**: `packages/capabilities/backup_test.go` — 9 tests covering archive-location rejection, path-traversal-in-archive-path rejection, checksum-mismatch rejection, a full files backup→corrupt→restore round trip against a real throwaway system user (verifying both restored content and checkpoint creation), a real db-scope backup→corrupt→restore round trip against a live MariaDB instance (verifying the `mysql`-import step, the pre-restore checkpoint, and that the restore's data matches the original — not the corrupted live state), a full-scope archive-layout test, and three `extractTarGzSafely` unit tests (path traversal, absolute path, size-limit enforcement). `apps/controlplane` HTTP/store tests cover the endpoint's not-found/validation boundaries.
+- **Current status**: `COMPLETE`
+- **Completion date**: 2026-08-17 (files scope); 2026-08-19 (db/full scope).
 - **Known differences**: same-server restore only — there is no capability to restore a backup onto a *different* server (that needs a transfer step first).
 - **Reason**: cross-server restore is coupled to cross-server migration/cloning, both explicitly Phase 2 (`product-plan.md` §9); tracked as a follow-up, not silently dropped.
+- **2026-08-19 note**: writing the first real db-scope round-trip test (against a MariaDB instance installed for this purpose, since none was available in any prior session) caught a real bug in `handleBackupRun`: it archived the `mysqldump` output at its absolute temp-file path, which embeds a randomly-generated temp directory name that a later restore's own fresh temp directory could never reproduce — so `handleBackupRestore` could never actually find the dump it was looking for, and every db/full-scope restore would have failed. Fixed in `packages/capabilities/backup.go` (the dump is now archived with `tar -C workDir dbname.sql`, a flat, restore-reproducible entry name). Files-scope was unaffected (siteRoot is a fixed, known path, unlike the throwaway dump temp dir) and had already been passing its own real round-trip test — which is exactly why this had gone undetected: partial real coverage looked like full coverage until the missing db-scope test was added.
 
 ### ACC-001 — Authentication, 2FA, session management
 - **Category**: Account Management
@@ -261,7 +281,6 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | DB-002 | MongoDB support | `NOT_STARTED` | |
 | DB-003 | phpMyAdmin / DB admin UI integration | `NOT_STARTED` | |
 | DB-004 | Database process/query monitoring | `NOT_STARTED` | |
-| DB-005 | Control-plane persistence + dashboard UI for databases (mirroring what BAK-001 just got) | `NOT_STARTED` | See DB-001's "Known differences" |
 
 ### WordPress Toolkit (WP-*)
 | ID | Feature | Status |
@@ -295,16 +314,17 @@ capability surface (per task-brief §3/§101), not just what's already built.
 
 | Status | Count (detailed entries) | Count (summary-table rows) |
 |---|---|---|
-| `COMPLETE` | 3 (SRV-001, BAK-002, ACC-001) | 1 (PROV-006) |
-| `PARTIAL` | 3 (SRV-002, APP-001, APP-002, DB-001, BAK-001 — 5 total, see note) | 6 |
-| `NOT_STARTED` | 0 | ~55 |
-| `BLOCKED_EXTERNAL` | 0 (sub-scoped within BAK-001/BAK-002's db/full-scope MariaDB verification) | 0 |
+| `COMPLETE` | 6 (SRV-001, BAK-001, BAK-002, ACC-001, DB-001, DB-005) | 1 (PROV-006) |
+| `PARTIAL` | 3 (SRV-002, APP-001, APP-002) | 6 |
+| `NOT_STARTED` | 0 | ~54 |
+| `BLOCKED_EXTERNAL` | 0 | 0 |
 | `INTENTIONALLY_NOT_APPLICABLE` | 0 | 1 |
 
-*Note: BAK-001 and BAK-002 are each simultaneously `COMPLETE` for their files-scope path
-and effectively `PARTIAL`/`BLOCKED_EXTERNAL` for their db/full-scope path pending a real
-MariaDB environment to verify against — see their detail blocks above rather than a
-single flattened status.*
+*Note: as of 2026-08-19 a real MariaDB instance is available in this environment, so
+BAK-001/BAK-002's previously-manual db/full-scope verification is now a real, automated
+`go test` — see their detail blocks above (including the archive-layout bug this closure
+found and fixed) and DB-001/DB-005 for the same environment upgrade applied to database
+management.*
 
 This is an honest, small-fraction-covered snapshot, not a claim of broad parity. The
 overwhelming majority of ServerAvatar's documented capability surface remains
@@ -314,13 +334,13 @@ and `product-plan.md` for the estimates behind it.
 ## 4. BLOCKED_EXTERNAL detail
 
 No feature is currently blocked *purely* on missing external credentials in a way that
-would justify a top-level `BLOCKED_EXTERNAL` status (the sub-scoped MariaDB gap in
-BAK-001/BAK-002 is an environment limitation of *this* session, not a missing
-credential — a real Ubuntu host with MariaDB installed, per `INSTALLATION.md`, resolves
-it without any external account). This section will be populated as provider
-integrations (Cloudflare, cloud storage, cloud compute, payment processors) are
-implemented and reach the point where only real credentials stand between "implemented"
-and "verified end-to-end."
+would justify a top-level `BLOCKED_EXTERNAL` status. (Previously, BAK-001/BAK-002's
+db/full-scope path was recorded here as an environment limitation — no MariaDB in the
+session — rather than a missing credential; as of 2026-08-19 that's resolved by
+installing MariaDB directly, and both are real-test-covered.) This section will be
+populated as provider integrations (Cloudflare, cloud storage, cloud compute, payment
+processors) are implemented and reach the point where only real *credentials* (not just
+a missing local service) stand between "implemented" and "verified end-to-end."
 
 ## 5. INTENTIONALLY_NOT_APPLICABLE detail
 
@@ -354,6 +374,15 @@ establish the tracking process and close the single highest-priority gap
 
 ## Change history
 
+- **2026-08-19**: closed DB-005 (control-plane persistence + dashboard UI for
+  databases, previously flagged in DB-001 as "good candidate for the next iteration").
+  Installed a real MariaDB instance in this session's environment and added the first
+  real automated test coverage for `db.go` (create/delete round trip, least-privilege
+  isolation check, system-database exclusion). While adding db-scope backup test
+  coverage with that same MariaDB instance, found and fixed a real bug in
+  `handleBackupRun`'s db/full-scope archive layout that had made every db-scope restore
+  silently unrestorable; both BAK-001 and BAK-002 move from `PARTIAL`/manually-verified
+  to `COMPLETE` with real test coverage as a result. DB-001 also moves to `COMPLETE`.
 - **2026-08-17**: initial version. Established the tracking process; recorded
   SRV-001/002, APP-001/002, DB-001, ACC-001 (pre-existing work) at accurate status, and
   BAK-001/BAK-002 reflecting this session's backup-restore implementation. ~60

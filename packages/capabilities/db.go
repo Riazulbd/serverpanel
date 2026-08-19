@@ -3,6 +3,7 @@ package capabilities
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"regexp"
 
@@ -32,6 +33,18 @@ func mariaDBConn() (*sql.DB, error) {
 	// parameter handling, just done in the client library rather than the
 	// server; it is not raw string concatenation of untrusted input.
 	return sql.Open("mysql", "root@unix(/var/run/mysqld/mysqld.sock)/?interpolateParams=true")
+}
+
+// dbResult is handleDBCreate/handleDBDelete's structured result — mirrors
+// backupResult/siteResult so the control plane can parse it into a
+// databases-table row (or a deletion confirmation) instead of a
+// human-readable string. It deliberately never carries the owner password:
+// the control plane generates that value itself and shows it to the caller
+// exactly once (see apps/controlplane/databases.go), never persisting or
+// echoing it back through the agent.
+type dbResult struct {
+	Name      string `json:"name"`
+	OwnerUser string `json:"owner_user"`
 }
 
 func handleDBCreate(ctx context.Context, params map[string]any, progress Progress) (string, error) {
@@ -75,7 +88,8 @@ func handleDBCreate(ctx context.Context, params map[string]any, progress Progres
 		return "", fmt.Errorf("flush privileges: %w", err)
 	}
 
-	return fmt.Sprintf("database %q created, owned by user %q with grants scoped to that database only", name, owner), nil
+	out, _ := json.Marshal(dbResult{Name: name, OwnerUser: owner})
+	return string(out), nil
 }
 
 func handleDBDelete(ctx context.Context, params map[string]any, progress Progress) (string, error) {
@@ -100,7 +114,8 @@ func handleDBDelete(ctx context.Context, params map[string]any, progress Progres
 		}
 		db.ExecContext(ctx, fmt.Sprintf("DROP USER IF EXISTS `%s`@'localhost'", owner))
 	}
-	return fmt.Sprintf("database %q deleted", name), nil
+	out, _ := json.Marshal(dbResult{Name: name, OwnerUser: owner})
+	return string(out), nil
 }
 
 func handleDBList(ctx context.Context, params map[string]any, progress Progress) (string, error) {
