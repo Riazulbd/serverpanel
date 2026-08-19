@@ -297,3 +297,76 @@ func TestBackupCreateListGetRoundTrip(t *testing.T) {
 		t.Fatal("expected getBackup to refuse a backup ID under the wrong server")
 	}
 }
+
+func TestDatabaseCreateListGetDeleteRoundTrip(t *testing.T) {
+	st := newTestStore(t)
+	serverID, _, _ := st.createServer("web-11", "", nil, time.Hour, "admin@example.com")
+
+	if st.databaseNameInUse(serverID, "app_db") {
+		t.Fatal("expected app_db not to be in use before it's created")
+	}
+
+	rec, err := st.createDatabase(serverID, "", "app_db", "app_owner")
+	if err != nil {
+		t.Fatalf("createDatabase: %v", err)
+	}
+	if rec.ID == "" || rec.Engine != "mariadb" {
+		t.Fatalf("unexpected database record: %+v", rec)
+	}
+	if !st.databaseNameInUse(serverID, "app_db") {
+		t.Fatal("expected app_db to be in use after it's created")
+	}
+
+	list := st.listDatabases(serverID)
+	if len(list) != 1 || list[0].Name != "app_db" {
+		t.Fatalf("listDatabases = %+v, want one entry named app_db", list)
+	}
+
+	got, ok := st.getDatabase(serverID, rec.ID)
+	if !ok || got.OwnerUser != "app_owner" {
+		t.Fatalf("getDatabase = %+v, ok=%v, fields don't round-trip", got, ok)
+	}
+
+	otherServer, _, _ := st.createServer("web-12", "", nil, time.Hour, "admin@example.com")
+	if _, ok := st.getDatabase(otherServer, rec.ID); ok {
+		t.Fatal("expected getDatabase to refuse a database ID under the wrong server")
+	}
+
+	user, err := st.createDatabaseUser(serverID, rec.ID, "readonly_user")
+	if err != nil {
+		t.Fatalf("createDatabaseUser: %v", err)
+	}
+	users := st.listDatabaseUsers(serverID, rec.ID)
+	if len(users) != 1 || users[0].Username != "readonly_user" {
+		t.Fatalf("listDatabaseUsers = %+v, want one entry named readonly_user", users)
+	}
+	if _, ok := st.getDatabaseUser(serverID, rec.ID, user.ID); !ok {
+		t.Fatal("expected getDatabaseUser to find the created user")
+	}
+	if _, ok := st.getDatabaseUser(otherServer, rec.ID, user.ID); ok {
+		t.Fatal("expected getDatabaseUser to refuse a user ID under the wrong server")
+	}
+
+	if err := st.deleteDatabaseUser(serverID, rec.ID, user.ID); err != nil {
+		t.Fatalf("deleteDatabaseUser: %v", err)
+	}
+	if _, ok := st.getDatabaseUser(serverID, rec.ID, user.ID); ok {
+		t.Fatal("expected the database user to be gone after deleteDatabaseUser")
+	}
+	if err := st.deleteDatabaseUser(serverID, rec.ID, user.ID); err == nil {
+		t.Fatal("expected deleteDatabaseUser to error on an already-deleted user")
+	}
+
+	if err := st.deleteDatabase(serverID, rec.ID); err != nil {
+		t.Fatalf("deleteDatabase: %v", err)
+	}
+	if _, ok := st.getDatabase(serverID, rec.ID); ok {
+		t.Fatal("expected the database to be gone after deleteDatabase")
+	}
+	if st.databaseNameInUse(serverID, "app_db") {
+		t.Fatal("expected app_db to no longer be in use after deleteDatabase")
+	}
+	if err := st.deleteDatabase(serverID, rec.ID); err == nil {
+		t.Fatal("expected deleteDatabase to error on an already-deleted database")
+	}
+}

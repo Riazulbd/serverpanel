@@ -46,6 +46,12 @@ protected route; there is no route that skips it by omission.
 | `GET` | `/api/v1/servers/{id}/sites/{siteId}/backups` | List backups for a site, newest first |
 | `POST` | `/api/v1/servers/{id}/sites/{siteId}/backups` | Dispatch `backup.run` and persist the resulting backup record |
 | `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a previously recorded backup |
+| `GET` | `/api/v1/servers/{id}/databases` | List databases on a server, newest first |
+| `POST` | `/api/v1/servers/{id}/databases` | Dispatch `db.create` and persist the resulting database record |
+| `DELETE` | `/api/v1/servers/{id}/databases/{dbId}` | Dispatch `db.delete` and remove the database record (and its users) |
+| `GET` | `/api/v1/servers/{id}/databases/{dbId}/users` | List additional scoped users on a database |
+| `POST` | `/api/v1/servers/{id}/databases/{dbId}/users` | Dispatch `db.create_user` and persist the resulting user record |
+| `DELETE` | `/api/v1/servers/{id}/databases/{dbId}/users/{userId}` | Dispatch `db.delete_user` and remove the user record |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -137,6 +143,57 @@ isn't connected; `422` if `backup.restore` itself failed on the agent (the agent
 error message explains why, and any checkpoint already taken is named in it so it's
 never a silent loss).
 
+### `POST /api/v1/servers/{id}/databases`
+```json
+{"name": "app_db", "owner_user": "app_owner", "site_id": ""}
+```
+`name`/`owner_user` must match `^[a-z][a-z0-9_]{0,30}$` (same allow-list the agent-side
+`db.create` handler enforces independently — defense in depth). `site_id` is optional;
+when set it must be a site that exists on that server. The owner password is generated
+server-side (32 hex characters via `crypto/rand`) — a caller can never set or influence
+it, so it can't be weak. A duplicate `name` already recorded for this server is
+rejected with `409` before anything is dispatched, so a second create can never
+silently reuse (and thus imply shared access to) an existing database's grants.
+Dispatches `db.create`, and only on the agent reporting success, persists a `databases`
+row — the row never includes the password. → `201
+{"database": {...databaseRecord}, "owner_password": "<shown once, never stored>"}`.
+`400` for an invalid name/owner; `404` if `site_id` doesn't resolve to a real site;
+`409` for a duplicate name; `502` if the agent isn't connected; `422` if `db.create`
+itself failed on the agent.
+
+### `GET /api/v1/servers/{id}/databases`
+→ `200` with an array of `databaseRecord` (`ID`, `ServerID`, `SiteID`, `Name`,
+`OwnerUser`, `Engine`, `CreatedAt`), newest first.
+
+### `DELETE /api/v1/servers/{id}/databases/{dbId}`
+Dispatches `db.delete` (which drops the database and its owner user on the agent) and,
+only on success, removes the `databases` row and any `database_users` rows scoped to
+it. → `204`. `404` if the database doesn't exist on that server; `502` if the agent
+isn't connected; `422` if `db.delete` itself failed on the agent (in which case the
+record is deliberately left in place rather than removed out from under a database
+that may still exist).
+
+### `POST /api/v1/servers/{id}/databases/{dbId}/users`
+```json
+{"username": "readonly_user"}
+```
+Adds an additional user scoped to exactly this one database (its own generated
+password, its own `GRANT ... ON` this database only — never the owner user's grants
+widened, never access to any other database). → `201
+{"user": {...databaseUserRecord}, "password": "<shown once, never stored>"}`. `404` if
+the database doesn't exist on that server; `400` for an invalid username; `502`/`422`
+for dispatch/agent failures.
+
+### `GET /api/v1/servers/{id}/databases/{dbId}/users`
+→ `200` with an array of `databaseUserRecord` (`ID`, `ServerID`, `DatabaseID`,
+`Username`, `CreatedAt`), not including the owner user (recorded on the database row
+itself). `404` if the database doesn't exist on that server.
+
+### `DELETE /api/v1/servers/{id}/databases/{dbId}/users/{userId}`
+Dispatches `db.delete_user` (drops just that one user, never touches the database
+itself) and, only on success, removes the `database_users` row. → `204`. `404` if the
+user doesn't exist under that database/server; `502`/`422` for dispatch/agent failures.
+
 ### `POST /agents/register`
 ```json
 {"token": "<bootstrap token>", "csr_pem": "<PEM-encoded CSR>"}
@@ -177,8 +234,9 @@ The full allow-listed capability names `packages/capabilities.Default()` registe
 (see `SYSTEM.md` §12 for the allow-list rationale): `system.ping`, `service.control`,
 `diagnostics.basic`, `stack.install`, `site.create`, `site.set_php_version`,
 `site.set_status`, `app.wordpress_install`, `ssl.issue_letsencrypt`,
-`ssl.install_custom`, `db.create`, `db.delete`, `db.list`, `file.list`, `file.read`,
-`file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`.
+`ssl.install_custom`, `db.create`, `db.delete`, `db.list`, `db.create_user`,
+`db.delete_user`, `file.list`, `file.read`, `file.write`, `file.delete`, `backup.run`,
+`backup.restore`, `logs.tail`.
 
 ### `backup.restore`
 ```json

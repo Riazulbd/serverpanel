@@ -73,7 +73,11 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | PHP-FPM, multiple PHP versions | 🚧 php-fpm pool-per-site works; only 8.3 is
   installed by `stack.install` today, though `site.set_php_version` and pool paths are
   already version-parameterized |
-| MariaDB/MySQL | ✅ install + per-DB least-privilege grants |
+| MariaDB/MySQL | ✅ install + per-DB least-privilege grants; control-plane persistence
+  (`databases`/`database_users` tables), dashboard UI, and additional scoped
+  per-database users (`db.create_user`/`db.delete_user`) via
+  `/api/v1/servers/{id}/databases[/…]` — see `API.md` §2. MongoDB support and a
+  phpMyAdmin-equivalent admin UI remain ⬜ Phase 2/3. |
 | Redis, Git, Composer, WP-CLI | ✅ installed by `stack.install` |
 | Node.js | ⬜ Phase 3 |
 | UFW firewall, Fail2Ban | 🚧 installed with safe defaults; no rule-editing UI |
@@ -253,6 +257,11 @@ EXISTS`, applied on every `openDB` call — idempotent, no separate migration to
 | `audit_log` | append-only: seq, timestamp, server, actor, action, detail |
 | `sites` | id, server, domain, system user, docroot, app type, PHP version, status |
 | `backups` | id, server, site, scope, path, size, sha256, status, created_at |
+| `databases` | id, server, site (optional), name, owner user, engine, created_at —
+  never a password column; owner/user passwords are generated server-side and returned
+  exactly once in the API response, never persisted |
+| `database_users` | id, server, database, username, created_at — additional
+  single-database-scoped users beyond the owner user |
 
 No ORM — every query is a small, explicit SQL statement in `store.go`. All secrets
 (session tokens, bootstrap tokens) are stored only as SHA-256 hashes; passwords use
@@ -296,9 +305,10 @@ in `packages/capabilities/capabilities_test.go`), not just convention.
 Current capability list: `system.ping`, `service.control`, `diagnostics.basic`,
 `stack.install`, `site.create`, `site.set_php_version`, `site.set_status`,
 `app.wordpress_install`, `ssl.issue_letsencrypt`, `ssl.install_custom`, `db.create`,
-`db.delete`, `db.list`, `file.list`, `file.read`, `file.write`, `file.delete`,
-`backup.run`, `backup.restore`, `logs.tail`. Notably absent (by design, until reviewed
-and added): `git.deploy`, `cron.upsert`, `ssh.*`, `firewall.*`, `agent.self_update`.
+`db.delete`, `db.list`, `db.create_user`, `db.delete_user`, `file.list`, `file.read`,
+`file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`. Notably
+absent (by design, until reviewed and added): `git.deploy`, `cron.upsert`, `ssh.*`,
+`firewall.*`, `agent.self_update`.
 
 ## 13. Installation and deployment
 
@@ -398,6 +408,13 @@ all ⬜, scoped to Phase 2 per `product-plan.md` §9.
 - Dashboard mobile responsiveness (320–768px) has not been verified with real browser
   automation in this session — see `TESTING.md` §Known gaps.
 - No CI pipeline / automated vulnerability scanning configured yet.
+- No MongoDB support and no phpMyAdmin-equivalent database admin UI yet (MariaDB/MySQL
+  only) — see `SERVERAVATAR_PARITY.md` DB-002/DB-003.
+- `db.create`/`db.delete`/`db.create_user`/`db.delete_user`'s real-MariaDB round trip is
+  not exercised by `go test` in this environment (no MariaDB socket here) — only the
+  validation paths are unit-tested; the control-plane persistence layer around them
+  (`databases`/`database_users` tables, HTTP handlers) is fully tested against SQLite.
+  See `TESTING.md` and `SERVERAVATAR_PARITY.md` DB-001/DB-005.
 
 ## 22. Performance decisions
 

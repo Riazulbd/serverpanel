@@ -3,11 +3,26 @@ package capabilities
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"regexp"
 
 	_ "github.com/go-sql-driver/mysql"
 )
+
+// dbCreateResult is db.create's structured detail, mirroring backupResult
+// (packages/capabilities/backup.go) — the control plane parses this to
+// persist a databases row without ever storing the password.
+type dbCreateResult struct {
+	Name  string `json:"name"`
+	Owner string `json:"owner_user"`
+}
+
+// dbUserResult is db.create_user's structured detail.
+type dbUserResult struct {
+	DBName   string `json:"db_name"`
+	Username string `json:"username"`
+}
 
 // identifierRe is the allow-list for database/user names. MySQL has no
 // placeholder syntax for identifiers (only for values), so the standard
@@ -75,7 +90,79 @@ func handleDBCreate(ctx context.Context, params map[string]any, progress Progres
 		return "", fmt.Errorf("flush privileges: %w", err)
 	}
 
-	return fmt.Sprintf("database %q created, owned by user %q with grants scoped to that database only", name, owner), nil
+	out, _ := json.Marshal(dbCreateResult{Name: name, Owner: owner})
+	return string(out), nil
+}
+
+// handleDBCreateUser adds an additional user scoped to exactly one
+// already-existing database — the same least-privilege grant pattern
+// handleDBCreate uses for the owner user, split out so a caller can hand a
+// second app (e.g. a read-only integration, a staging copy) its own
+// credential without reusing or widening the owner user's grants.
+func handleDBCreateUser(ctx context.Context, params map[string]any, progress Progress) (string, error) {
+	name, _ := params["db_name"].(string)
+	username, _ := params["username"].(string)
+	password, _ := params["password"].(string)
+
+	if !identifierRe.MatchString(name) {
+		return "", fmt.Errorf("invalid db_name %q (must match %s)", name, identifierRe.String())
+	}
+	if !identifierRe.MatchString(username) {
+		return "", fmt.Errorf("invalid username %q (must match %s)", username, identifierRe.String())
+	}
+	if len(password) < 16 {
+		return "", fmt.Errorf("password must be at least 16 characters")
+	}
+
+	db, err := mariaDBConn()
+	if err != nil {
+		return "", err
+	}
+	defer db.Close()
+
+	var exists string
+	if err := db.QueryRowContext(ctx, "SHOW DATABASES LIKE ?", name).Scan(&exists); err != nil {
+		if err == sql.ErrNoRows {
+			return "", fmt.Errorf("database %q does not exist", name)
+		}
+		return "", fmt.Errorf("check database exists: %w", err)
+	}
+
+	progress("creating scoped user " + username)
+	if _, err := db.ExecContext(ctx, fmt.Sprintf("CREATE USER IF NOT EXISTS `%s`@'localhost' IDENTIFIED BY ?", username), password); err != nil {
+		return "", fmt.Errorf("create user: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, fmt.Sprintf("GRANT ALL PRIVILEGES ON `%s`.* TO `%s`@'localhost'", name, username)); err != nil {
+		return "", fmt.Errorf("grant privileges: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, "FLUSH PRIVILEGES"); err != nil {
+		return "", fmt.Errorf("flush privileges: %w", err)
+	}
+
+	out, _ := json.Marshal(dbUserResult{DBName: name, Username: username})
+	return string(out), nil
+}
+
+// handleDBDeleteUser drops a single scoped user without touching the
+// database itself — the counterpart to handleDBCreateUser, and separate
+// from handleDBDelete so removing one of several users on a shared
+// database never risks the DROP DATABASE codepath.
+func handleDBDeleteUser(ctx context.Context, params map[string]any, progress Progress) (string, error) {
+	username, _ := params["username"].(string)
+	if !identifierRe.MatchString(username) {
+		return "", fmt.Errorf("invalid username %q", username)
+	}
+
+	db, err := mariaDBConn()
+	if err != nil {
+		return "", err
+	}
+	defer db.Close()
+
+	if _, err := db.ExecContext(ctx, fmt.Sprintf("DROP USER IF EXISTS `%s`@'localhost'", username)); err != nil {
+		return "", fmt.Errorf("drop user: %w", err)
+	}
+	return fmt.Sprintf("user %q deleted", username), nil
 }
 
 func handleDBDelete(ctx context.Context, params map[string]any, progress Progress) (string, error) {

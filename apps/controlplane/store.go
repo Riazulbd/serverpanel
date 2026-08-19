@@ -485,6 +485,196 @@ func scanBackup(row rowScanner) (*backupRecord, error) {
 	return &rec, nil
 }
 
+type databaseRecord struct {
+	ID        string
+	ServerID  string
+	SiteID    string
+	Name      string
+	OwnerUser string
+	Engine    string
+	CreatedAt time.Time
+}
+
+// createDatabase persists a database record. Like createBackup, this is
+// only ever called after db.create has already succeeded on the agent —
+// the databases table records real, provisioned databases, never
+// in-flight or attempted ones. The owner user's password is never passed
+// in and never stored here; it exists only in the one-time API response
+// the caller gets back from handleCreateDatabase.
+func (s *store) createDatabase(serverID, siteID, name, ownerUser string) (*databaseRecord, error) {
+	rec := &databaseRecord{
+		ID: randID("db"), ServerID: serverID, SiteID: siteID, Name: name, OwnerUser: ownerUser,
+		Engine: "mariadb", CreatedAt: time.Now().UTC(),
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO databases (id, server_id, site_id, name, owner_user, engine, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		rec.ID, rec.ServerID, rec.SiteID, rec.Name, rec.OwnerUser, rec.Engine, rec.CreatedAt.Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return nil, err
+	}
+	return rec, nil
+}
+
+// databaseNameInUse reports whether serverID already has a database record
+// with this name, so handleCreateDatabase can refuse a second database
+// claiming a name that already maps to another owner's credentials/grants
+// instead of silently reusing the existing one (CREATE DATABASE IF NOT
+// EXISTS on the agent side is otherwise idempotent-quiet about it).
+func (s *store) databaseNameInUse(serverID, name string) bool {
+	var n int
+	_ = s.db.QueryRow(`SELECT COUNT(1) FROM databases WHERE server_id = ? AND name = ?`, serverID, name).Scan(&n)
+	return n > 0
+}
+
+// listDatabases returns databases for one server, newest first.
+func (s *store) listDatabases(serverID string) []*databaseRecord {
+	rows, err := s.db.Query(
+		`SELECT id, server_id, site_id, name, owner_user, engine, created_at
+		 FROM databases WHERE server_id = ? ORDER BY created_at DESC`, serverID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var out []*databaseRecord
+	for rows.Next() {
+		rec, err := scanDatabase(rows)
+		if err != nil {
+			continue
+		}
+		out = append(out, rec)
+	}
+	return out
+}
+
+// getDatabase looks up one database scoped to serverID, for the same
+// cross-tenant-addressing reason getSite/getBackup are scoped to serverID.
+func (s *store) getDatabase(serverID, databaseID string) (*databaseRecord, bool) {
+	row := s.db.QueryRow(
+		`SELECT id, server_id, site_id, name, owner_user, engine, created_at
+		 FROM databases WHERE id = ? AND server_id = ?`, databaseID, serverID)
+	rec, err := scanDatabase(row)
+	if err != nil {
+		return nil, false
+	}
+	return rec, true
+}
+
+// deleteDatabase removes a database's record and all of its scoped-user
+// records. Called only after db.delete has already succeeded on the
+// agent, mirroring the dispatch-then-persist pattern everywhere else in
+// this file.
+func (s *store) deleteDatabase(serverID, databaseID string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`DELETE FROM database_users WHERE server_id = ? AND database_id = ?`, serverID, databaseID); err != nil {
+		return err
+	}
+	res, err := tx.Exec(`DELETE FROM databases WHERE id = ? AND server_id = ?`, databaseID, serverID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return errors.New("database not found")
+	}
+	return tx.Commit()
+}
+
+func scanDatabase(row rowScanner) (*databaseRecord, error) {
+	var rec databaseRecord
+	var createdAt string
+	if err := row.Scan(&rec.ID, &rec.ServerID, &rec.SiteID, &rec.Name, &rec.OwnerUser, &rec.Engine, &createdAt); err != nil {
+		return nil, err
+	}
+	rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+	return &rec, nil
+}
+
+type databaseUserRecord struct {
+	ID         string
+	ServerID   string
+	DatabaseID string
+	Username   string
+	CreatedAt  time.Time
+}
+
+// createDatabaseUser persists a scoped-user record after db.create_user
+// has already succeeded on the agent. Like the owner user's password,
+// this user's password is never passed in and never stored.
+func (s *store) createDatabaseUser(serverID, databaseID, username string) (*databaseUserRecord, error) {
+	rec := &databaseUserRecord{
+		ID: randID("dbuser"), ServerID: serverID, DatabaseID: databaseID, Username: username, CreatedAt: time.Now().UTC(),
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO database_users (id, server_id, database_id, username, created_at) VALUES (?, ?, ?, ?, ?)`,
+		rec.ID, rec.ServerID, rec.DatabaseID, rec.Username, rec.CreatedAt.Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return nil, err
+	}
+	return rec, nil
+}
+
+// listDatabaseUsers returns the additional scoped users for one database
+// (not including the owner user, which is recorded on the databases row
+// itself), oldest first.
+func (s *store) listDatabaseUsers(serverID, databaseID string) []*databaseUserRecord {
+	rows, err := s.db.Query(
+		`SELECT id, server_id, database_id, username, created_at
+		 FROM database_users WHERE server_id = ? AND database_id = ? ORDER BY created_at ASC`, serverID, databaseID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var out []*databaseUserRecord
+	for rows.Next() {
+		var rec databaseUserRecord
+		var createdAt string
+		if err := rows.Scan(&rec.ID, &rec.ServerID, &rec.DatabaseID, &rec.Username, &createdAt); err != nil {
+			continue
+		}
+		rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+		out = append(out, &rec)
+	}
+	return out
+}
+
+// getDatabaseUser looks up one scoped user, scoped to both serverID and
+// databaseID so a caller can't address a user record belonging to a
+// different database or server.
+func (s *store) getDatabaseUser(serverID, databaseID, userID string) (*databaseUserRecord, bool) {
+	row := s.db.QueryRow(
+		`SELECT id, server_id, database_id, username, created_at
+		 FROM database_users WHERE id = ? AND server_id = ? AND database_id = ?`, userID, serverID, databaseID)
+	var rec databaseUserRecord
+	var createdAt string
+	if err := row.Scan(&rec.ID, &rec.ServerID, &rec.DatabaseID, &rec.Username, &createdAt); err != nil {
+		return nil, false
+	}
+	rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+	return &rec, true
+}
+
+// deleteDatabaseUser removes one scoped-user record, called only after
+// db.delete_user has already succeeded on the agent.
+func (s *store) deleteDatabaseUser(serverID, databaseID, userID string) error {
+	res, err := s.db.Exec(`DELETE FROM database_users WHERE id = ? AND server_id = ? AND database_id = ?`, userID, serverID, databaseID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return errors.New("database user not found")
+	}
+	return nil
+}
+
 func randID(prefix string) string {
 	n, _ := rand.Int(rand.Reader, big.NewInt(1<<62))
 	return fmt.Sprintf("%s_%x", prefix, n)

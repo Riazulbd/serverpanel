@@ -45,6 +45,8 @@ const (
 	CapDBCreate         = "db.create"
 	CapDBDelete         = "db.delete"
 	CapDBList           = "db.list"
+	CapDBCreateUser     = "db.create_user"
+	CapDBDeleteUser     = "db.delete_user"
 	CapFileList         = "file.list"
 	CapFileRead         = "file.read"
 	CapFileWrite        = "file.write"
@@ -90,6 +92,8 @@ func Default() Registry {
 		CapDBCreate:         handleDBCreate,
 		CapDBDelete:         handleDBDelete,
 		CapDBList:           handleDBList,
+		CapDBCreateUser:     handleDBCreateUser,
+		CapDBDeleteUser:     handleDBDeleteUser,
 		CapFileList:         handleFileList,
 		CapFileRead:         handleFileRead,
 		CapFileWrite:        handleFileWrite,

@@ -2,6 +2,48 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-19 — Database management: control-plane persistence, scoped users, dashboard UI
+
+- **Closed DB-005** (`SERVERAVATAR_PARITY.md`): databases created via `db.create` are
+  now durably recorded by the control plane instead of only existing agent-side, the
+  same dispatch-then-persist-on-success pattern `handleCreateSite`/`handleCreateBackup`
+  already use. New `databases` and `database_users` SQLite tables (`apps/controlplane/
+  db.go`); neither table nor any API response the control plane itself stores ever
+  contains a password — every owner/user credential is generated server-side
+  (`crypto/rand`, 32 hex chars) and returned exactly once in the creation response.
+- **Added `db.create_user`/`db.delete_user` agent capabilities**
+  (`packages/capabilities/db.go`) so a database can have more than one credential
+  (e.g. a second app or integration sharing it) without ever widening the owner user's
+  grants — each additional user's `GRANT` is scoped to exactly that one database, the
+  same least-privilege pattern `db.create`'s owner-user grant already used. `db.create`
+  now returns structured JSON (`{"name", "owner_user"}`) instead of a plain message,
+  matching `backup.run`/`backup.restore`'s `Marshal`-a-result-struct pattern, so the
+  control plane can parse it without re-deriving the name it already validated.
+- New endpoints: `GET`/`POST /api/v1/servers/{id}/databases`,
+  `DELETE /api/v1/servers/{id}/databases/{dbId}`,
+  `GET`/`POST /api/v1/servers/{id}/databases/{dbId}/users`,
+  `DELETE /api/v1/servers/{id}/databases/{dbId}/users/{userId}` (`apps/controlplane/
+  databases.go`). Database name/owner/username are validated against the same
+  identifier allow-list the agent enforces independently (defense in depth); a
+  duplicate database name already recorded for a server is rejected with `409` before
+  anything is dispatched, so a second create can never silently reuse another
+  database's grants.
+- New "Databases" panel on the server-detail dashboard view: create-database modal,
+  a databases table with delete, and a one-time credential-display modal (password
+  shown once, matching the "never store a reusable plaintext credential" property
+  ACC-001/backup restore already follow) for both database creation and adding a
+  scoped user.
+- Added `TestDatabaseCreateListGetDeleteRoundTrip` (store layer, pure SQLite — no
+  MariaDB required), `TestDatabaseEndpointsRequireARealDatabase` and
+  `TestCreateDatabaseRejectsInvalidInputAndDuplicateNames` (HTTP layer, validation +
+  404/409 paths that don't require a live agent), and capability-layer validation
+  tests for all four `db.*` handlers' identifier/password checks. The real
+  MariaDB-backed `CREATE DATABASE`/`CREATE USER`/`GRANT` round trip remains unverified
+  by `go test` in this environment (no MariaDB socket here), same limitation already
+  documented for `db.create`/`db.delete` in `SERVERAVATAR_PARITY.md` DB-001.
+- Updated `docs/API.md`, `docs/SYSTEM.md` (§2, §8, §12, §21), and
+  `docs/SERVERAVATAR_PARITY.md` (DB-001 promoted to a full detail block, DB-005 closed).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the
