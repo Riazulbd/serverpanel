@@ -73,6 +73,25 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Known differences**: only PHP 8.3 is actually installed by `stack.install` today, even though per-site PHP-version selection is already parameterized; Apache/OpenLiteSpeed stack adapters don't exist yet.
 - **Reason**: Phase 1 deliberately ships one stack profile; additional stacks are Phase 3 (`product-plan.md` §9).
 
+### SRV-005 — Cron job management
+- **Category**: Server Management
+- **Documentation page**: Server Management → "Cron Job" (approved-command-template style scheduling per system user)
+- **Short description**: Create/edit/enable/disable/delete scheduled commands running as a chosen safe system user.
+- **Expected behavior**: pick a schedule (common presets or a custom expression), a command, and which application/user it runs as; list/toggle/delete existing jobs.
+- **Our implementation**: `cron.list`/`cron.set`/`cron.delete` capabilities manage entries directly in the target system user's own crontab, each tagged with a `# serverpanel-cron id=... label=...` marker comment so only serverpanel-created entries are ever read, replaced, or removed — any cron line a human added to that crontab directly is left untouched. `system_user` is restricted to an existing `site_`-prefixed system user (the same isolation boundary `db.create`/`site.set_status` already enforce) — there is no path to schedule anything as root through this capability. Disabling a job comments its line out rather than deleting it, so re-enabling doesn't lose the schedule/command. `stack.install` now also ensures the `cron` package itself is installed.
+- **Frontend**: site-detail "Cron jobs" panel — list/create/edit modal, per-row enable/disable and delete.
+- **Backend service**: `apiServer.handleListCron`/`handleCreateCron`/`handleUpdateCron`/`handleDeleteCron` (`apps/controlplane/cron.go`), dispatch-and-return-live-state pattern (no separate DB record — see below).
+- **API endpoint(s)**: `GET/POST /api/v1/servers/{id}/sites/{siteId}/cron`, `PUT/DELETE /api/v1/servers/{id}/sites/{siteId}/cron/{cronId}`.
+- **Agent command**: `cron.list`, `cron.set`, `cron.delete`.
+- **DB tables**: none — deliberately. The managed crontab on the agent's host is the single source of truth; a control-plane-side table would just be a second copy that could drift from what's actually installed (e.g. after a job is edited directly on the box).
+- **Required permission**: authenticated session; job's `system_user` must already exist and be `site_`-prefixed (checked agent-side via `id -u`, never trusted from the request).
+- **Security considerations**: schedule and command are validated agent-side before ever touching the crontab (5-field cron syntax or a fixed `@nickname` set; command must be a single line, rejecting embedded newlines that could otherwise smuggle extra crontab entries); jobs only ever run as the application's own already-isolated, unprivileged system user — same blast-radius boundary as that user's php-fpm pool and DB grants, not a new privilege.
+- **Test coverage**: `packages/capabilities/cron_test.go` (schedule/command/user validation, marker parsing, upsert/remove round trips, foreign-line preservation, disable/enable, label round-trip with spaces — all pure-function tests, no real `crontab` binary needed); `apps/controlplane/http_test.go` (`TestCronEndpointsRequireARealSite`, `TestCreateCronRequiresScheduleAndCommand`). Real `crontab -u <user> -l`/`-` execution against an actual Linux user account is not exercised by `go test` in this environment — see `TESTING.md`.
+- **Current status**: `COMPLETE` (validation/parsing/round-trip logic and the full API/UI integration are implemented and automated-tested; only the real `crontab` binary invocation itself is unverified in this sandboxed environment)
+- **Completion date**: 2026-08-19
+- **Known differences**: no execution-history/output log per run (ServerAvatar-style "last run" status); no approved-command-template restriction — any single-line command is accepted for the target user, same trust level as that user's other capabilities (php-fpm, file manager).
+- **Reason**: run history requires either polling `/var/log/syslog`'s cron lines or wrapping each command (both viable, deferred — not blocking the core create/edit/delete/toggle workflow this pass closes).
+
 ### APP-001 — Application (site) lifecycle: create, enable/disable
 - **Category**: Application Management
 - **Documentation page**: Application Management → "Deploy Custom PHP"
@@ -229,7 +248,6 @@ capability surface (per task-brief §3/§101), not just what's already built.
 |---|---|---|---|
 | SRV-003 | SSH/SFTP management, key management, port/root-login controls | `NOT_STARTED` | `product-plan.md` Phase 2 |
 | SRV-004 | Firewall (UFW) rule editing UI, Fail2Ban jail management | `PARTIAL` | Installed with safe defaults by `stack.install`; no rule-editing capability/UI yet |
-| SRV-005 | Cron job management | `NOT_STARTED` | |
 | SRV-006 | Supervisor/PM2 worker management | `NOT_STARTED` | |
 | SRV-007 | Process list / kill | `NOT_STARTED` | |
 | SRV-008 | Historical monitoring (CPU/RAM/disk/network graphs, alerts) | `PARTIAL` | Heartbeat carries current uptime/load/mem%/disk%; no history retention or alerting yet |
@@ -295,9 +313,9 @@ capability surface (per task-brief §3/§101), not just what's already built.
 
 | Status | Count (detailed entries) | Count (summary-table rows) |
 |---|---|---|
-| `COMPLETE` | 3 (SRV-001, BAK-002, ACC-001) | 1 (PROV-006) |
+| `COMPLETE` | 4 (SRV-001, SRV-005, BAK-002, ACC-001) | 1 (PROV-006) |
 | `PARTIAL` | 3 (SRV-002, APP-001, APP-002, DB-001, BAK-001 — 5 total, see note) | 6 |
-| `NOT_STARTED` | 0 | ~55 |
+| `NOT_STARTED` | 0 | ~54 |
 | `BLOCKED_EXTERNAL` | 0 (sub-scoped within BAK-001/BAK-002's db/full-scope MariaDB verification) | 0 |
 | `INTENTIONALLY_NOT_APPLICABLE` | 0 | 1 |
 
@@ -354,6 +372,10 @@ establish the tracking process and close the single highest-priority gap
 
 ## Change history
 
+- **2026-08-19**: closed SRV-005 (cron job management) — `cron.list`/`cron.set`/
+  `cron.delete` agent capabilities, dispatch-only control-plane endpoints (no new DB
+  table — crontab is the source of truth), full dashboard UI, and automated tests.
+  Moved SRV-005 from the `NOT_STARTED` summary table into a `COMPLETE` detailed entry.
 - **2026-08-17**: initial version. Established the tracking process; recorded
   SRV-001/002, APP-001/002, DB-001, ACC-001 (pre-existing work) at accurate status, and
   BAK-001/BAK-002 reflecting this session's backup-restore implementation. ~60

@@ -80,7 +80,8 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | SSH/SFTP management, SSH-key mgmt, port mgmt, root-login controls | ⬜ Phase 2 |
 | Automatic security updates | ⬜ Phase 2 (`unattended-upgrades` integration) |
 | Service controls | ✅ `service.control`, allow-listed units/actions only |
-| Cron-job management | ⬜ Phase 2 |
+| Cron-job management | ✅ `cron.list`/`cron.set`/`cron.delete` — create/edit/enable/disable/delete,
+  scoped to a site's own isolated system user (never root), full dashboard UI |
 | Process/worker management | ⬜ Phase 2 |
 | Disk-usage analysis, safe cleanup | ⬜ not started |
 | Server diagnostics | 🚧 `diagnostics.basic` (read-only service-state check); no
@@ -169,8 +170,9 @@ is the condensed status:
   and agent cert auto-rotation. Not "GA-ready" yet, but the architecture and security
   primitives it depends on (mTLS, allow-listed capabilities, per-app isolation, audit
   log) are real and proven, not stubs.
-- **Phase 2 — professional server management:** not started. Git deployment,
-  cron/process management, SSH/firewall management UI, remote backups, cross-server
+- **Phase 2 — professional server management:** started. Cron-job management is
+  done (`cron.list`/`cron.set`/`cron.delete`, dashboard UI, tests). Git deployment,
+  process/worker management, SSH/firewall management UI, remote backups, cross-server
   migration all remain ⬜.
 - **Phase 3 — commercial platform:** not started.
 
@@ -258,6 +260,12 @@ No ORM — every query is a small, explicit SQL statement in `store.go`. All sec
 (session tokens, bootstrap tokens) are stored only as SHA-256 hashes; passwords use
 bcrypt (cost 12); nothing is stored in plaintext.
 
+Deliberately **not** in this schema: cron jobs. A managed site's crontab (identified
+by a `# serverpanel-cron id=...` marker comment) is itself the durable record — see
+`packages/capabilities/cron.go` — so `cron.list` always reflects live server state
+with nothing on the control-plane side that could drift out of sync with a job edited
+or removed directly on the box.
+
 ## 9. API endpoints
 
 Full list with request/response shapes in `API.md`. Summary: `/api/v1/auth/*`
@@ -297,8 +305,9 @@ Current capability list: `system.ping`, `service.control`, `diagnostics.basic`,
 `stack.install`, `site.create`, `site.set_php_version`, `site.set_status`,
 `app.wordpress_install`, `ssl.issue_letsencrypt`, `ssl.install_custom`, `db.create`,
 `db.delete`, `db.list`, `file.list`, `file.read`, `file.write`, `file.delete`,
-`backup.run`, `backup.restore`, `logs.tail`. Notably absent (by design, until reviewed
-and added): `git.deploy`, `cron.upsert`, `ssh.*`, `firewall.*`, `agent.self_update`.
+`backup.run`, `backup.restore`, `logs.tail`, `cron.list`, `cron.set`, `cron.delete`.
+Notably absent (by design, until reviewed and added): `git.deploy`, `ssh.*`,
+`firewall.*`, `agent.self_update`.
 
 ## 13. Installation and deployment
 

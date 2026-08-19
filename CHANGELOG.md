@@ -2,6 +2,49 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-19 — Cron job management (SRV-005)
+
+- **Implemented cron job management end to end**: three new agent capabilities
+  (`cron.list`, `cron.set`, `cron.delete` — `packages/capabilities/cron.go`) that
+  manage entries directly in a target system user's own crontab, each tagged with a
+  `# serverpanel-cron id=... label=...` marker comment so only serverpanel-created
+  entries are ever read, replaced, or removed — any cron line a human added to that
+  crontab directly is left completely untouched by upsert or delete. `system_user` is
+  restricted to an existing `site_`-prefixed system user (checked via `id -u`, never
+  trusted from the request) — the same isolation boundary `db.create`/`site.set_status`
+  already enforce, so a scheduled job's blast radius is bounded by that already-
+  unprivileged user's own permissions, not a new privilege. Disabling a job comments
+  its crontab line out rather than deleting it, so re-enabling doesn't lose the
+  schedule/command. Schedule (5-field cron syntax or a fixed `@nickname` set) and
+  command (single line only — rejects embedded newlines that could otherwise smuggle
+  extra crontab entries) are validated before ever touching the crontab.
+- Added a `cron` package install step to `stack.install` (idempotent, matches the
+  existing pattern for every other package) so the capability's `crontab`
+  dependency is guaranteed present rather than assumed.
+- Wired it into the control plane with **no new database table** — deliberately: the
+  managed crontab on the agent's host is already the durable record, so a
+  control-plane-side copy would just be a second source of truth that could drift
+  from what's actually installed. Four new endpoints
+  (`GET`/`POST /api/v1/servers/{id}/sites/{siteId}/cron`,
+  `PUT`/`DELETE .../cron/{cronId}`) dispatch straight to the agent and return its
+  live-parsed result. Added a "Cron jobs" panel to the site-detail dashboard view:
+  list/create/edit modal, per-row enable/disable and delete.
+- Added 9 new capability-layer tests (schedule/command/system-user validation
+  including an injection-shaped multi-line command, marker-comment parsing, upsert/
+  remove round trips, foreign-crontab-line preservation across both upsert and
+  removal, disable-by-commenting-out still parsing correctly, and a label containing
+  spaces round-tripping through URL-encoding — all pure-function tests needing no
+  real `crontab` binary) and 2 new control-plane HTTP tests (not-found boundaries,
+  request validation ahead of dispatch). Full suite: 73 test functions, `go vet`/
+  `gofmt` clean.
+- Smoke-tested the real binary end to end (signup → login → create server → hit the
+  new cron routes) to confirm the dashboard serves the new UI and the routes return
+  the expected status codes; real `crontab` execution against a live `site_`-prefixed
+  Linux user remains unverified in this sandboxed environment (tracked in
+  `TESTING.md` §2/§5 alongside the other capabilities in the same bucket).
+- Updated `SYSTEM.md`, `API.md`, `TESTING.md`, and `SERVERAVATAR_PARITY.md` (SRV-005
+  moved from the `NOT_STARTED` summary table to a `COMPLETE` detailed entry).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

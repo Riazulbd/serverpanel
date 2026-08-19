@@ -184,6 +184,15 @@ func phase1LEMPSteps() []installStep {
 			Check: func(ctx context.Context) bool { return isPackageInstalled(ctx, "fail2ban") },
 			Run:   func(ctx context.Context) error { _, err := aptInstall(ctx, "fail2ban"); return err },
 		},
+		{
+			// Ubuntu Server images ship cron by default, but this isn't
+			// guaranteed on every base image (e.g. a minimal cloud-init
+			// image), and cron.list/cron.set/cron.delete (cron.go) depend
+			// on the `crontab` binary and cron daemon existing.
+			Name:  "cron",
+			Check: func(ctx context.Context) bool { return isPackageInstalled(ctx, "cron") },
+			Run:   func(ctx context.Context) error { _, err := aptInstall(ctx, "cron"); return err },
+		},
 	}
 }
 
@@ -253,7 +262,7 @@ func handleStackInstall(ctx context.Context, params map[string]any, progress Pro
 		}
 	}
 
-	for _, pkg := range []string{"nginx", "php8.3-fpm", "mariadb-server", "redis-server", "git", "certbot", "ufw", "fail2ban"} {
+	for _, pkg := range []string{"nginx", "php8.3-fpm", "mariadb-server", "redis-server", "git", "certbot", "ufw", "fail2ban", "cron"} {
 		report.Versions[pkg] = dpkgVersion(ctx, pkg)
 	}
 	report.Versions["composer"] = commandVersion(ctx, "/usr/local/bin/composer", "--version")

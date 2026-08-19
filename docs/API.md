@@ -46,6 +46,10 @@ protected route; there is no route that skips it by omission.
 | `GET` | `/api/v1/servers/{id}/sites/{siteId}/backups` | List backups for a site, newest first |
 | `POST` | `/api/v1/servers/{id}/sites/{siteId}/backups` | Dispatch `backup.run` and persist the resulting backup record |
 | `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a previously recorded backup |
+| `GET` | `/api/v1/servers/{id}/sites/{siteId}/cron` | Dispatch `cron.list`; returns the site system user's managed cron jobs |
+| `POST` | `/api/v1/servers/{id}/sites/{siteId}/cron` | Dispatch `cron.set` with a freshly generated job ID (create) |
+| `PUT` | `/api/v1/servers/{id}/sites/{siteId}/cron/{cronId}` | Dispatch `cron.set` for an existing job ID (update/enable/disable) |
+| `DELETE` | `/api/v1/servers/{id}/sites/{siteId}/cron/{cronId}` | Dispatch `cron.delete` |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -137,6 +141,33 @@ isn't connected; `422` if `backup.restore` itself failed on the agent (the agent
 error message explains why, and any checkpoint already taken is named in it so it's
 never a silent loss).
 
+### `GET /api/v1/servers/{id}/sites/{siteId}/cron`
+Dispatches `cron.list` for the site's own system user. → `200` with a JSON array of
+`{"id", "label", "schedule", "command", "enabled"}`. `404` if the site doesn't exist on
+that server; `502` if the agent isn't connected; `422` if `cron.list` itself failed on
+the agent (e.g. the site's system user no longer exists).
+
+### `POST /api/v1/servers/{id}/sites/{siteId}/cron`
+```json
+{"label": "Laravel scheduler", "schedule": "* * * * *", "command": "/usr/bin/php /home/sites/site_example/artisan schedule:run"}
+```
+Generates a fresh job ID server-side and dispatches `cron.set`. `schedule` is either 5
+space-separated cron fields or one of `@yearly`/`@annually`/`@monthly`/`@weekly`/
+`@daily`/`@midnight`/`@hourly`/`@reboot`; `command` must be a single line (crontab
+injection is rejected outright, not sanitized). `enabled` defaults to `true`. → `200`
+with the resulting `{"id","label","schedule","command","enabled"}`. `400` if `schedule`
+or `command` is missing; `404` if the site doesn't exist; `502`/`422` as above.
+
+### `PUT /api/v1/servers/{id}/sites/{siteId}/cron/{cronId}`
+Same body as create, dispatched as `cron.set` with the existing `cronId` — this is how
+a job's schedule/command/label is edited and how it's enabled/disabled (`"enabled":
+false` comments the crontab entry out rather than deleting it, so re-enabling doesn't
+lose the schedule). → `200` with the updated job JSON.
+
+### `DELETE /api/v1/servers/{id}/sites/{siteId}/cron/{cronId}`
+Dispatches `cron.delete`. → `200 {"status": "deleted"}`. `404` if the site doesn't
+exist on that server; `502`/`422` as above.
+
 ### `POST /agents/register`
 ```json
 {"token": "<bootstrap token>", "csr_pem": "<PEM-encoded CSR>"}
@@ -178,7 +209,26 @@ The full allow-listed capability names `packages/capabilities.Default()` registe
 `diagnostics.basic`, `stack.install`, `site.create`, `site.set_php_version`,
 `site.set_status`, `app.wordpress_install`, `ssl.issue_letsencrypt`,
 `ssl.install_custom`, `db.create`, `db.delete`, `db.list`, `file.list`, `file.read`,
-`file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`.
+`file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`, `cron.list`,
+`cron.set`, `cron.delete`.
+
+### `cron.list` / `cron.set` / `cron.delete`
+```json
+{"system_user": "site_example"}
+{"system_user": "site_example", "id": "cron_ab12cd", "label": "Laravel scheduler",
+ "schedule": "* * * * *", "command": "/usr/bin/php ... artisan schedule:run", "enabled": true}
+{"system_user": "site_example", "id": "cron_ab12cd"}
+```
+`system_user` must start with `site_` and already exist on the host — cron jobs can
+only ever be scheduled for an application's own isolated system user (never root),
+which is what keeps a scheduled job's blast radius bounded by that user's own file/DB
+permissions, same as everything else that user runs (php-fpm, `db.create` grants).
+Every managed job lives in that user's own crontab, tagged with a
+`# serverpanel-cron id=... label=...` marker comment so `cron.list`/`cron.set`/
+`cron.delete` only ever touch entries they created — any cron line a human added
+directly to that crontab is left untouched. `cron.set` upserts by `id` (same `id`
+again → update in place, including toggling `enabled`); `cron.list` returns the live
+crontab contents, parsed, so there is nothing that can be out of sync with the box.
 
 ### `backup.restore`
 ```json
