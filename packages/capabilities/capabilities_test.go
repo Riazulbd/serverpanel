@@ -87,7 +87,7 @@ func TestDefaultRegistryCoversAllDeclaredCapabilityConstants(t *testing.T) {
 	want := []string{
 		CapSystemPing, CapServiceControl, CapDiagnosticsBase, CapStackInstall,
 		CapSiteCreate, CapSiteSetPHP, CapSiteSetStatus, CapWordPressInstall,
-		CapSSLIssueLE, CapSSLInstallCustom, CapDBCreate, CapDBDelete, CapDBList,
+		CapSSLIssueLE, CapSSLInstallCustom, CapDBCreate, CapDBDelete, CapDBList, CapDBSetPassword,
 		CapFileList, CapFileRead, CapFileWrite, CapFileDelete, CapBackupRun, CapBackupRestore, CapLogsTail,
 	}
 	for _, name := range want {

@@ -2,6 +2,48 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-19 — Database management: control-plane persistence, dashboard UI, password rotation
+
+- **Closed DB-001's flagged gap** (`docs/SERVERAVATAR_PARITY.md`): databases created via
+  `db.create` are now durable, first-class control-plane resources instead of only
+  existing as an unrecorded agent-side side effect — the same dispatch-then-persist-
+  on-success pattern `sites`/`backups` already use. Added a `databases` table
+  (`id`, `server_id`, `site_id` [optional — a database is a server-level resource, not
+  required to belong to any one application], `name`, `owner_user`, `status`,
+  `created_at`); deliberately no password column.
+- New endpoints (`apps/controlplane/databases.go`): `GET`/`POST
+  /api/v1/servers/{id}/databases`, `DELETE /api/v1/servers/{id}/databases/{dbId}`,
+  `POST /api/v1/servers/{id}/databases/{dbId}/reset-password`. Database creation
+  generates a random 32-character owner-user password server-side (`crypto/rand`),
+  returns it exactly once in the response, and never persists it anywhere — there is no
+  "reveal password" endpoint by design (same secret-handling posture as bootstrap
+  tokens: only the fact/hash of issuance is durable, never the secret itself).
+- **Added `db.set_password`** (`packages/capabilities/db.go`) — rotates a database
+  owner user's password via `ALTER USER ... IDENTIFIED BY` without touching the
+  database or its grants, giving the reset-password endpoint above a real recovery
+  path if a generated password is lost. Also fixed `db.delete` to validate
+  `owner_user` *before* issuing `DROP DATABASE` rather than after, so a bad
+  `owner_user` can no longer leave the database already dropped when the error
+  surfaces.
+- Added a "Databases" panel to the server-detail dashboard view (`web/index.html`):
+  create-database modal (name + optional linked application), a databases table, and
+  per-row "Reset password"/"Delete" actions — both destructive actions require
+  confirmation, and both credential-issuing flows show the generated password exactly
+  once with an explicit "save this now" prompt.
+- Added 11 new automated tests: 8 in `packages/capabilities/db_test.go` (input
+  validation for `db.create`/`db.delete`/`db.set_password`, including a regression
+  test for the `db.delete` ordering fix above, plus the JSON wire-format contract
+  `databases.go` parses), 1 in `apps/controlplane/store_test.go` (database CRUD round
+  trip + cross-server scoping), and 2 in `apps/controlplane/http_test.go` (not-found
+  boundaries and create-validation, confirming validation happens before agent
+  dispatch). Full suite: 72 test functions, `go vet`/`gofmt` clean.
+- Updated `SYSTEM.md`, `API.md`, `TESTING.md`, and `SERVERAVATAR_PARITY.md` (DB-001
+  expanded to a full detail block; the now-closed DB-005 gap folded in and its ID
+  reassigned to the still-open remote-host-access-rules gap). `db.set_password`'s real
+  `ALTER USER` round trip against a live MariaDB is `BLOCKED_EXTERNAL` in this
+  environment (no MariaDB available here) — same limitation already tracked for
+  BAK-001/BAK-002's db/full scope.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

@@ -114,6 +114,25 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | Application logs / advanced log viewer | 🚧 `logs.tail` (redacted) exists; no
   filtering/search UI yet |
 
+### Database management
+| Feature | Status |
+|---|---|
+| Create/delete database with a least-privilege scoped owner user | ✅ `db.create`/
+  `db.delete` — grants are always single-database-scoped, never global |
+| Control-plane persistence + dashboard UI | ✅ `databases` table, `POST/GET/DELETE
+  /api/v1/servers/{id}/databases[/{dbId}]`, server-detail "Databases" panel — mirrors
+  the dispatch-then-persist-on-success pattern backups already used (a raw agent task
+  result is never trusted as durable on its own) |
+| Owner-user password management | ✅ generated server-side at creation time, returned
+  exactly once in the API response and never persisted; `db.set_password` +
+  `POST .../databases/{dbId}/reset-password` rotates it if lost — there is
+  deliberately no "reveal password" endpoint |
+| Remote host/IP access rules, revoke remote access | ⬜ not implemented (owner users
+  are always `@'localhost'` only today) |
+| MongoDB | ⬜ Phase 2/3 |
+| phpMyAdmin / DB admin UI integration | ⬜ not implemented |
+| Database process/query monitoring | ⬜ not implemented |
+
 ### Git deployment
 All ⬜ — explicitly scoped to Phase 2 (`product-plan.md` §9). No Git deployment,
 webhook push-to-deploy, deploy keys, or rollback exist in this codebase yet.
@@ -253,6 +272,8 @@ EXISTS`, applied on every `openDB` call — idempotent, no separate migration to
 | `audit_log` | append-only: seq, timestamp, server, actor, action, detail |
 | `sites` | id, server, domain, system user, docroot, app type, PHP version, status |
 | `backups` | id, server, site, scope, path, size, sha256, status, created_at |
+| `databases` | id, server, site (optional), name, owner user, status, created_at —
+  never the owner user's password (see §2 "Database management") |
 
 No ORM — every query is a small, explicit SQL statement in `store.go`. All secrets
 (session tokens, bootstrap tokens) are stored only as SHA-256 hashes; passwords use
@@ -296,8 +317,8 @@ in `packages/capabilities/capabilities_test.go`), not just convention.
 Current capability list: `system.ping`, `service.control`, `diagnostics.basic`,
 `stack.install`, `site.create`, `site.set_php_version`, `site.set_status`,
 `app.wordpress_install`, `ssl.issue_letsencrypt`, `ssl.install_custom`, `db.create`,
-`db.delete`, `db.list`, `file.list`, `file.read`, `file.write`, `file.delete`,
-`backup.run`, `backup.restore`, `logs.tail`. Notably absent (by design, until reviewed
+`db.delete`, `db.list`, `db.set_password`, `file.list`, `file.read`, `file.write`,
+`file.delete`, `backup.run`, `backup.restore`, `logs.tail`. Notably absent (by design, until reviewed
 and added): `git.deploy`, `cron.upsert`, `ssh.*`, `firewall.*`, `agent.self_update`.
 
 ## 13. Installation and deployment

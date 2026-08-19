@@ -109,23 +109,23 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Known differences**: no WordPress-specific toolkit yet (plugin/theme management, auto-login, blueprints, search-replace) — see the `INTENTIONALLY_NOT_APPLICABLE`/`NOT_STARTED` table under WordPress Toolkit.
 - **Reason**: initial pass only covers install; toolkit is Phase 2/3 scope.
 
-### DB-001 — Database create/delete/list with scoped users
+### DB-001 — Database create/delete/list with scoped users, control-plane persistence, dashboard UI, and password rotation
 - **Category**: Database Management
 - **Documentation page**: Database Management → "Understanding Database Management"
-- **Short description**: Create a MySQL/MariaDB database with a least-privilege owner user.
-- **Our implementation**: `db.create`/`db.delete`/`db.list` — identifier allow-list regex, `CREATE USER`/`GRANT` scoped to exactly one database (never global), Unix-socket root auth (no stored MySQL root password on disk for this path).
-- **Frontend**: not yet surfaced as its own dashboard panel (capability exists and is dispatchable via generic task dispatch; no dedicated "Databases" tab yet).
-- **Backend service**: `gateway.dispatch` → `packages/capabilities.handleDBCreate/Delete/List`.
-- **API endpoint(s)**: `POST /api/v1/servers/{id}/tasks`.
-- **Agent command**: `db.create`, `db.delete`, `db.list`.
-- **DB tables**: none on the control-plane side yet (no `databases` table — see Known differences).
+- **Short description**: Create a MySQL/MariaDB database with a least-privilege owner user; manage it from the dashboard; rotate its credentials.
+- **Our implementation**: `db.create`/`db.delete`/`db.list`/`db.set_password` (agent) — identifier allow-list regex, `CREATE USER`/`GRANT`/`ALTER USER` scoped to exactly one database (never global), Unix-socket root auth (no stored MySQL root password on disk for this path). Control plane dispatches `db.create`/`db.delete`/`db.set_password` per-server and, only after the agent confirms success, persists/removes a `databases` row — the same dispatch-then-persist-on-success pattern `backups`/`sites` already use (this closes the exact gap DB-001's prior write-up flagged as "the good candidate for the next iteration," folding in what was tracked separately as DB-005). The owner user's password is generated server-side (32 random hex chars via `crypto/rand`), returned to the caller exactly once in the API response, and is **never** persisted anywhere — there is no "reveal password" endpoint; `db.set_password` + `POST .../databases/{dbId}/reset-password` is the only recovery path if it's lost.
+- **Frontend**: server-detail "Databases" panel — "+ New database" modal (name, optional linked application), databases table with "Reset password"/"Delete" actions; the create/reset-password flows show the generated password exactly once with an explicit "save this now" prompt.
+- **Backend service**: `apiServer.handleCreateDatabase/handleListDatabases/handleDeleteDatabase/handleResetDatabasePassword` (`apps/controlplane/databases.go`).
+- **API endpoint(s)**: `POST /api/v1/servers/{id}/databases`, `GET /api/v1/servers/{id}/databases`, `DELETE /api/v1/servers/{id}/databases/{dbId}`, `POST /api/v1/servers/{id}/databases/{dbId}/reset-password`.
+- **Agent command**: `db.create`, `db.delete`, `db.list`, `db.set_password`.
+- **DB tables**: `databases` (`id`, `server_id`, `site_id` [optional], `name`, `owner_user`, `status`, `created_at` — deliberately no password column).
 - **Required permission**: authenticated session.
-- **Security considerations**: identifier allow-list (`^[a-z][a-z0-9_]{0,30}$`) prevents SQL-identifier injection where placeholders can't be used; grants are always single-database-scoped.
-- **Test coverage**: manually verified in a prior session against a real MariaDB; not covered by `go test` (requires a running MariaDB — this environment has none).
-- **Current status**: `PARTIAL`
-- **Completion date**: n/a
-- **Known differences**: MongoDB support, a dedicated dashboard UI, and control-plane persistence of database records (so they show up per-site the way backups now do) don't exist yet.
-- **Reason**: capability-layer work landed before the control-plane persistence/UI layer that backups just got (see BAK-001) — same pattern, not yet applied here. Good candidate for the next iteration.
+- **Security considerations**: identifier allow-list (`^[a-z][a-z0-9_]{0,30}$`), pre-validated at the control-plane boundary too (not just the agent) so a bad name gets a clear `400` before any task is dispatched — defense in depth, matching `stack.install`'s pattern; grants are always single-database-scoped; passwords are generated with `crypto/rand`, never caller-supplied, never logged, never stored; delete/reset-password parameters (`name`, `owner_user`) are read server-side from the stored `databases` row, never accepted as free-form client input, so a caller can only ever act on a database that was actually created and recorded (same pattern as `backup.restore`'s `backupId`-scoped parameter lookup).
+- **Test coverage**: `packages/capabilities/db_test.go` — 8 tests covering `db.create`/`db.delete`/`db.set_password`'s input-validation layer (invalid database name, invalid owner-user identifier, short password, and a regression test confirming `db.delete` now validates `owner_user` *before* issuing `DROP DATABASE`, not after) plus the `dbCreateResult` JSON wire-format contract. `apps/controlplane/store_test.go` (`TestDatabaseCreateListGetDeleteRoundTrip`) and `apps/controlplane/http_test.go` (`TestDatabaseEndpointsRequireARealRecord`, `TestCreateDatabaseRejectsInvalidName`) cover the control-plane persistence/API layer, including cross-server scoping and confirming request validation happens before agent dispatch. The real `CREATE DATABASE`/`CREATE USER`/`GRANT`/`DROP` round trip (`db.create`/`db.delete`/`db.list`) was manually verified against a real MariaDB in a prior session; `db.set_password`'s real `ALTER USER` round trip has **not** been manually verified yet (new this session) — see `TESTING.md` §2.
+- **Current status**: `PARTIAL` (control-plane persistence, dashboard UI, and password-rotation are `COMPLETE` and automated-tested at the validation/persistence layer; the real-MariaDB round trip for `db.create`/`db.delete`/`db.list` remains manually-verified-only, and `db.set_password`'s real-MariaDB round trip is `BLOCKED_EXTERNAL` — no MariaDB in this environment)
+- **Completion date**: 2026-08-19 (persistence/UI/password-rotation layer); real-MariaDB verification of the full `db.*` surface remains outstanding.
+- **Known differences**: MongoDB support, a phpMyAdmin/DB-admin-UI integration, remote host/IP access rules (owner users are always `@'localhost'`), and database process/query monitoring don't exist yet (tracked as DB-002/DB-003/DB-004 below).
+- **Reason**: MongoDB, remote-access rules, and query monitoring are explicitly later-phase scope (`product-plan.md` §9); this pass's scope was closing the control-plane-persistence/UI gap that DB-001's own prior write-up flagged as the top priority.
 
 ### BAK-001 — On-demand backup (files/db/full)
 - **Category**: Backups
@@ -261,7 +261,7 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | DB-002 | MongoDB support | `NOT_STARTED` | |
 | DB-003 | phpMyAdmin / DB admin UI integration | `NOT_STARTED` | |
 | DB-004 | Database process/query monitoring | `NOT_STARTED` | |
-| DB-005 | Control-plane persistence + dashboard UI for databases (mirroring what BAK-001 just got) | `NOT_STARTED` | See DB-001's "Known differences" |
+| DB-005 | Remote host/IP database access rules, revoke remote access | `NOT_STARTED` | Owner users are always `@'localhost'` only today; see DB-001's "Known differences" |
 
 ### WordPress Toolkit (WP-*)
 | ID | Feature | Status |
@@ -296,15 +296,17 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | Status | Count (detailed entries) | Count (summary-table rows) |
 |---|---|---|
 | `COMPLETE` | 3 (SRV-001, BAK-002, ACC-001) | 1 (PROV-006) |
-| `PARTIAL` | 3 (SRV-002, APP-001, APP-002, DB-001, BAK-001 — 5 total, see note) | 6 |
+| `PARTIAL` | 5 (SRV-002, APP-001, APP-002, DB-001, BAK-001, see note) | 6 |
 | `NOT_STARTED` | 0 | ~55 |
-| `BLOCKED_EXTERNAL` | 0 (sub-scoped within BAK-001/BAK-002's db/full-scope MariaDB verification) | 0 |
+| `BLOCKED_EXTERNAL` | 0 (sub-scoped within BAK-001/BAK-002's db/full-scope and DB-001's `db.set_password` MariaDB verification) | 0 |
 | `INTENTIONALLY_NOT_APPLICABLE` | 0 | 1 |
 
-*Note: BAK-001 and BAK-002 are each simultaneously `COMPLETE` for their files-scope path
-and effectively `PARTIAL`/`BLOCKED_EXTERNAL` for their db/full-scope path pending a real
-MariaDB environment to verify against — see their detail blocks above rather than a
-single flattened status.*
+*Note: BAK-001, BAK-002, and DB-001 are each simultaneously `COMPLETE` for the parts of
+their scope that don't need a live MariaDB to verify (BAK-001/BAK-002's files scope;
+DB-001's control-plane persistence, dashboard UI, and validation layer) and effectively
+`PARTIAL`/`BLOCKED_EXTERNAL` for the parts that do (BAK-001/BAK-002's db/full scope;
+DB-001's real `db.set_password` round trip) — see their detail blocks above rather than
+a single flattened status.*
 
 This is an honest, small-fraction-covered snapshot, not a claim of broad parity. The
 overwhelming majority of ServerAvatar's documented capability surface remains
@@ -359,3 +361,12 @@ establish the tracking process and close the single highest-priority gap
   BAK-001/BAK-002 reflecting this session's backup-restore implementation. ~60
   capabilities enumerated overall (detailed + summary), the large majority honestly
   `NOT_STARTED`.
+- **2026-08-19**: per §7's workflow, picked up DB-001's own flagged next step —
+  control-plane persistence (new `databases` table), a dashboard "Databases" panel, and
+  password-rotation (`db.set_password`) — closing the gap previously tracked as DB-005.
+  DB-001 expanded into a full detail block reflecting the new API surface, retired
+  DB-005 (folded into DB-001), and reassigned DB-005 to track the still-open
+  remote-host-access-rules gap. 11 new automated tests added across
+  `packages/capabilities` and `apps/controlplane` (all passing; `db.set_password`'s
+  real-MariaDB round trip remains unverified — flagged `BLOCKED_EXTERNAL` in DB-001's
+  detail block, same environment limitation as BAK-001/BAK-002's db/full scope).

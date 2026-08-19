@@ -3,11 +3,21 @@ package capabilities
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"regexp"
 
 	_ "github.com/go-sql-driver/mysql"
 )
+
+// dbCreateResult is handleDBCreate's structured result. The control plane
+// parses this the same way it parses backupResult (see backup.go) to persist
+// a durable database record only after the agent confirms the database and
+// its scoped owner user actually exist — never before.
+type dbCreateResult struct {
+	Name      string `json:"name"`
+	OwnerUser string `json:"owner_user"`
+}
 
 // identifierRe is the allow-list for database/user names. MySQL has no
 // placeholder syntax for identifiers (only for values), so the standard
@@ -75,7 +85,11 @@ func handleDBCreate(ctx context.Context, params map[string]any, progress Progres
 		return "", fmt.Errorf("flush privileges: %w", err)
 	}
 
-	return fmt.Sprintf("database %q created, owned by user %q with grants scoped to that database only", name, owner), nil
+	out, err := json.Marshal(dbCreateResult{Name: name, OwnerUser: owner})
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
 }
 
 func handleDBDelete(ctx context.Context, params map[string]any, progress Progress) (string, error) {
@@ -83,6 +97,12 @@ func handleDBDelete(ctx context.Context, params map[string]any, progress Progres
 	owner, _ := params["owner_user"].(string)
 	if !identifierRe.MatchString(name) {
 		return "", fmt.Errorf("invalid database name %q", name)
+	}
+	// Validate owner (if given) before touching anything, not after the
+	// DROP DATABASE has already run — a bad owner_user must never leave the
+	// database dropped with the error only surfacing on the user cleanup step.
+	if owner != "" && !identifierRe.MatchString(owner) {
+		return "", fmt.Errorf("invalid owner_user %q", owner)
 	}
 
 	db, err := mariaDBConn()
@@ -95,12 +115,43 @@ func handleDBDelete(ctx context.Context, params map[string]any, progress Progres
 		return "", fmt.Errorf("drop database: %w", err)
 	}
 	if owner != "" {
-		if !identifierRe.MatchString(owner) {
-			return "", fmt.Errorf("invalid owner_user %q", owner)
-		}
 		db.ExecContext(ctx, fmt.Sprintf("DROP USER IF EXISTS `%s`@'localhost'", owner))
 	}
 	return fmt.Sprintf("database %q deleted", name), nil
+}
+
+// handleDBSetPassword rotates a database owner user's password without
+// touching the database or its grants — used both for a caller-initiated
+// "reset credentials" action and for recovering access if the original
+// password (returned only once, at db.create time — see db.go's control-plane
+// caller) was lost.
+func handleDBSetPassword(ctx context.Context, params map[string]any, progress Progress) (string, error) {
+	owner, _ := params["owner_user"].(string)
+	password, _ := params["new_password"].(string)
+
+	if !identifierRe.MatchString(owner) {
+		return "", fmt.Errorf("invalid owner_user %q (must match %s)", owner, identifierRe.String())
+	}
+	if len(password) < 16 {
+		return "", fmt.Errorf("new_password must be at least 16 characters")
+	}
+
+	db, err := mariaDBConn()
+	if err != nil {
+		return "", err
+	}
+	defer db.Close()
+
+	progress("rotating password for " + owner)
+	if _, err := db.ExecContext(ctx, fmt.Sprintf("ALTER USER `%s`@'localhost' IDENTIFIED BY ?", owner), password); err != nil {
+		return "", fmt.Errorf("alter user: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, "FLUSH PRIVILEGES"); err != nil {
+		return "", fmt.Errorf("flush privileges: %w", err)
+	}
+
+	out, _ := json.Marshal(dbCreateResult{OwnerUser: owner})
+	return string(out), nil
 }
 
 func handleDBList(ctx context.Context, params map[string]any, progress Progress) (string, error) {

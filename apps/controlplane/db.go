@@ -150,4 +150,19 @@ CREATE TABLE IF NOT EXISTS backups (
 	status     TEXT NOT NULL,
 	created_at TEXT NOT NULL
 );
+
+-- Mirrors what backups already do: a raw db.create task result on the wire
+-- isn't itself a durable record, so the control plane only ever writes a
+-- row here after the agent confirms the database and its scoped owner user
+-- both actually exist (see apps/controlplane/databases.go). Passwords are
+-- deliberately never stored here — see that file's handleCreateDatabase.
+CREATE TABLE IF NOT EXISTS databases (
+	id         TEXT PRIMARY KEY,
+	server_id  TEXT NOT NULL REFERENCES servers(id),
+	site_id    TEXT NOT NULL DEFAULT '',
+	name       TEXT NOT NULL,
+	owner_user TEXT NOT NULL,
+	status     TEXT NOT NULL DEFAULT 'active',
+	created_at TEXT NOT NULL
+);
 `
