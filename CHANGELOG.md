@@ -2,6 +2,38 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-19 — Database management end-to-end
+
+- **Wired database management through the full stack**, closing the highest-priority
+  remaining gap in the parity matrix (DB-005): the `db.create`/`db.delete`/`db.list`
+  agent capabilities already existed but were only reachable through generic task
+  dispatch, with no persistence and no UI. They now have dedicated control-plane
+  endpoints (`GET`/`POST /api/v1/servers/{id}/databases`,
+  `DELETE /api/v1/servers/{id}/databases/{databaseId}`), a `databases` table, and a
+  "Databases" panel on each server-detail page.
+- The owner password is now **generated server-side** (24 characters from `crypto/rand`
+  over a shell/URL-safe alphabet), returned to the caller exactly once, and never
+  persisted or logged — the same "shown once" handling the bootstrap-token install
+  command already used. Previously a caller had to supply it themselves through generic
+  dispatch, which put a plaintext credential in the request body for no benefit.
+- `db.create` now returns structured JSON (`{"name", "owner_user"}`) instead of a prose
+  string, so the control plane can parse its result to persist a record — the same
+  dispatch-then-persist-on-success pattern `site.create` and `backup.run` use. Delete
+  reads the target's name/owner from the stored row rather than client input, so a
+  caller can only ever drop a database this control plane actually recorded.
+- Exported `capabilities.ValidIdentifier` so the control plane validates database names
+  with the *exact* pattern the agent enforces, rather than a second copy of the regex
+  that could silently drift out of sync with what actually gets executed.
+- Added 8 tests (control-plane store CRUD + cross-server ID scoping, two HTTP boundary/
+  validation tests proving validation runs before dispatch, and capability-layer
+  validation-rejection tests plus `ValidIdentifier` boundary cases). Full suite: 69 test
+  functions, `go vet`/`gofmt` clean.
+- Updated `SYSTEM.md` (new §19 Databases, schema table, feature list), `API.md`,
+  `TESTING.md`, and `SERVERAVATAR_PARITY.md` (DB-001 `PARTIAL` → `COMPLETE`, DB-005
+  `NOT_STARTED` → `COMPLETE`, new DB-006 for the multiple-users-per-database gap this
+  surfaced). The live-MariaDB SQL round trip remains `BLOCKED_EXTERNAL` in this
+  environment, as it already was for the backup db/full scopes.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

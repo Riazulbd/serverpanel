@@ -70,7 +70,7 @@ Restore is currently **same-server only**: `backup.restore` runs on the same age
 whose backup directory holds `archive_path`. Restoring a backup onto a *different*
 server requires transferring the archive there first — that transfer step, and a
 dedicated cross-server restore flow, remain a Phase 2 gap (tracked alongside
-cross-server migration; see `SYSTEM.md` §21).
+cross-server migration; see `SYSTEM.md` §22).
 
 To restore manually (e.g. the control plane itself is unreachable): SSH to the VPS,
 the archive is at the `archive_path` your `backups` row (or the original `backup.run`

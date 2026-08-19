@@ -75,6 +75,7 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
   already version-parameterized |
 | MariaDB/MySQL | ✅ install + per-DB least-privilege grants |
 | Redis, Git, Composer, WP-CLI | ✅ installed by `stack.install` |
+| Database create/delete/list, scoped owner user | ✅ `db.create`/`db.delete`/`db.list`, plus control-plane persistence (`databases` table) and a dashboard "Databases" panel per server — owner password generated server-side, shown once, never stored |
 | Node.js | ⬜ Phase 3 |
 | UFW firewall, Fail2Ban | 🚧 installed with safe defaults; no rule-editing UI |
 | SSH/SFTP management, SSH-key mgmt, port mgmt, root-login controls | ⬜ Phase 2 |
@@ -253,6 +254,7 @@ EXISTS`, applied on every `openDB` call — idempotent, no separate migration to
 | `audit_log` | append-only: seq, timestamp, server, actor, action, detail |
 | `sites` | id, server, domain, system user, docroot, app type, PHP version, status |
 | `backups` | id, server, site, scope, path, size, sha256, status, created_at |
+| `databases` | id, server, name, owner user, status, created_at (owner password is never persisted — see §9/§19) |
 
 No ORM — every query is a small, explicit SQL statement in `store.go`. All secrets
 (session tokens, bootstrap tokens) are stored only as SHA-256 hashes; passwords use
@@ -262,8 +264,9 @@ bcrypt (cost 12); nothing is stored in plaintext.
 
 Full list with request/response shapes in `API.md`. Summary: `/api/v1/auth/*`
 (signup/login/logout/TOTP enroll+verify/MFA challenge/me), `/api/v1/servers*` (CRUD,
-revoke, task dispatch, sites, audit), `/agents/register` (the one unauthenticated
-agent-facing endpoint, secured by the bootstrap token itself), `/healthz`.
+revoke, task dispatch, sites, backups, databases, audit), `/agents/register` (the one
+unauthenticated agent-facing endpoint, secured by the bootstrap token itself),
+`/healthz`.
 
 ## 10. Background jobs
 
@@ -359,7 +362,25 @@ with short-lived certs and immediate revocation, per-app OS-level isolation
 bcrypt + TOTP for dashboard auth, append-only audit log, path-traversal/symlink-escape
 defenses on the file manager (`resolveScopedPath`).
 
-## 19. Backup and restore model
+## 19. Databases
+
+Implemented end to end, following the same dispatch-then-persist-on-success pattern
+sites and backups use: `POST /api/v1/servers/{id}/databases` validates the requested
+name against `capabilities.ValidIdentifier` (the exact pattern the agent itself
+enforces, exported specifically so the control plane can't drift out of sync with it),
+generates a 24-character random owner password server-side, dispatches `db.create`,
+and only after the agent confirms success persists a `databases` row and returns the
+password to the caller exactly once — the same "shown once, never stored" pattern the
+bootstrap-token install command already uses. `GET .../databases` lists persisted
+records (no password field — none is ever stored). `DELETE .../databases/{id}`
+dispatches `db.delete` with the record's own recorded name/owner (never
+caller-supplied) and only then removes the row. Surfaced in the dashboard as a
+"Databases" panel on each server-detail page. Known gap: one database always gets
+exactly one owner user (matching the existing `db.create` capability's model);
+additional/shared database users and MongoDB support remain `NOT_STARTED` — see
+`SERVERAVATAR_PARITY.md` DB-002.
+
+## 20. Backup and restore model
 
 **Backup**: implemented (`backup.run` — local, checksummed tar.gz of DB and/or files,
 persisted as a `backups` row per site).
@@ -368,19 +389,19 @@ control plane created and recorded — the restore is only ever given `archive_p
 `scope`, `db_name`, and `expected_sha256` that come from the stored `backups` row, never
 caller-supplied free-form values. See `OPERATIONS.md` §Backup and restore for the
 operational walkthrough. Cross-server restore (copying a backup to a different agent
-first) remains a Phase 2 gap — see §21.
+first) remains a Phase 2 gap — see §22.
 
-## 20. Monitoring and alerting
+## 21. Monitoring and alerting
 
 Heartbeat-based only: uptime/load/mem%/disk% every connection cycle, surfaced in the
 dashboard's server-detail view. No threshold-based alerting, no email/Slack/Telegram/
 Discord/webhook notifications, no SSL-expiration or backup-failure alerts exist yet —
 all ⬜, scoped to Phase 2 per `product-plan.md` §9.
 
-## 21. Known limitations
+## 22. Known limitations
 
 - Backup restore only works on the same server that created the backup — there is no
-  cross-server restore (transfer-then-restore) yet (see §19).
+  cross-server restore (transfer-then-restore) yet (see §20).
 - No backup scheduling/retention policy — backups are on-demand only.
 - No on-disk agent task journal — a task in flight when the agent process restarts is
   lost, not resumed (see `ARCHITECTURE.md` §4 "As built").
@@ -399,7 +420,7 @@ all ⬜, scoped to Phase 2 per `product-plan.md` §9.
   automation in this session — see `TESTING.md` §Known gaps.
 - No CI pipeline / automated vulnerability scanning configured yet.
 
-## 22. Performance decisions
+## 23. Performance decisions
 
 - SQLite with `SetMaxOpenConns(1)` — deliberately serializes writes; acceptable at
   Phase 1's write volume (server/task/audit events, not request-path traffic), avoids
@@ -416,7 +437,7 @@ all ⬜, scoped to Phase 2 per `product-plan.md` §9.
   `writeDefaultIndex`), so a retried task after a transient failure is safe/cheap
   rather than needing its own separate retry-safety design.
 
-## 23. Test strategy
+## 24. Test strategy
 
 See `TESTING.md` for the full breakdown (what's automated, what was manually verified
 against a real Ubuntu 24.04 host, and why). Summary: `go test ./...` covers
@@ -428,24 +449,24 @@ DNS-backed Let's Encrypt issuance) are documented as manually verified in a real
 container in a prior session, not re-verified by the automated suite, and that
 distinction is called out explicitly rather than glossed over.
 
-## 24. Local development instructions
+## 25. Local development instructions
 
 See `INSTALLATION.md` §Local development.
 
-## 25. Clean Ubuntu installation instructions
+## 26. Clean Ubuntu installation instructions
 
 See `INSTALLATION.md` §Production install on a clean Ubuntu 24.04 VPS.
 
-## 26. Upgrade and rollback procedures
+## 27. Upgrade and rollback procedures
 
 See `OPERATIONS.md` §Upgrade and rollback. Summary of current reality: there is no
-automated upgrade mechanism for either the control plane or the agent yet (§17, §21);
+automated upgrade mechanism for either the control plane or the agent yet (§17, §22);
 upgrading today means rebuilding/redeploying the control-plane binary (data survives in
 the SQLite file/CA dir) and re-running the agent installer with a new `-version` on
 each VPS. This is a documented manual procedure, not a one-click feature, until the
 Phase 1 "agent safe-update mechanism" milestone (`product-plan.md` §6) is built.
 
-## 27. Troubleshooting
+## 28. Troubleshooting
 
 See `OPERATIONS.md` §Troubleshooting for the concrete list, sourced from real bugs
 found and fixed during integration testing (missing IP SANs on the gateway cert,
@@ -454,7 +475,7 @@ assumption, Composer's root-warning-as-version bug, MariaDB's `?`-placeholder
 limitation in `CREATE USER`, IPv6 `nginx -t` failures, `server_names_hash_bucket_size`
 sizing, and two persistence bugs where a successful operation wasn't actually saved).
 
-## 28. Assumptions and design decisions
+## 29. Assumptions and design decisions
 
 - **Centralized control plane over per-server local panel** — see `product-plan.md`
   §1 for the full comparison; chosen for fleet-wide visibility/consistency, accepting
@@ -478,12 +499,12 @@ sizing, and two persistence bugs where a successful operation wasn't actually sa
   argv-only `exec.Command` calls, not by process sandboxing (which remains a
   documented future hardening step — `SECURITY.md` §4).
 - **Backup before restore** — `backup.run` shipped in this codebase before any restore
-  capability; flagged clearly (§19, §21) rather than left as a silent gap, since
+  capability; flagged clearly (§20, §22) rather than left as a silent gap, since
   "backups exist" without "restore works" is a false sense of safety if not documented.
 - **No proprietary Webuzo/ServerAvatar code, branding, or assets** — every protocol,
   UI, and mechanism here is independently designed against open standards (mTLS,
   systemd, ACME/Let's Encrypt, RFC 6238 TOTP).
 
-## 29. Dated change log
+## 30. Dated change log
 
 See [`../CHANGELOG.md`](../CHANGELOG.md).
