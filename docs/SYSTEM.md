@@ -114,6 +114,27 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | Application logs / advanced log viewer | 🚧 `logs.tail` (redacted) exists; no
   filtering/search UI yet |
 
+### Database management
+| Feature | Status |
+|---|---|
+| Create database + least-privilege owner user | ✅ `db.create` — identifier allow-list,
+  `CREATE USER`/`GRANT` scoped to exactly one database, never global |
+| Delete database | ✅ `db.delete` — drops the database and its owner user |
+| Dashboard UI (list/create/delete) | ✅ server-detail "Databases" panel |
+| Control-plane persistence (`databases` table) | ✅ dispatch-then-persist-on-success,
+  same pattern as `sites`/`backups` |
+| Owner password handling | ✅ generated server-side when not supplied (24 random
+  bytes, base64), shown to the caller exactly once in the create response, never
+  stored — the same shown-once-never-persisted pattern as a server's bootstrap
+  install token |
+| MongoDB support | ⬜ not implemented (MariaDB/MySQL only) |
+| Database admin UI (phpMyAdmin-equivalent) | ⬜ not implemented |
+| Database process/query monitoring | ⬜ not implemented |
+| Remote-host access rules / revoke remote access | ⬜ not implemented (grants are
+  always `@'localhost'`; no remote-MySQL-access toggle yet) |
+| Multiple users per database | ⬜ not implemented (one owner user per database
+  today; no additional-grant management) |
+
 ### Git deployment
 All ⬜ — explicitly scoped to Phase 2 (`product-plan.md` §9). No Git deployment,
 webhook push-to-deploy, deploy keys, or rollback exist in this codebase yet.
@@ -253,6 +274,7 @@ EXISTS`, applied on every `openDB` call — idempotent, no separate migration to
 | `audit_log` | append-only: seq, timestamp, server, actor, action, detail |
 | `sites` | id, server, domain, system user, docroot, app type, PHP version, status |
 | `backups` | id, server, site, scope, path, size, sha256, status, created_at |
+| `databases` | id, server, site (optional), name, owner_user, created_at — owner password is never persisted |
 
 No ORM — every query is a small, explicit SQL statement in `store.go`. All secrets
 (session tokens, bootstrap tokens) are stored only as SHA-256 hashes; passwords use
@@ -262,8 +284,9 @@ bcrypt (cost 12); nothing is stored in plaintext.
 
 Full list with request/response shapes in `API.md`. Summary: `/api/v1/auth/*`
 (signup/login/logout/TOTP enroll+verify/MFA challenge/me), `/api/v1/servers*` (CRUD,
-revoke, task dispatch, sites, audit), `/agents/register` (the one unauthenticated
-agent-facing endpoint, secured by the bootstrap token itself), `/healthz`.
+revoke, task dispatch, sites, backups, databases, audit), `/agents/register` (the one
+unauthenticated agent-facing endpoint, secured by the bootstrap token itself),
+`/healthz`.
 
 ## 10. Background jobs
 

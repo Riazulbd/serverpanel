@@ -2,7 +2,7 @@
 
 ## 1. Current automated coverage
 
-`go test ./...` — 61 test functions across two packages, all passing, no `-race`
+`go test ./...` — 69 test functions across two packages, all passing, no `-race`
 failures, `go vet` clean, `gofmt -l` clean:
 
 ```
@@ -15,8 +15,8 @@ go test ./... -race
 
 | Package | Tests | What they cover |
 |---|---|---|
-| `apps/controlplane` | 27 | Auth/session lifecycle (create, MFA-verify, expiry, delete), bcrypt password rules, email normalization/uniqueness, TOTP round-trip/skew/rejection, bootstrap-token single-use/expiry/unknown-token, server create/list/get, revocation (cert-serial blocking + status transitions, including that a stray disconnect can't resurrect a revoked server), heartbeat recording, audit-log append, site create/list, `getSite`'s cross-server scoping, backup create/list/get round trip and its own cross-server scoping, and 6 full HTTP integration tests through `routes()` with `httptest` covering signup→login→protected-route, the full 2FA enroll→logout→login→MFA-challenge→access flow, server create/list/revoke, agent registration with a bad token, the backup endpoints' not-found boundaries, and backup-request validation (bad scope, missing `db_name`, and confirming validation runs before dispatch) |
-| `packages/capabilities` | 34 | Capability dispatch (unknown name rejected, `system.ping` works, nil `Progress` doesn't panic, the registry has a handler for every declared `Cap*` constant), `service.control`'s allow-list boundary (unit, action, and an explicit shell-metacharacter-injection attempt, all rejected before `systemctl` is ever invoked), the file manager's path-traversal and symlink-escape defenses (`resolveScopedPath`), oversized-read/write rejection, refusal to delete the site root itself, a real list+write round trip against a real filesystem, log redaction (token/password query params, `Authorization: Bearer`/`Basic`), `logs.tail`'s input validation, domain-name validation (including injection-shaped inputs), `systemUserForDomain`'s bounding/sanitization, the deterministic php-fpm-pool/socket/vhost path builders, `backup.run`'s scope validation and a real files-backup-and-checksum round trip, and `backup.restore`'s archive-location/checksum validation, a real files backup→corrupt→restore round trip (with a real throwaway system user, verifying both content restoration and pre-restore checkpoint creation), and `extractTarGzSafely`'s rejection of path-traversal entries, absolute-path entries, and oversized archives |
+| `apps/controlplane` | 30 | Auth/session lifecycle (create, MFA-verify, expiry, delete), bcrypt password rules, email normalization/uniqueness, TOTP round-trip/skew/rejection, bootstrap-token single-use/expiry/unknown-token, server create/list/get, revocation (cert-serial blocking + status transitions, including that a stray disconnect can't resurrect a revoked server), heartbeat recording, audit-log append, site create/list, `getSite`'s cross-server scoping, backup create/list/get round trip and its own cross-server scoping, database create/list/get/delete round trip and its own cross-server scoping, and 8 full HTTP integration tests through `routes()` with `httptest` covering signup→login→protected-route, the full 2FA enroll→logout→login→MFA-challenge→access flow, server create/list/revoke, agent registration with a bad token, the backup endpoints' not-found boundaries, backup-request validation (bad scope, missing `db_name`, and confirming validation runs before dispatch), the database endpoints' not-found boundaries, and database-request validation (invalid name/owner, too-short password, and confirming validation runs before dispatch) |
+| `packages/capabilities` | 39 | Capability dispatch (unknown name rejected, `system.ping` works, nil `Progress` doesn't panic, the registry has a handler for every declared `Cap*` constant), `service.control`'s allow-list boundary (unit, action, and an explicit shell-metacharacter-injection attempt, all rejected before `systemctl` is ever invoked), the file manager's path-traversal and symlink-escape defenses (`resolveScopedPath`), oversized-read/write rejection, refusal to delete the site root itself, a real list+write round trip against a real filesystem, log redaction (token/password query params, `Authorization: Bearer`/`Basic`), `logs.tail`'s input validation, domain-name validation (including injection-shaped inputs), `systemUserForDomain`'s bounding/sanitization, the deterministic php-fpm-pool/socket/vhost path builders, `backup.run`'s scope validation and a real files-backup-and-checksum round trip, `backup.restore`'s archive-location/checksum validation, a real files backup→corrupt→restore round trip (with a real throwaway system user, verifying both content restoration and pre-restore checkpoint creation), `extractTarGzSafely`'s rejection of path-traversal entries, absolute-path entries, and oversized archives, and `db.create`/`db.delete`'s input validation (invalid database name, invalid owner user, too-short password — all rejected before a MariaDB connection is ever attempted) |
 
 None of this is mocked where a cheap real implementation was possible: sessions/users/
 servers/audit run against a real temp-file SQLite database with the real schema (not
@@ -31,14 +31,18 @@ stub.
 Capabilities that require real system services this environment can't safely or
 meaningfully fake are **not** exercised by the automated suite:
 `stack.install` (apt/systemd), `app.wordpress_install` (real `wp-cli` + a running
-MariaDB), `ssl.issue_letsencrypt` (real ACME/public DNS), `db.create/delete/list`
-(a running MariaDB), `service.control`'s actual `systemctl` invocation, and the agent's
+MariaDB), `ssl.issue_letsencrypt` (real ACME/public DNS), the actual
+`CREATE DATABASE`/`CREATE USER`/`GRANT`/`DROP` statements inside `db.create/delete/list`
+(a running MariaDB — only their input validation is automated-tested, see §1),
+`service.control`'s actual `systemctl` invocation, and the agent's
 registration/connect/reconnect loop against a live gateway. `backup.run`'s and
 `backup.restore`'s **files** scope are exercised for real (real files, real archive,
 real throwaway system user, real `chown`); their **db**/**full** scope (real
 `mysqldump`/`mysql` against a running MariaDB) is not — this environment doesn't run
 MariaDB, so those paths remain in the same manually-verified-in-a-prior-session bucket
-as the rest of this list.
+as the rest of this list. The `databases` table's control-plane persistence, cross-server
+scoping, and dashboard UI are fully automated-tested (see §1) — only the underlying
+MariaDB statements are not.
 
 These were **manually verified against a real Ubuntu 24.04 host in a prior session**
 (see `SYSTEM.md` §27 / the bug list below) — real `apt-get` installs, a manually
@@ -101,13 +105,16 @@ independent proof beyond) the prior manual pass having been genuine.
 
 ## 5. Known gaps / recommended next testing investment, in priority order
 
-1. **Backup restore is unit- and integration-tested (`packages/capabilities/backup_test.go`,
+1. **Backup restore and database management are unit- and integration-tested
+   (`packages/capabilities/backup_test.go`, `packages/capabilities/db_test.go`,
    `apps/controlplane/store_test.go`, `apps/controlplane/http_test.go`) but not yet
    exercised against a real, systemd-managed MariaDB + real site directory on an actual
    Ubuntu VPS** — the automated suite covers path/checksum validation, tar-extraction
-   safety, and a full files-scope restore round trip against real files and a real
-   throwaway system user; it does not cover a real `mysqldump`/`mysql` round trip
-   (this environment's MariaDB, if any, is not exercised by these tests) or
+   safety, database-identifier/password validation, a full files-scope restore round
+   trip against real files and a real throwaway system user, and the databases table's
+   full control-plane persistence/scoping/UI round trip; it does not cover a real
+   `mysqldump`/`mysql` round trip or a real `CREATE DATABASE`/`CREATE USER`/`GRANT`
+   round trip (this environment has no MariaDB to exercise either against), or
    restore-to-a-different-server (not yet implemented — see `SYSTEM.md` §21).
 2. **Scripted real-VPS/container integration tests** — turn the manual pass in §2 into
    a repeatable script (a disposable Ubuntu 24.04 Docker container or cloud-init VM),

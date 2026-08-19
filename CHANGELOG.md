@@ -2,6 +2,44 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-19 — Database management: control-plane persistence and dashboard UI
+
+- **Closed the gap the parity matrix flagged as the recommended next iteration**
+  (`docs/SERVERAVATAR_PARITY.md` DB-001): `db.create`/`db.delete` were previously only
+  dispatchable through the generic task-dispatch endpoint, with no durable record and
+  no dashboard UI, even though the underlying MariaDB operations (identifier allow-list,
+  single-database-scoped grants, Unix-socket root auth) already existed. This applies
+  the exact dispatch-then-persist-on-success pattern backups just got (see the
+  2026-08-17 entry) to databases.
+- `handleDBCreate` (`packages/capabilities/db.go`) now returns a JSON detail
+  (`{"name","owner_user"}`) instead of a formatted sentence, so the control plane can
+  parse and persist it reliably — mirroring `backup.run`'s JSON result.
+- Added a `databases` table (`apps/controlplane/db.go`) and store methods
+  (`createDatabase`/`listDatabases`/`getDatabase`/`deleteDatabase`, each scoped by
+  server ID the same way `getSite`/`getBackup` are), a new
+  `apps/controlplane/databases.go` with three endpoints
+  (`GET`/`POST /api/v1/servers/{id}/databases`,
+  `DELETE /api/v1/servers/{id}/databases/{databaseId}`), and a "Databases" panel on the
+  server-detail dashboard page (create modal with optional owner user/password, a
+  databases table, delete button with a confirmation dialog).
+- The owner password is generated server-side (24 random bytes, base64) when the
+  caller doesn't supply one, and is **never persisted** — it's returned exactly once
+  in the create response, the same shown-once-never-stored pattern already used for a
+  server's bootstrap install token, rather than storing a reusable plaintext database
+  credential in SQLite.
+- Added 5 new capability-layer tests (`packages/capabilities/db_test.go`:
+  database-name/owner-user/password validation for both `db.create` and `db.delete`,
+  all of which run without a MariaDB connection since validation happens before one is
+  attempted) and 5 new control-plane tests (`TestDatabaseCreateListDeleteRoundTrip`,
+  cross-server scoping, `TestDatabaseEndpointsRequireARealRecord`,
+  `TestCreateDatabaseRejectsInvalidInput` covering validation-before-dispatch). Full
+  suite: 69 test functions (was 61), `go vet`/`gofmt` clean.
+- Updated `SYSTEM.md`, `API.md`, `TESTING.md`, and `SERVERAVATAR_PARITY.md` (DB-001) to
+  reflect the new persistence/UI layer. The underlying `CREATE DATABASE`/`CREATE USER`/
+  `GRANT`/`DROP` statements remain `BLOCKED_EXTERNAL` for real-MariaDB verification in
+  this environment (no MariaDB socket here), same as before — only the new persistence/
+  UI/validation layer added by this change is what's newly automated-tested.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the
