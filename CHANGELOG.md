@@ -2,6 +2,43 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-19 — Database management: control-plane persistence and dashboard UI
+
+- **Closed the flagged DB-001/DB-005 gap**: the `db.create`/`db.delete`/`db.list`
+  agent capabilities existed but had no control-plane persistence, dedicated API, or
+  dashboard UI — a database was invisible to the panel the moment the dispatch
+  response was gone. Added a `databases` table (`id`, `server_id`, `name`,
+  `owner_user`, `status`, `created_at`) and `store.go` methods
+  (`createDBRecord`/`listDBRecords`/`getDBRecord`/`deleteDBRecord`, each scoped by
+  server ID like `getSite`/`getBackup` already are).
+- Added `apps/controlplane/databases.go`: `handleCreateDatabase` dispatches
+  `db.create` with a fresh 24-byte random owner password (generated server-side,
+  never accepted from the client, never persisted — returned to the caller exactly
+  once in the response) and, only on agent success, persists the record;
+  `handleListDatabases` lists a server's databases; `handleDeleteDatabase` dispatches
+  `db.delete` using the name/owner_user read from the stored record (never
+  caller-supplied) and, only on success, removes it. Database/owner-user names are
+  re-validated against the same identifier allow-list the agent uses, independently,
+  before ever dispatching.
+- New routes: `GET`/`POST /api/v1/servers/{id}/databases`,
+  `DELETE /api/v1/servers/{id}/databases/{dbId}`.
+- Added a "Databases" panel to the server-detail dashboard view: create modal (name +
+  optional owner user), a one-time "copy this password now" confirmation after
+  creation, a databases table, and a delete button with a destructive-action
+  confirmation dialog — mirroring the Sites/Backups panels already there.
+- Tests: `TestDatabaseCreateListGetDeleteRoundTrip` (store layer, including
+  cross-server scoping), `TestCreateDatabaseRejectsInvalidNameAndRequiresAgent` (HTTP
+  layer: invalid name/owner_user rejected before dispatch, no-agent-connected `502`
+  with no orphan record persisted, empty list after a failed create, 404 on deleting
+  an unknown id). Real `CREATE DATABASE`/`CREATE USER` execution against a live
+  MariaDB remains unverified in this environment (no MariaDB here), same
+  `BLOCKED_EXTERNAL` class as the existing backup db/full-scope gap — the
+  capability layer itself was already manually verified against real MariaDB in a
+  prior session.
+- Updated `docs/API.md`, `docs/SYSTEM.md`, and `docs/SERVERAVATAR_PARITY.md`
+  (DB-001 moved to `PARTIAL` with its persistence/API/UI layer `COMPLETE` and tested;
+  DB-005 folded into DB-001).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

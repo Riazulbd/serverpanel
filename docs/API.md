@@ -46,6 +46,9 @@ protected route; there is no route that skips it by omission.
 | `GET` | `/api/v1/servers/{id}/sites/{siteId}/backups` | List backups for a site, newest first |
 | `POST` | `/api/v1/servers/{id}/sites/{siteId}/backups` | Dispatch `backup.run` and persist the resulting backup record |
 | `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a previously recorded backup |
+| `GET` | `/api/v1/servers/{id}/databases` | List databases on a server, newest first |
+| `POST` | `/api/v1/servers/{id}/databases` | Dispatch `db.create` and persist the resulting database record |
+| `DELETE` | `/api/v1/servers/{id}/databases/{dbId}` | Dispatch `db.delete` and remove the database record |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -136,6 +139,31 @@ pre-restore safety backups taken automatically before anything was overwritten,
 isn't connected; `422` if `backup.restore` itself failed on the agent (the agent-side
 error message explains why, and any checkpoint already taken is named in it so it's
 never a silent loss).
+
+### `POST /api/v1/servers/{id}/databases`
+```json
+{"name": "wp_example", "owner_user": "wp_example"}
+```
+`name` is required and must match `^[a-z][a-z0-9_]{0,30}$`; `owner_user` is optional
+and defaults to `name`, validated against the same pattern. A 24-byte random password
+is generated server-side (never accepted from the client), dispatched to `db.create`,
+and — only on the agent reporting success — a `databases` row is persisted (without the
+password: it is never stored anywhere on the control plane). → `201` with the
+`dbRecord` JSON plus `owner_password` (shown exactly once; the client must copy it
+immediately). `400` for an invalid/missing `name` or `owner_user`; `502` if the agent
+isn't connected; `422` if `db.create` itself failed on the agent.
+
+### `GET /api/v1/servers/{id}/databases`
+→ `200` with an array of `dbRecord` (`ID`, `ServerID`, `Name`, `OwnerUser`, `Status`,
+`CreatedAt` — no password field), newest first.
+
+### `DELETE /api/v1/servers/{id}/databases/{dbId}`
+No request body — the database's own recorded `name` and `owner_user` are read from
+the `databases` table and passed to `db.delete` verbatim; a caller can only ever drop
+a database that was actually created and recorded under that server. Only on the agent
+reporting success is the `databases` row removed. → `204` on success. `404` if the
+database doesn't exist on that server; `502` if the agent isn't connected; `422` if
+`db.delete` itself failed on the agent.
 
 ### `POST /agents/register`
 ```json
