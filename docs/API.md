@@ -46,6 +46,9 @@ protected route; there is no route that skips it by omission.
 | `GET` | `/api/v1/servers/{id}/sites/{siteId}/backups` | List backups for a site, newest first |
 | `POST` | `/api/v1/servers/{id}/sites/{siteId}/backups` | Dispatch `backup.run` and persist the resulting backup record |
 | `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a previously recorded backup |
+| `GET` | `/api/v1/servers/{id}/sites/{siteId}/databases` | List databases for a site, newest first |
+| `POST` | `/api/v1/servers/{id}/sites/{siteId}/databases` | Dispatch `db.create` and persist the resulting database record |
+| `DELETE` | `/api/v1/servers/{id}/databases/{dbId}` | Dispatch `db.delete` for a previously recorded database, then remove its record |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -136,6 +139,35 @@ pre-restore safety backups taken automatically before anything was overwritten,
 isn't connected; `422` if `backup.restore` itself failed on the agent (the agent-side
 error message explains why, and any checkpoint already taken is named in it so it's
 never a silent loss).
+
+### `POST /api/v1/servers/{id}/sites/{siteId}/databases`
+```json
+{"name": "wp_example", "owner_user": "wp_example_usr"}
+```
+`owner_user` is optional and defaults to `name`. Both must match the identifier
+allow-list `^[a-z][a-z0-9_]{0,30}$` (checked here *and* independently by the agent —
+see `SYSTEM.md` §12) — validated before dispatch, so an invalid name returns `400`
+without ever reaching the agent. The owner password is never accepted from the
+caller: it is generated server-side (24 random bytes, base64url) and dispatched to
+`db.create` directly. Only on the agent reporting success is a `databases` row
+persisted — the password itself is never part of that row or written to disk by the
+control plane anywhere; it exists only in this one response. → `201` with
+`{"database": {...databaseRecord}, "owner_password": "<shown once>"}`. `404` if the
+site doesn't exist on that server; `400` for an invalid/missing name or owner_user;
+`502` if the agent isn't connected; `422` if `db.create` itself failed on the agent.
+
+### `GET /api/v1/servers/{id}/sites/{siteId}/databases`
+→ `200` with an array of `databaseRecord` (`ID`, `ServerID`, `SiteID`, `Name`,
+`OwnerUser`, `Status`, `CreatedAt` — note: no password field, ever), newest first.
+`404` if the site doesn't exist on that server.
+
+### `DELETE /api/v1/servers/{id}/databases/{dbId}`
+No request body — the database's own recorded `name`/`owner_user` are read from the
+`databases` table and passed to `db.delete` verbatim; a caller can only ever delete a
+database that was actually created and recorded through this control plane, never an
+arbitrary database name. Only on the agent reporting success is the record removed. →
+`200 {"status": "deleted"}`. `404` if the database doesn't exist on that server; `502`
+if the agent isn't connected; `422` if `db.delete` itself failed on the agent.
 
 ### `POST /agents/register`
 ```json

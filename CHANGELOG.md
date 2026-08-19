@@ -2,6 +2,39 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-19 — Database control-plane persistence and dashboard UI
+
+- **Closed DB-001's flagged "known differences" gap** (`docs/SERVERAVATAR_PARITY.md`
+  had called this out as "a good candidate for the next iteration" after `BAK-001`
+  established the same pattern): a `db.create`/`db.delete` success on the agent is now
+  persisted as a `databases` row (`server_id`, `site_id`, `name`, `owner_user`,
+  `status`, `created_at`) instead of only ever existing as an ephemeral task result.
+- New endpoints: `GET`/`POST /api/v1/servers/{id}/sites/{siteId}/databases`,
+  `DELETE /api/v1/servers/{id}/databases/{dbId}` (`apps/controlplane/databases.go`),
+  following the same dispatch-then-persist-on-success / read-record-then-dispatch
+  patterns `handleCreateBackup`/`handleRestoreBackup` established — a database row is
+  never written speculatively, and delete only ever acts on a `name`/`owner_user` this
+  control plane itself recorded, never on caller-supplied free-form values.
+- **Owner passwords are generated server-side** (24 random bytes, base64url) and
+  returned to the caller exactly once in the create response; they are never accepted
+  from the client and never persisted anywhere by the control plane — the `databases`
+  table and every list/get response have no password field at all.
+- Exported `packages/capabilities.IdentifierRe` (was an unexported `identifierRe`
+  shared by `db.go`/`backup.go`) so the control-plane API layer can reject a malformed
+  database/owner name with a fast `400` before ever dispatching to a possibly-
+  disconnected agent — the same defense-in-depth validation `handleCreateBackup`
+  already does for its `scope` field.
+- Added a "Databases" panel to the site-detail dashboard view (create-database modal,
+  databases table, delete with confirmation, one-time password display on create),
+  mirroring the "Backups" panel's structure.
+- Added 3 new control-plane tests (database create/list/get/delete round trip and
+  cross-server scoping in `store_test.go`; not-found boundaries and
+  identifier-validation-before-dispatch in `http_test.go`). Full suite: 64 test
+  functions, `go vet`/`gofmt` clean.
+- Updated `SYSTEM.md`, `API.md`, `TESTING.md`, and `SERVERAVATAR_PARITY.md` (folded the
+  former `DB-005` summary row into `DB-001`'s detail block, since it was always the
+  same feature's persistence layer, not a separate one).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

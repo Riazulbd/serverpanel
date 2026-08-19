@@ -114,6 +114,23 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | Application logs / advanced log viewer | 🚧 `logs.tail` (redacted) exists; no
   filtering/search UI yet |
 
+### Database management
+| Feature | Status |
+|---|---|
+| Create/delete/list database with a scoped owner user | ✅ `db.create`/`db.delete`/
+  `db.list` — identifier allow-list, grants scoped to exactly one database |
+| Control-plane persistence + dashboard UI | ✅ a `databases` row is only ever written
+  after the agent confirms `db.create` succeeded (never speculatively); site-detail
+  "Databases" panel to create/list/delete, mirroring the Backups panel's pattern |
+| Owner password handling | ✅ generated server-side per request (24 random bytes),
+  shown to the caller exactly once in the create response, never persisted anywhere
+  by the control plane — the same "caller sees a secret once, it is never stored"
+  posture as bootstrap tokens (§21 calls out the one place this differs today:
+  WordPress admin passwords, which remain caller-supplied) |
+| MongoDB support | ⬜ not implemented |
+| phpMyAdmin / DB admin UI integration | ⬜ not implemented |
+| Database process/query monitoring | ⬜ not implemented |
+
 ### Git deployment
 All ⬜ — explicitly scoped to Phase 2 (`product-plan.md` §9). No Git deployment,
 webhook push-to-deploy, deploy keys, or rollback exist in this codebase yet.
@@ -253,6 +270,7 @@ EXISTS`, applied on every `openDB` call — idempotent, no separate migration to
 | `audit_log` | append-only: seq, timestamp, server, actor, action, detail |
 | `sites` | id, server, domain, system user, docroot, app type, PHP version, status |
 | `backups` | id, server, site, scope, path, size, sha256, status, created_at |
+| `databases` | id, server, site, name, owner user, status, created_at (never the owner password — see "Database management" above) |
 
 No ORM — every query is a small, explicit SQL statement in `store.go`. All secrets
 (session tokens, bootstrap tokens) are stored only as SHA-256 hashes; passwords use
@@ -262,7 +280,7 @@ bcrypt (cost 12); nothing is stored in plaintext.
 
 Full list with request/response shapes in `API.md`. Summary: `/api/v1/auth/*`
 (signup/login/logout/TOTP enroll+verify/MFA challenge/me), `/api/v1/servers*` (CRUD,
-revoke, task dispatch, sites, audit), `/agents/register` (the one unauthenticated
+revoke, task dispatch, sites, backups, databases, audit), `/agents/register` (the one unauthenticated
 agent-facing endpoint, secured by the bootstrap token itself), `/healthz`.
 
 ## 10. Background jobs
