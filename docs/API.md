@@ -39,6 +39,7 @@ protected route; there is no route that skips it by omission.
 | `POST` | `/api/v1/servers` | Create a server record + one-time bootstrap token |
 | `GET` | `/api/v1/servers` | List all servers |
 | `GET` | `/api/v1/servers/{id}` | Get one server |
+| `GET` | `/api/v1/servers/{id}/metrics` | Heartbeat history (CPU load/mem%/disk%) for charting |
 | `POST` | `/api/v1/servers/{id}/revoke` | Revoke the server's cert, force-disconnect, mark disconnected |
 | `POST` | `/api/v1/servers/{id}/tasks` | Dispatch an arbitrary allow-listed capability (see §3) |
 | `GET` | `/api/v1/servers/{id}/sites` | List sites on a server |
@@ -85,6 +86,14 @@ session to MFA-verified.
 → `201 {"server_id": "...", "install_command": "curl ... | sudo bash -s -- ...", "token_expires_in_s": 900}`.
 `install_command` embeds the plaintext bootstrap token — shown exactly once; it is
 never retrievable again (the store only ever holds its hash).
+
+### `GET /api/v1/servers/{id}/metrics`
+Query param `since` (optional, default `24h`): a Go duration string (`1h`, `24h`,
+`168h`, ...), clamped server-side to the 7-day retention window regardless of what's
+requested. → `200` with an array of samples oldest-first, each
+`{"UptimeSecs", "LoadAvg1", "MemUsedPct", "DiskUsedPct", "At"}` — empty (`[]`, not an
+error) if the server hasn't heartbeated yet. `404` if the server doesn't exist. `400`
+for a malformed/non-positive `since`.
 
 ### `POST /api/v1/servers/{id}/tasks`
 ```json

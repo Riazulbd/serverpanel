@@ -54,7 +54,7 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | Secure agent install/registration | ✅ bootstrap token → mTLS cert exchange |
 | Agent identity, cert rotation, revocation | 🚧 issuance + revocation done; no
   auto-renewal before expiry yet (see `SECURITY.md` §2) |
-| Server health monitoring | ✅ heartbeat: uptime, load, mem%, disk% |
+| Server health monitoring | ✅ heartbeat: uptime, load, mem%, disk%, latest snapshot + 7-day history/sparklines |
 | Server groups/tags/metadata | ✅ `group`, `tags[]` on server records |
 | Background job queue | ⬜ task dispatch is synchronous request/response today,
   not a durable queue (see `ARCHITECTURE.md` §1 "As built") |
@@ -253,6 +253,7 @@ EXISTS`, applied on every `openDB` call — idempotent, no separate migration to
 | `audit_log` | append-only: seq, timestamp, server, actor, action, detail |
 | `sites` | id, server, domain, system user, docroot, app type, PHP version, status |
 | `backups` | id, server, site, scope, path, size, sha256, status, created_at |
+| `server_metrics` | one row per heartbeat: server, timestamp, uptime, load, mem%, disk% — pruned to 7 days per server on every insert (see §20) |
 
 No ORM — every query is a small, explicit SQL statement in `store.go`. All secrets
 (session tokens, bootstrap tokens) are stored only as SHA-256 hashes; passwords use
@@ -372,10 +373,24 @@ first) remains a Phase 2 gap — see §21.
 
 ## 20. Monitoring and alerting
 
-Heartbeat-based only: uptime/load/mem%/disk% every connection cycle, surfaced in the
-dashboard's server-detail view. No threshold-based alerting, no email/Slack/Telegram/
-Discord/webhook notifications, no SSL-expiration or backup-failure alerts exist yet —
-all ⬜, scoped to Phase 2 per `product-plan.md` §9.
+Heartbeat-based: uptime/load/mem%/disk% every connection cycle (30s), surfaced two ways:
+
+- **Current snapshot** — `servers.heartbeat_json`, the single most recent reading
+  (`store.recordHeartbeat` overwrites it in place), shown in the server-detail stat grid.
+- **History** — every heartbeat is *also* appended to a `server_metrics` table
+  (`store.go`), queryable via `GET /api/v1/servers/{id}/metrics?since=<duration>` and
+  rendered as inline-SVG sparklines (load/mem%/disk%) in the dashboard's server-detail
+  "History" section, with a 1h/6h/24h/7d range selector. Retention is bounded: on every
+  insert, `recordHeartbeat` deletes that server's rows older than `metricsRetention`
+  (7 days) — no unbounded growth, no separate cleanup job needed. At the 30s heartbeat
+  interval that's ~20k rows/server at steady state, trivial for SQLite; downsampling
+  isn't needed at this volume/window and hasn't been added.
+
+Still missing: network I/O and disk I/O aren't sampled (the agent doesn't collect them
+yet — `metrics.go` only has load/mem/disk-capacity), no threshold-based alerting, no
+email/Slack/Telegram/Discord/webhook notifications, no SSL-expiration or backup-failure
+alerts. All ⬜, scoped to Phase 2 per `product-plan.md` §9 and tracked as SRV-008 in
+`SERVERAVATAR_PARITY.md`.
 
 ## 21. Known limitations
 

@@ -297,3 +297,44 @@ func TestBackupCreateListGetRoundTrip(t *testing.T) {
 		t.Fatal("expected getBackup to refuse a backup ID under the wrong server")
 	}
 }
+
+func TestRecordHeartbeatPersistsHistoryAndPrunesRetention(t *testing.T) {
+	st := newTestStore(t)
+	serverID, _, err := st.createServer("web-9", "", nil, time.Hour, "admin@example.com")
+	if err != nil {
+		t.Fatalf("createServer: %v", err)
+	}
+
+	now := time.Now().UTC()
+	// A sample inside the retention window and one older than it.
+	st.recordHeartbeat(serverID, heartbeatSnapshot{
+		UptimeSecs: 100, LoadAvg1: 0.5, MemUsedPct: 40, DiskUsedPct: 20,
+		At: now.Add(-metricsRetention - time.Hour), // outside window relative to itself...
+	})
+	// ...but recordHeartbeat prunes relative to *this* sample's own At, so
+	// seed a second, more recent sample whose prune cutoff leaves the old
+	// one out of range, matching how consecutive real heartbeats behave.
+	st.recordHeartbeat(serverID, heartbeatSnapshot{
+		UptimeSecs: 200, LoadAvg1: 1.5, MemUsedPct: 55, DiskUsedPct: 25, At: now,
+	})
+
+	history := st.metricsHistory(serverID, now.Add(-24*time.Hour))
+	if len(history) != 1 {
+		t.Fatalf("metricsHistory = %d samples, want 1 (the stale one should have been pruned): %+v", len(history), history)
+	}
+	if history[0].LoadAvg1 != 1.5 || history[0].MemUsedPct != 55 || history[0].DiskUsedPct != 25 {
+		t.Fatalf("unexpected surviving sample: %+v", history[0])
+	}
+
+	// A different server's history must never leak into this one's.
+	otherServer, _, _ := st.createServer("web-10", "", nil, time.Hour, "admin@example.com")
+	st.recordHeartbeat(otherServer, heartbeatSnapshot{LoadAvg1: 9, At: now})
+	if history := st.metricsHistory(serverID, now.Add(-24*time.Hour)); len(history) != 1 {
+		t.Fatalf("metricsHistory leaked another server's sample: %+v", history)
+	}
+
+	// since filters out samples before the requested window.
+	if history := st.metricsHistory(serverID, now.Add(time.Hour)); len(history) != 0 {
+		t.Fatalf("metricsHistory(since=now+1h) = %+v, want none", history)
+	}
+}

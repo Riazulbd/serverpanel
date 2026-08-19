@@ -150,4 +150,20 @@ CREATE TABLE IF NOT EXISTS backups (
 	status     TEXT NOT NULL,
 	created_at TEXT NOT NULL
 );
+
+-- One row per heartbeat, so the dashboard can render CPU-load/memory/disk
+-- history instead of only ever showing the latest snapshot (servers.heartbeat_json).
+-- Retention is enforced in code (store.recordHeartbeat prunes anything older
+-- than metricsRetention for the reporting server on every insert) rather than
+-- here, since SQLite has no built-in TTL/expiry mechanism.
+CREATE TABLE IF NOT EXISTS server_metrics (
+	seq           INTEGER PRIMARY KEY AUTOINCREMENT,
+	server_id     TEXT NOT NULL REFERENCES servers(id),
+	at            TEXT NOT NULL,
+	uptime_secs   INTEGER NOT NULL DEFAULT 0,
+	load_avg1     REAL NOT NULL DEFAULT 0,
+	mem_used_pct  REAL NOT NULL DEFAULT 0,
+	disk_used_pct REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_server_metrics_server_at ON server_metrics(server_id, at);
 `

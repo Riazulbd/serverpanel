@@ -221,10 +221,50 @@ func (s *store) setAgentVersion(serverID, version string) {
 	s.db.Exec(`UPDATE servers SET agent_version = ? WHERE id = ?`, version, serverID)
 }
 
+// metricsRetention bounds how long per-heartbeat history is kept. At the
+// agent's 30s heartbeat interval this is ~20k rows/server at steady state —
+// trivial for SQLite — while still giving a useful week-long CPU/mem/disk
+// trend instead of unbounded growth (task-brief §25/86: "efficient
+// retention/downsampling", "do not keep unlimited raw ... logs").
+const metricsRetention = 7 * 24 * time.Hour
+
 func (s *store) recordHeartbeat(serverID string, hb heartbeatSnapshot) {
 	hbJSON, _ := json.Marshal(hb)
 	s.db.Exec(`UPDATE servers SET heartbeat_json = ?, last_seen = ? WHERE id = ?`,
 		string(hbJSON), hb.At.Format(time.RFC3339Nano), serverID)
+
+	atStr := hb.At.Format(time.RFC3339Nano)
+	s.db.Exec(`INSERT INTO server_metrics (server_id, at, uptime_secs, load_avg1, mem_used_pct, disk_used_pct)
+	           VALUES (?, ?, ?, ?, ?, ?)`,
+		serverID, atStr, hb.UptimeSecs, hb.LoadAvg1, hb.MemUsedPct, hb.DiskUsedPct)
+
+	cutoff := hb.At.Add(-metricsRetention).Format(time.RFC3339Nano)
+	s.db.Exec(`DELETE FROM server_metrics WHERE server_id = ? AND at < ?`, serverID, cutoff)
+}
+
+// metricsHistory returns this server's heartbeat samples at or after since,
+// oldest first (ready to plot left-to-right).
+func (s *store) metricsHistory(serverID string, since time.Time) []heartbeatSnapshot {
+	rows, err := s.db.Query(
+		`SELECT at, uptime_secs, load_avg1, mem_used_pct, disk_used_pct
+		 FROM server_metrics WHERE server_id = ? AND at >= ? ORDER BY at ASC`,
+		serverID, since.Format(time.RFC3339Nano))
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var out []heartbeatSnapshot
+	for rows.Next() {
+		var atStr string
+		var hb heartbeatSnapshot
+		if err := rows.Scan(&atStr, &hb.UptimeSecs, &hb.LoadAvg1, &hb.MemUsedPct, &hb.DiskUsedPct); err != nil {
+			continue
+		}
+		hb.At, _ = time.Parse(time.RFC3339Nano, atStr)
+		out = append(out, hb)
+	}
+	return out
 }
 
 func (s *store) get(serverID string) (*serverRecord, bool) {

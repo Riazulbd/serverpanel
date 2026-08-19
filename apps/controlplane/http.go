@@ -49,6 +49,7 @@ func (a *apiServer) routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/servers", a.requireAuth(a.handleCreateServer))
 	mux.HandleFunc("GET /api/v1/servers", a.requireAuth(a.handleListServers))
 	mux.HandleFunc("GET /api/v1/servers/{id}", a.requireAuth(a.handleGetServer))
+	mux.HandleFunc("GET /api/v1/servers/{id}/metrics", a.requireAuth(a.handleServerMetrics))
 	mux.HandleFunc("POST /api/v1/servers/{id}/revoke", a.requireAuth(a.handleRevokeServer))
 	mux.HandleFunc("POST /api/v1/servers/{id}/tasks", a.requireAuth(a.handleDispatchTask))
 	mux.HandleFunc("GET /api/v1/servers/{id}/sites", a.requireAuth(a.handleListSites))
@@ -159,6 +160,33 @@ func (a *apiServer) handleGetServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, rec)
+}
+
+// handleServerMetrics returns heartbeat history for CPU-load/memory/disk
+// trend charts. ?since accepts a Go duration string (e.g. "1h", "24h",
+// "168h"); it's clamped to metricsRetention so a client can't force an
+// unbounded full-table scan by asking for, say, "since=87600h".
+func (a *apiServer) handleServerMetrics(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, ok := a.store.get(id); !ok {
+		writeErr(w, http.StatusNotFound, "server not found")
+		return
+	}
+
+	window := 24 * time.Hour
+	if raw := r.URL.Query().Get("since"); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil || d <= 0 {
+			writeErr(w, http.StatusBadRequest, "since must be a positive duration, e.g. 1h, 24h, 168h")
+			return
+		}
+		window = d
+	}
+	if window > metricsRetention {
+		window = metricsRetention
+	}
+
+	writeJSON(w, http.StatusOK, a.store.metricsHistory(id, time.Now().UTC().Add(-window)))
 }
 
 func (a *apiServer) handleRevokeServer(w http.ResponseWriter, r *http.Request) {

@@ -163,6 +163,25 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Known differences**: same-server restore only — there is no capability to restore a backup onto a *different* server (that needs a transfer step first).
 - **Reason**: cross-server restore is coupled to cross-server migration/cloning, both explicitly Phase 2 (`product-plan.md` §9); tracked as a follow-up, not silently dropped.
 
+### SRV-008 — Historical monitoring (CPU/RAM/disk graphs)
+- **Category**: Server Management
+- **Documentation page**: Server Management → "Server Load Monitor" / "Server Health Monitor"
+- **Short description**: Track a server's CPU load, memory, and disk usage over time and let the user see the trend, not just the current number.
+- **Expected behavior**: every heartbeat is retained (not just overwritten as "latest"), queryable over a time window, and rendered as a chart.
+- **Our implementation**: `store.recordHeartbeat` now does two things on every 30s heartbeat: overwrites `servers.heartbeat_json` (unchanged, for the current-snapshot stat grid) *and* inserts a row into a new `server_metrics` table, then deletes that server's own rows older than `metricsRetention` (7 days) in the same call — retention enforced inline, no separate cleanup job. The dashboard's server-detail "History" section fetches `GET /api/v1/servers/{id}/metrics?since=<duration>` and renders load/mem%/disk% as three inline-SVG sparklines (`sparklineSvg` in `web/index.html`) with a 1h/6h/24h/7d range selector — no charting library, no external request.
+- **Frontend**: server-detail view, "History" section (`apps/controlplane/web/index.html`).
+- **Backend service**: `store.recordHeartbeat` / `store.metricsHistory` (`apps/controlplane/store.go`).
+- **API endpoint(s)**: `GET /api/v1/servers/{id}/metrics?since=<duration>` (`apps/controlplane/http.go`).
+- **Agent command**: none new — reuses the existing `Heartbeat` message (`packages/proto`); the agent doesn't need to change to report history, since the control plane is what decides to retain it.
+- **DB tables**: `server_metrics` (new; `seq`, `server_id`, `at`, `uptime_secs`, `load_avg1`, `mem_used_pct`, `disk_used_pct`, indexed on `(server_id, at)`).
+- **Required permission**: authenticated session (same `requireAuth` as every other `/api/v1/servers/*` route); `since` is clamped server-side to the retention window so a caller can't force an unbounded table scan.
+- **Security considerations**: no new attack surface — the endpoint is read-only, scoped to a server ID the caller must already be able to see via `GET /api/v1/servers`, and `since` is validated as a bounded `time.Duration` (malformed input is a `400`, not silently coerced).
+- **Test coverage**: `apps/controlplane/store_test.go` (`TestRecordHeartbeatPersistsHistoryAndPrunesRetention` — history persists, stale rows are pruned relative to each heartbeat's own timestamp, no cross-server leakage, `since` filtering), `apps/controlplane/http_test.go` (`TestServerMetricsEndpoint` — unknown server → 404, no heartbeats yet → empty array not an error, a real sample round-trips through the API, malformed `since` → 400).
+- **Current status**: `PARTIAL`
+- **Completion date**: n/a (see Known differences — the doc-page capability is broader than what's implemented)
+- **Known differences**: no network I/O or disk I/O metrics (the agent's `metrics.go` only collects load/mem/disk-*capacity*, not throughput — collecting those would be a `metrics.go` change, not just a control-plane one); no alerting/thresholds/notifications on any of this data (that's the separate, still-`NOT_STARTED` alerting item folded into this row per the doc inventory); no downsampling (unnecessary at the current 30s-interval/7-day-window data volume — noted here so a future session doesn't assume it's missing by oversight).
+- **Reason**: scoped to close the highest-priority `NOT_STARTED`/`PARTIAL` gap in the "monitoring" priority tier (task-brief §99 tier 10) in one session; network/disk I/O and alerting are separate, larger pieces of work tracked as follow-ups rather than silently bundled in as "done."
+
 ### ACC-001 — Authentication, 2FA, session management
 - **Category**: Account Management
 - **Documentation page**: Account Management → "Update Account Info"
@@ -232,7 +251,6 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | SRV-005 | Cron job management | `NOT_STARTED` | |
 | SRV-006 | Supervisor/PM2 worker management | `NOT_STARTED` | |
 | SRV-007 | Process list / kill | `NOT_STARTED` | |
-| SRV-008 | Historical monitoring (CPU/RAM/disk/network graphs, alerts) | `PARTIAL` | Heartbeat carries current uptime/load/mem%/disk%; no history retention or alerting yet |
 | SRV-009 | Disk cleaner | `NOT_STARTED` | |
 | SRV-010 | Apache / OpenLiteSpeed stack adapters | `NOT_STARTED` | nginx-only today |
 | SRV-011 | Node.js runtime support | `NOT_STARTED` | |
@@ -296,8 +314,8 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | Status | Count (detailed entries) | Count (summary-table rows) |
 |---|---|---|
 | `COMPLETE` | 3 (SRV-001, BAK-002, ACC-001) | 1 (PROV-006) |
-| `PARTIAL` | 3 (SRV-002, APP-001, APP-002, DB-001, BAK-001 — 5 total, see note) | 6 |
-| `NOT_STARTED` | 0 | ~55 |
+| `PARTIAL` | 6 (SRV-002, APP-001, APP-002, DB-001, BAK-001, SRV-008 — see note on BAK-001) | 5 |
+| `NOT_STARTED` | 0 | ~54 |
 | `BLOCKED_EXTERNAL` | 0 (sub-scoped within BAK-001/BAK-002's db/full-scope MariaDB verification) | 0 |
 | `INTENTIONALLY_NOT_APPLICABLE` | 0 | 1 |
 
@@ -359,3 +377,10 @@ establish the tracking process and close the single highest-priority gap
   BAK-001/BAK-002 reflecting this session's backup-restore implementation. ~60
   capabilities enumerated overall (detailed + summary), the large majority honestly
   `NOT_STARTED`.
+- **2026-08-19**: picked the highest-priority "monitoring" gap (task-brief §99 tier 10)
+  per the §7 workflow. Promoted SRV-008 from a `PARTIAL` summary row to a full detail
+  block: heartbeats are now persisted into a new `server_metrics` table (bounded to a
+  7-day retention window, pruned inline on every insert), exposed via
+  `GET /api/v1/servers/{id}/metrics`, and rendered as sparkline charts in the
+  dashboard. Still `PARTIAL` — network/disk I/O metrics and alerting are explicitly
+  out of scope for this pass, see the row's "Known differences".

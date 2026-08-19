@@ -2,6 +2,32 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-19 — Historical server monitoring (CPU/RAM/disk)
+
+- **Persisted heartbeat history.** `store.recordHeartbeat` (`apps/controlplane/store.go`)
+  now inserts every heartbeat into a new `server_metrics` table in addition to
+  overwriting the existing `servers.heartbeat_json` "latest snapshot" column, and prunes
+  that server's own rows older than a 7-day `metricsRetention` window on every insert —
+  bounded growth with no separate cleanup job (~20k rows/server at steady state and the
+  30s agent heartbeat interval, trivial for SQLite; no downsampling needed at that
+  volume).
+- **New endpoint**: `GET /api/v1/servers/{id}/metrics?since=<duration>` (`http.go`) —
+  returns heartbeat samples oldest-first, clamping `since` to the retention window so a
+  caller can't force an unbounded scan; `404` for an unknown server, `400` for a
+  malformed `since`.
+- **Dashboard**: server-detail view gained a "History" section with a 1h/6h/24h/7d range
+  selector rendering load/mem%/disk% as inline-SVG sparklines (`web/index.html`) — no
+  charting library or external request, consistent with the dashboard's existing
+  single-embedded-page, no-build-step architecture.
+- Added `TestRecordHeartbeatPersistsHistoryAndPrunesRetention` (`store_test.go`) and
+  `TestServerMetricsEndpoint` (`http_test.go`); `go test ./...`, `go vet ./...`, and
+  `gofmt -l .` all clean. Full suite now 63 test functions (29 in `apps/controlplane`,
+  up from 27).
+- Docs: `SYSTEM.md` §20/§8, `API.md`, `TESTING.md`, and `SERVERAVATAR_PARITY.md`
+  (SRV-008 promoted from a summary-table row to a full detail block, still `PARTIAL` —
+  network/disk I/O metrics and alerting remain out of scope, see the row's "Known
+  differences").
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

@@ -201,6 +201,61 @@ func TestServerCreateListRevokeFlow(t *testing.T) {
 	}
 }
 
+func TestServerMetricsEndpoint(t *testing.T) {
+	secureCookies = false
+	defer func() { secureCookies = true }()
+
+	a := newTestAPIServer(t)
+	h := a.routes()
+
+	doJSON(t, h, "POST", "/api/v1/auth/signup", map[string]string{
+		"Email": "fleet@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	rec := doJSON(t, h, "POST", "/api/v1/auth/login", map[string]string{
+		"Email": "fleet@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	cookie := sessionCookie(rec)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers", map[string]any{"Name": "web-1"}, cookie)
+	var created struct {
+		ServerID string `json:"server_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+
+	// Unknown server -> 404, same as handleGetServer.
+	rec = doJSON(t, h, "GET", "/api/v1/servers/does-not-exist/metrics", nil, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("metrics for unknown server status = %d, want 404", rec.Code)
+	}
+
+	// No heartbeats recorded yet -> empty (not an error).
+	rec = doJSON(t, h, "GET", "/api/v1/servers/"+created.ServerID+"/metrics", nil, cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("metrics status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var history []heartbeatSnapshot
+	json.Unmarshal(rec.Body.Bytes(), &history)
+	if len(history) != 0 {
+		t.Fatalf("expected no history yet, got %+v", history)
+	}
+
+	a.store.recordHeartbeat(created.ServerID, heartbeatSnapshot{
+		UptimeSecs: 42, LoadAvg1: 0.75, MemUsedPct: 33, DiskUsedPct: 12, At: time.Now().UTC(),
+	})
+
+	rec = doJSON(t, h, "GET", "/api/v1/servers/"+created.ServerID+"/metrics?since=1h", nil, cookie)
+	json.Unmarshal(rec.Body.Bytes(), &history)
+	if len(history) != 1 || history[0].LoadAvg1 != 0.75 {
+		t.Fatalf("metrics history = %+v, want one sample with LoadAvg1=0.75", history)
+	}
+
+	// Malformed since -> 400, not a silent fallback.
+	rec = doJSON(t, h, "GET", "/api/v1/servers/"+created.ServerID+"/metrics?since=not-a-duration", nil, cookie)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid since status = %d, want 400", rec.Code)
+	}
+}
+
 func TestBackupEndpointsRequireARealSite(t *testing.T) {
 	secureCookies = false
 	defer func() { secureCookies = true }()
