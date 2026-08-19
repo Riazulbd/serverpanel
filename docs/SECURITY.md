@@ -54,17 +54,27 @@ Properties this guarantees:
   certificate issued by the internal Agent CA, and the agent verifies the gateway's
   certificate/pinned CA to prevent MITM or connecting to a spoofed endpoint.
   **Implemented as described** — see `apps/controlplane/gateway.go` `handleConn`.
-- Client certs are **short-lived** (e.g. 30–90 days) and **auto-rotated**: before
-  expiry, the agent requests renewal authenticated by its current still-valid cert (no
-  shared long-lived secret is ever reused for renewal). If a renewal window is missed
-  (agent offline past expiry), the agent falls back to a manual re-registration flow
-  requiring a fresh bootstrap token from the dashboard — this is an intentional
-  fail-closed behavior, not silent re-trust.
-  **Not yet implemented**: certs are issued with a fixed 30-day TTL
-  (`apps/controlplane/http.go` `handleRegister`) and there is no renewal
-  capability/endpoint yet — an agent whose cert expires must be manually
-  re-registered with a fresh bootstrap token today. Auto-rotation before expiry is
-  tracked as a known gap in `SYSTEM.md`.
+- Client certs are **short-lived** (30 days, `agentCertTTL` in `apps/controlplane/ca.go`)
+  and **auto-rotated**: the agent (`apps/agent/renew.go`) checks its current
+  certificate's expiry hourly and, once within 7 days of expiry, generates a fresh
+  keypair and sends a `renew_request` over its already-open, already-authenticated
+  mTLS session — no shared long-lived secret is ever reused for renewal, and no
+  bootstrap token is consumed. The gateway (`gateway.handleRenewRequest`) derives the
+  identity to sign for from the live connection's peer certificate, never from anything
+  in the request, and returns a new certificate with a fresh 30-day TTL. The previous
+  certificate is deliberately **not** revoked on renewal — it simply expires naturally —
+  so an agent that fails to persist the new certificate (disk full, crash mid-write)
+  is not stranded; it keeps retrying renewal on its hourly check using the still-valid
+  old certificate until one succeeds.
+  **Implemented as described.** If a renewal window is missed entirely (agent offline
+  past its cert's expiry), the agent falls back to the manual re-registration flow
+  requiring a fresh bootstrap token from the dashboard — an intentional fail-closed
+  behavior, not silent re-trust.
+  On-disk crash safety: `persistRenewedIdentity` backs up the previous, known-good
+  cert/key pair to `*.prev` *before* writing either new file, and `loadIdentity`
+  automatically falls back to that backup if the live pair on disk fails to verify as a
+  matching pair (e.g. process killed between the two renames) — covered by
+  `apps/agent/renew_test.go`.
 - The Agent CA's private key is held in a dedicated, tightly access-controlled service
   (e.g. `step-ca` or HSM-backed KMS in later stages), separate from the general
   application database, so a control-plane app-tier compromise doesn't automatically

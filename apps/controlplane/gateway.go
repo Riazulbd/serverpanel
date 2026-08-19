@@ -160,6 +160,10 @@ func (g *gateway) handleConn(conn net.Conn) {
 					At: env.Heartbeat.SentAt,
 				})
 			}
+		case proto.MsgRenewRequest:
+			if env.RenewRequest != nil {
+				g.handleRenewRequest(sess, serverID, *env.RenewRequest)
+			}
 		case proto.MsgTaskEvent:
 			if env.TaskEvent != nil {
 				g.store.log(serverID, "", "task.event", fmt.Sprintf("task_id=%s status=%s message=%q", env.TaskEvent.TaskID, env.TaskEvent.Status, env.TaskEvent.Message))
@@ -175,6 +179,37 @@ func (g *gateway) handleConn(conn net.Conn) {
 			}
 		}
 	}
+}
+
+// handleRenewRequest signs a replacement client certificate for an agent
+// that is already connected and already authenticated by mTLS — serverID
+// here comes from the live connection's peer certificate CommonName
+// (handleConn), never from the request body, so a renewal can never be used
+// to claim a different server's identity. No bootstrap token is consumed or
+// required: possession of a still-valid client certificate is itself proof
+// of identity for requesting the next one.
+//
+// The certificate being replaced is deliberately left valid until its own
+// natural expiry rather than revoked immediately. If this agent failed to
+// persist the new certificate (disk full, crash mid-write, ...), immediate
+// revocation would strand it — permanently unable to reconnect without a
+// fresh bootstrap token and a human re-running the installer. Leaving the
+// old certificate live simply means there is a bounded window (up to
+// agentCertTTL) where either certificate would authenticate; that is an
+// acceptable trade against bricking unattended fleets. See docs/SECURITY.md.
+func (g *gateway) handleRenewRequest(sess *agentSession, serverID string, req proto.RenewRequest) {
+	certPEM, serial, err := g.ca.signAgentCSR([]byte(req.CSRPEM), serverID, agentCertTTL)
+	resp := proto.RenewResponse{}
+	if err != nil {
+		resp.Error = err.Error()
+		g.store.log(serverID, "", "agent.cert_renewal_failed", err.Error())
+	} else {
+		resp.CertPEM = string(certPEM)
+		g.store.renewCert(serverID, serial.String())
+	}
+	sess.mu.Lock()
+	_ = sess.enc.Encode(proto.Envelope{Type: proto.MsgRenewResponse, RenewResponse: &resp})
+	sess.mu.Unlock()
 }
 
 // dispatch sends a task to a connected agent and waits (bounded by ctx) for

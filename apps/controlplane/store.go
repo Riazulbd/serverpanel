@@ -172,6 +172,18 @@ func (s *store) markIssuedCert(serverID, serial string) {
 	s.log(serverID, "", "agent.registered", fmt.Sprintf("cert_serial=%s", serial))
 }
 
+// renewCert records a freshly issued replacement certificate for an
+// already-registered, currently-connected server. Unlike markIssuedCert
+// (first registration, where the agent is not connected yet and status
+// should read "offline" until it dials in), renewCert deliberately leaves
+// status untouched — the agent is live on the connection it renewed over.
+// The previous cert_serial is intentionally not revoked here; see
+// gateway.handleRenewRequest for why.
+func (s *store) renewCert(serverID, serial string) {
+	s.db.Exec(`UPDATE servers SET cert_serial = ? WHERE id = ?`, serial, serverID)
+	s.log(serverID, "", "agent.cert_renewed", fmt.Sprintf("cert_serial=%s", serial))
+}
+
 func (s *store) isRevoked(serial string) bool {
 	var n int
 	s.db.QueryRow(`SELECT COUNT(1) FROM revoked_certs WHERE serial = ?`, serial).Scan(&n)

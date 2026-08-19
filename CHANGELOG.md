@@ -2,6 +2,44 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-19 — Agent certificate auto-renewal
+
+- **Implemented automatic agent client-certificate renewal**, closing the security gap
+  flagged in `SYSTEM.md` §21 and `SECURITY.md` §2 (an agent whose 30-day mTLS
+  certificate expired previously required a human to re-run the installer with a fresh
+  bootstrap token — a real risk for an unattended fleet). The agent
+  (`apps/agent/renew.go`) now checks its current certificate's expiry hourly and, once
+  within 7 days of expiry, generates a fresh keypair and sends a `renew_request` over
+  its already-open, already-authenticated mTLS session — no bootstrap token is consumed
+  or required. The gateway (`gateway.handleRenewRequest`,
+  `apps/controlplane/gateway.go`) derives the identity to sign for from the live
+  connection's peer certificate (never from the request body), issues a replacement
+  with a fresh `agentCertTTL`, and records the new serial via a new `store.renewCert`
+  method that — unlike the registration-time `markIssuedCert` — leaves connection status
+  untouched, since the agent is live on the connection it's renewing over.
+- The certificate being replaced is deliberately **not** revoked on renewal; it is left
+  to expire naturally. Immediate revocation would strand an agent that renews
+  successfully on the wire but fails to persist the new certificate to disk (crash,
+  full disk); leaving the old one valid means it just keeps retrying on its next hourly
+  check instead of being permanently locked out.
+- Added crash-safety for the on-disk write itself: two separate files (cert, key)
+  cannot be replaced in one atomic filesystem operation, so
+  `persistRenewedIdentity` backs up the previous, known-good pair to `*.prev` before
+  writing either new file (each write itself done via a temp-file-plus-rename), and
+  `loadIdentity` automatically recovers from that backup if the live pair on disk ever
+  fails to verify as a matching pair — the exact state a process kill between the two
+  renames would otherwise leave behind.
+- New proto message types `renew_request`/`renew_response` (`packages/proto/proto.go`).
+  New tests: `apps/controlplane/gateway_test.go` (issuance bound to the real server_id
+  regardless of CSR contents, store update, invalid-CSR rejection) and
+  `apps/agent/renew_test.go` (renewal-window detection, atomic persistence, rejection of
+  a mismatched pair, and recovery from a simulated interrupted-renewal crash) — 8 new
+  test functions, full suite (69 total) still green under `-race`.
+- Docs updated: `SECURITY.md` §2, `SYSTEM.md` (§2 core-platform table, §3 phase status,
+  §11, §21), `API.md` §3 (wire protocol), `OPERATIONS.md` (troubleshooting table),
+  `TESTING.md` (§1 coverage table), `SERVERAVATAR_PARITY.md` (SRV-001 marked fully
+  `COMPLETE`, no remaining known differences).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

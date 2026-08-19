@@ -160,6 +160,8 @@ connection carries newline-delimited JSON `Envelope`s in both directions
 {"type": "task", "task": {"id": "...", "capability": "...", "params": {}, "issued_at": "..."}}
 {"type": "task_event", "task_event": {"task_id": "...", "status": "queued|running|succeeded|failed|rejected", "message": "...", "detail": "...", "at": "..."}}
 {"type": "ack"}
+{"type": "renew_request", "renew_request": {"csr_pem": "..."}}
+{"type": "renew_response", "renew_response": {"cert_pem": "...", "error": ""}}
 ```
 
 Flow: gateway accepts → verifies cert → sends `ack` → agent sends `hello`, then
@@ -170,6 +172,14 @@ HTTP handler) until it sees a terminal event for the task ID it sent, or its con
 deadline expires. There is no message type for a free-form command — `capability` must
 be a name in `packages/capabilities`'s fixed registry, or the agent returns `rejected`
 without executing anything.
+
+Independently of task dispatch, the agent checks its own client certificate's expiry
+hourly (`apps/agent/renew.go`) and, once within 7 days of expiry, sends `renew_request`
+with a CSR for a freshly generated keypair. The gateway signs a replacement bound to
+the *connection's* server_id (from the peer certificate that authenticated the mTLS
+session — never from the CSR's requested subject) and replies with `renew_response`.
+The certificate being replaced is not revoked — it is left to expire naturally — so a
+renewal the agent fails to persist to disk does not strand it; see `SECURITY.md` §2.
 
 ## 4. Capability reference
 

@@ -121,7 +121,7 @@ tested procedure rather than a documented manual fallback).
 
 | Symptom | Cause / fix |
 |---|---|
-| Agent connects then immediately shows "offline" in the dashboard | Check `journalctl -u serverpanel-agent` for a handshake error; confirm the agent's cert hasn't expired (30-day TTL, no auto-renew yet — see `SECURITY.md` §2) and re-register with a fresh bootstrap token if so. |
+| Agent connects then immediately shows "offline" in the dashboard | Check `journalctl -u serverpanel-agent` for a handshake error. The agent auto-renews its 30-day cert starting 7 days before expiry (see `SECURITY.md` §2), so an expired cert here means the agent was offline through its entire renewal window; re-register it with a fresh bootstrap token. |
 | Every registered agent shows "disconnected" after a control-plane restart | This was a real bug (CA regenerated in memory every start) — fixed by persisting the CA to `-ca-dir`. If it recurs, confirm `-ca-dir` actually points at persistent storage and the process has write access to it. |
 | `stack.install` fails nginx config test | Likely an IPv6-disabled host; `stack.install` already probes `ipv6Available()` and should handle this automatically — if it still fails, check for a leftover `listen [::]:80` in a manually-edited vhost, or too many vhosts tripping `server_names_hash_bucket_size` (already raised generously by `stack.install`, but a very large fleet of vhosts on one box could still exceed it). |
 | Composer or WP-CLI install step reports a version that looks wrong | Confirm `COMPOSER_ALLOW_SUPERUSER=1` is actually reaching the child process (`run()` in `exec_helpers.go` sets it); a version string containing "as root" instead of a real version number is the known symptom of the fixed bug recurring. |

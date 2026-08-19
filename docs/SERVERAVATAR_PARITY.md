@@ -47,12 +47,12 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Agent command**: n/a (registration precedes capability dispatch).
 - **DB tables**: `servers`, `bootstrap_tokens`, `revoked_certs`.
 - **Required permission**: authenticated session (single-user model today — see ORG-001).
-- **Security considerations**: single-use/short-lived hashed bootstrap tokens; certificate identity independently derived from the mTLS handshake, never trusted from agent-asserted data; revocation checked every handshake.
-- **Test coverage**: `apps/controlplane/http_test.go` (`TestServerCreateListRevokeFlow`, `TestRegisterEndpointRejectsBadToken`), `apps/controlplane/store_test.go`.
+- **Security considerations**: single-use/short-lived hashed bootstrap tokens; certificate identity independently derived from the mTLS handshake, never trusted from agent-asserted data; revocation checked every handshake. Client certs auto-renew (`apps/agent/renew.go` + `gateway.handleRenewRequest`) starting 7 days ahead of their 30-day expiry, authenticated by the still-valid current cert (no bootstrap token reused); the certificate being replaced is left to expire naturally rather than revoked immediately, so a renewal the agent fails to persist to disk can't strand it — see `SECURITY.md` §2.
+- **Test coverage**: `apps/controlplane/http_test.go` (`TestServerCreateListRevokeFlow`, `TestRegisterEndpointRejectsBadToken`), `apps/controlplane/store_test.go`, `apps/controlplane/gateway_test.go` (`TestHandleRenewRequestIssuesNewCertAndUpdatesStore`, `TestHandleRenewRequestRejectsInvalidCSR`), `apps/agent/renew_test.go` (renewal-window detection, atomic on-disk persistence, and crash-recovery-from-backup).
 - **Current status**: `COMPLETE`
-- **Completion date**: 2026-08-14
-- **Known differences**: no agent certificate auto-renewal before 30-day expiry yet.
-- **Reason**: scoped out of the initial secure-foundation pass; tracked in `SYSTEM.md` §21.
+- **Completion date**: 2026-08-19
+- **Known differences**: none.
+- **Reason**: n/a.
 
 ### SRV-002 — Hosting stack installation (LEMP)
 - **Category**: Server Management

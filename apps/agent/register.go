@@ -5,12 +5,14 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -61,6 +63,30 @@ func loadIdentity(dataDir string) (*identity, error) {
 	if err := json.Unmarshal(metaBytes, &meta); err != nil {
 		return nil, err
 	}
+
+	// A cert/key pair that doesn't actually verify as a pair means a prior
+	// certificate renewal (see renew.go) was interrupted mid-write — e.g.
+	// the process was killed after the new certificate was renamed into
+	// place but before the matching new key was. persistRenewedIdentity
+	// backs up the previous, known-good pair to *.prev immediately before
+	// overwriting either file, specifically so this case is recoverable
+	// instead of bricking the agent (it would otherwise never be able to
+	// complete a TLS handshake again without a human re-running the
+	// installer with a brand new bootstrap token).
+	if _, pairErr := tls.X509KeyPair(certPEM, keyPEM); pairErr != nil {
+		log.Printf("on-disk cert/key do not form a valid pair (%v); attempting recovery from backup", pairErr)
+		prevCertPEM, prevCertErr := os.ReadFile(certPath + ".prev")
+		prevKeyPEM, prevKeyErr := os.ReadFile(keyPath + ".prev")
+		if prevCertErr != nil || prevKeyErr != nil {
+			return nil, fmt.Errorf("cert/key mismatch and no recoverable backup: %w", pairErr)
+		}
+		if _, verifyErr := tls.X509KeyPair(prevCertPEM, prevKeyPEM); verifyErr != nil {
+			return nil, fmt.Errorf("cert/key mismatch and backup is also invalid: %w", verifyErr)
+		}
+		certPEM, keyPEM = prevCertPEM, prevKeyPEM
+		log.Printf("recovered previous certificate/key from backup")
+	}
+
 	return &identity{ServerID: meta.ServerID, CertPEM: certPEM, KeyPEM: keyPEM, CAPEM: caPEM, GatewayAddr: meta.GatewayAddr}, nil
 }
 
