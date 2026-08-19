@@ -46,6 +46,9 @@ protected route; there is no route that skips it by omission.
 | `GET` | `/api/v1/servers/{id}/sites/{siteId}/backups` | List backups for a site, newest first |
 | `POST` | `/api/v1/servers/{id}/sites/{siteId}/backups` | Dispatch `backup.run` and persist the resulting backup record |
 | `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a previously recorded backup |
+| `GET` | `/api/v1/servers/{id}/databases` | List databases recorded on a server |
+| `POST` | `/api/v1/servers/{id}/databases` | Dispatch `db.create` and persist the resulting database record |
+| `DELETE` | `/api/v1/servers/{id}/databases/{dbId}` | Dispatch `db.delete` and remove the database record |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -137,6 +140,35 @@ isn't connected; `422` if `backup.restore` itself failed on the agent (the agent
 error message explains why, and any checkpoint already taken is named in it so it's
 never a silent loss).
 
+### `POST /api/v1/servers/{id}/databases`
+```json
+{"name": "wp_example", "owner_user": ""}
+```
+`name` must match the identifier allow-list `^[a-z][a-z0-9_]{0,30}$` (`capabilities.IdentifierRe`,
+checked here before dispatch, and again independently by the agent handler). `owner_user`
+defaults to `name` if omitted, and is validated the same way. The owner password is never
+accepted from the caller — the control plane generates a random 48-character hex password
+server-side, sends it to the agent for the one `CREATE USER ... IDENTIFIED BY` statement
+that needs it, and returns it in the response exactly once; it is never written to the
+`databases` table or the audit log, so there is no way to recover it later short of
+resetting it (not yet implemented — see `SYSTEM.md` §21). Only on the agent reporting
+success is a `databases` row persisted. → `201 {"database": {...databaseRecord}, "owner_password": "..."}`.
+`400` for an invalid `name`/`owner_user`; `502` if the agent isn't connected; `422` if
+`db.create` itself failed on the agent.
+
+### `GET /api/v1/servers/{id}/databases`
+→ `200` with an array of `databaseRecord` (`ID`, `ServerID`, `Name`, `OwnerUser`, `Status`,
+`CreatedAt`), newest first. Never includes a password.
+
+### `DELETE /api/v1/servers/{id}/databases/{dbId}`
+No request body — the database's own recorded `name`/`owner_user` are read from the
+`databases` table and passed to `db.delete` verbatim; a caller can only ever delete a
+database that was actually created and recorded through this control plane, never an
+arbitrary name. → `200 {"status": "deleted"}`. `404` if the database doesn't exist on
+that server; `502` if the agent isn't connected; `422` if `db.delete` itself failed on
+the agent (the record is only removed after the agent confirms success, so a failed
+delete never leaves the control plane out of sync with the server).
+
 ### `POST /agents/register`
 ```json
 {"token": "<bootstrap token>", "csr_pem": "<PEM-encoded CSR>"}
@@ -179,6 +211,15 @@ The full allow-listed capability names `packages/capabilities.Default()` registe
 `site.set_status`, `app.wordpress_install`, `ssl.issue_letsencrypt`,
 `ssl.install_custom`, `db.create`, `db.delete`, `db.list`, `file.list`, `file.read`,
 `file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`.
+
+### `db.create` / `db.delete` / `db.list`
+`db.create` takes `{"name", "owner_user", "owner_password"}` — all three validated
+against the identifier allow-list (password: minimum 16 characters) before any SQL is
+built — and returns `{"name", "owner_user"}` as JSON (never the password: the agent
+never echoes back a value the control plane already knows). `db.delete` takes
+`{"name", "owner_user"}` and returns a plain status string. `db.list` takes no
+params and returns a JSON array of database names, excluding MySQL/MariaDB's own
+system schemas (`information_schema`, `mysql`, `performance_schema`, `sys`).
 
 ### `backup.restore`
 ```json

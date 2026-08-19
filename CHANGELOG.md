@@ -2,6 +2,41 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-19 — Database control-plane persistence and dashboard UI
+
+- **Implemented DB-005** (`docs/SERVERAVATAR_PARITY.md`'s explicitly-flagged next
+  candidate): databases created via `db.create` are now persisted as their own
+  `databases` row and manageable from the dashboard, the same way sites and backups
+  already are. New `apps/controlplane/databases.go` (`handleCreateDatabase`/
+  `handleListDatabases`/`handleDeleteDatabase`) follows the existing
+  dispatch-then-persist-on-success pattern: the control plane generates a random
+  48-character hex owner password server-side (never accepted from the client), sends
+  it to the agent for the one `CREATE USER ... IDENTIFIED BY` statement that needs it,
+  and returns it in the HTTP response exactly once — it is never written to the
+  `databases` table, a log, or anywhere else. Three new endpoints
+  (`GET`/`POST /api/v1/servers/{id}/databases`, `DELETE .../databases/{dbId}`), a new
+  `databases` table, and a "Databases" panel on the server-detail page (list, a
+  create modal with a one-time credentials box, and a delete button with a
+  destructive-action confirmation).
+- Along the way, fixed two latent correctness bugs in `packages/capabilities/db.go`
+  found while wiring up real result-parsing: `db.create` was returning a free-text
+  message instead of JSON (`{"name","owner_user"}`, matching every other capability's
+  `TaskEvent.Detail` convention), and `db.list` was returning a Go `%v`-formatted
+  string instead of a real JSON array — neither had a caller that actually parsed
+  their result before now, so both went unnoticed. Also exported the identifier
+  allow-list regex (`capabilities.IdentifierRe`) so the control plane can reject an
+  invalid database/owner-user name before ever dispatching to the agent, in addition
+  to the agent's own independent validation.
+- Added 3 new test functions: a store-layer create/list/get/delete round trip plus
+  cross-server-scoping test (mirroring the existing backup/site tests), and two
+  HTTP-layer tests covering identifier validation (including a SQL-injection-shaped
+  name, rejected with 400 before any dispatch, and confirming a failed dispatch never
+  leaves an orphan database record) and the delete endpoint's not-found/cross-server
+  boundaries. Full suite: 64 test functions (up from 61), `go vet`/`gofmt` clean.
+- Updated `SYSTEM.md`, `API.md`, `TESTING.md`, and `SERVERAVATAR_PARITY.md` (DB-001
+  folded DB-005 in as `PARTIAL`→documented in full, DB-005 marked `COMPLETE`, new
+  DB-006 row opened for the one known remaining gap — owner-password reset).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the
