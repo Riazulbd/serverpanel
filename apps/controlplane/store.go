@@ -485,6 +485,109 @@ func scanBackup(row rowScanner) (*backupRecord, error) {
 	return &rec, nil
 }
 
+type databaseRecord struct {
+	ID                  string
+	ServerID            string
+	SiteID              string
+	Engine              string
+	Name                string
+	OwnerUser           string
+	OwnerPasswordCipher string // AES-256-GCM ciphertext, base64; see secretbox.go
+	Status              string
+	CreatedAt           time.Time
+}
+
+// createDatabase persists a database record. Like createBackup, this is
+// only ever called after db.create has already succeeded on the agent (see
+// databases.go handleCreateDatabase) — a row here always corresponds to a
+// database that really exists on the server, never an attempted or
+// in-flight one. ownerPasswordCipher must already be encrypted (see
+// secretbox.go encryptSecret) — this method never sees or logs a plaintext
+// password.
+func (s *store) createDatabase(serverID, siteID, engine, name, ownerUser, ownerPasswordCipher string) (*databaseRecord, error) {
+	rec := &databaseRecord{
+		ID: randID("db"), ServerID: serverID, SiteID: siteID, Engine: engine, Name: name,
+		OwnerUser: ownerUser, OwnerPasswordCipher: ownerPasswordCipher, Status: "active", CreatedAt: time.Now().UTC(),
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO databases (id, server_id, site_id, engine, name, owner_user, owner_password_cipher, status, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		rec.ID, rec.ServerID, rec.SiteID, rec.Engine, rec.Name, rec.OwnerUser, rec.OwnerPasswordCipher, rec.Status,
+		rec.CreatedAt.Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return nil, err
+	}
+	return rec, nil
+}
+
+// listDatabases returns databases for one site, newest first, scoped the
+// same way listBackups is (server_id + site_id, so a caller can never list
+// another server's or another site's databases).
+func (s *store) listDatabases(serverID, siteID string) []*databaseRecord {
+	rows, err := s.db.Query(
+		`SELECT id, server_id, site_id, engine, name, owner_user, owner_password_cipher, status, created_at
+		 FROM databases WHERE server_id = ? AND site_id = ? ORDER BY created_at DESC`, serverID, siteID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var out []*databaseRecord
+	for rows.Next() {
+		rec, err := scanDatabase(rows)
+		if err != nil {
+			continue
+		}
+		out = append(out, rec)
+	}
+	return out
+}
+
+// getDatabase looks up one database scoped to serverID, for the same
+// cross-tenant-addressing reason getBackup is scoped to serverID.
+func (s *store) getDatabase(serverID, databaseID string) (*databaseRecord, bool) {
+	row := s.db.QueryRow(
+		`SELECT id, server_id, site_id, engine, name, owner_user, owner_password_cipher, status, created_at
+		 FROM databases WHERE id = ? AND server_id = ?`, databaseID, serverID)
+	rec, err := scanDatabase(row)
+	if err != nil {
+		return nil, false
+	}
+	return rec, true
+}
+
+// deleteDatabase removes a database's record scoped to serverID, so a
+// caller can never delete the record of a database belonging to a
+// different server. Callers must have already torn down the real
+// database/user on the agent (db.delete) before calling this — this only
+// ever removes the control plane's own bookkeeping row.
+func (s *store) deleteDatabase(serverID, databaseID string) error {
+	res, err := s.db.Exec(`DELETE FROM databases WHERE id = ? AND server_id = ?`, databaseID, serverID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("database not found")
+	}
+	return nil
+}
+
+func scanDatabase(row rowScanner) (*databaseRecord, error) {
+	var rec databaseRecord
+	var createdAt string
+	if err := row.Scan(&rec.ID, &rec.ServerID, &rec.SiteID, &rec.Engine, &rec.Name, &rec.OwnerUser,
+		&rec.OwnerPasswordCipher, &rec.Status, &createdAt); err != nil {
+		return nil, err
+	}
+	rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+	return &rec, nil
+}
+
 func randID(prefix string) string {
 	n, _ := rand.Int(rand.Reader, big.NewInt(1<<62))
 	return fmt.Sprintf("%s_%x", prefix, n)

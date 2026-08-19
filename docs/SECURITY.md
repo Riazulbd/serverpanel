@@ -181,3 +181,28 @@ one-click-apply-fix flow yet; a human reading the diagnostic output and dispatch
 explicit capability (e.g. `service.control` restart) is the current repair path, which
 already satisfies "never automatic" — the plain-language suggestion layer on top is
 unbuilt.
+
+## 7. Secrets at rest — **partially implemented**
+
+Two different secret-storage patterns are used, deliberately chosen per secret based on
+whether the control plane ever needs the plaintext back:
+
+- **One-way hashed, never recovered**: bootstrap tokens and session tokens (§1, §3) are
+  stored only as a SHA-256 hash. Nothing needs their plaintext again after issuance, so
+  there is nothing to encrypt-and-later-decrypt — a hash is strictly stronger.
+- **Reversibly encrypted, recoverable on demand**: some secrets (currently: a database's
+  generated owner password — `databases.owner_password_cipher`, see `API.md`
+  `POST .../databases`) must be recoverable later so a human can retrieve a credential
+  they didn't choose and won't otherwise see again. These are encrypted with
+  AES-256-GCM (`apps/controlplane/secretbox.go`) under a key generated once on first run
+  and persisted (`0600`) next to the agent CA's own key material (`-ca-dir`, default
+  next to `-db`). The key never leaves the control plane process; it is never sent to an
+  agent or a browser. Decrypting a stored secret (the `.../reveal` endpoint) is always
+  audit-logged (`database.password_revealed`), the same way a diagnostic repair or a
+  restore is — accessing a live credential is treated as an action, not a passive read.
+
+**Known gap**: there is no key-rotation procedure yet — rotating `secret.key` would
+require re-encrypting every existing ciphertext under the new key first, which isn't
+implemented. Losing `secret.key` makes every secret encrypted under it permanently
+unrecoverable (by design — this is a real encryption key, not an obfuscation layer with
+a backdoor). Tracked as a follow-up alongside the mTLS certificate-rotation gap in §2.

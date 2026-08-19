@@ -54,13 +54,18 @@ func main() {
 	}
 	gw := newGateway(ca, st)
 
+	secretKey, err := loadOrCreateSecretKey(filepath.Join(*caDir, "secret.key"))
+	if err != nil {
+		log.Fatalf("initialize secret encryption key: %v", err)
+	}
+
 	go func() {
 		if err := gw.listenAndServe(*gatewayAddr); err != nil {
 			log.Fatalf("agent gateway: %v", err)
 		}
 	}()
 
-	api := &apiServer{store: st, ca: ca, gw: gw, gatewayAddr: *gatewayPublic, tokenTTL: *tokenTTL, publicDir: *publicDir}
+	api := &apiServer{store: st, ca: ca, gw: gw, gatewayAddr: *gatewayPublic, tokenTTL: *tokenTTL, publicDir: *publicDir, secretKey: secretKey}
 	log.Printf("public API listening on %s (db: %s)", *apiAddr, *dbPath)
 	if err := http.ListenAndServe(*apiAddr, api.routes()); err != nil {
 		log.Fatalf("public API: %v", err)

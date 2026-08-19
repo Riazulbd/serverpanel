@@ -114,6 +114,30 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | Application logs / advanced log viewer | 🚧 `logs.tail` (redacted) exists; no
   filtering/search UI yet |
 
+### Database management
+| Feature | Status |
+|---|---|
+| Create database + least-privilege owner user | ✅ `db.create` (agent) dispatched via
+  `POST /api/v1/servers/{id}/sites/{siteId}/databases`; only on agent success is a
+  `databases` row persisted (dispatch-then-persist, same pattern as backups/sites) |
+| Delete database | ✅ `db.delete` dispatched via `DELETE
+  /api/v1/servers/{id}/databases/{databaseId}`; the record is removed only after the
+  agent confirms the real drop succeeded |
+| List databases (per site, dashboard UI) | ✅ dedicated "Databases" panel on the site
+  detail page — this closed the gap the parity matrix (`SERVERAVATAR_PARITY.md`
+  DB-001/DB-005) flagged as the next candidate |
+| Credential generation | ✅ the owner password is always generated server-side (32
+  random bytes, hex), never client-supplied |
+| Secure credential storage/display | ✅ the generated password is encrypted at rest
+  (AES-256-GCM, `apps/controlplane/secretbox.go`) and shown in full only once at
+  creation time and thereafter on explicit, audited request
+  (`POST .../databases/{id}/reveal`) — see `SECURITY.md` §7 |
+| Remote host/IP access rules | ⬜ not implemented (owner user is `localhost`-only,
+  matching `db.create`'s existing grant scope) |
+| MongoDB | ⬜ not implemented |
+| phpMyAdmin / DB admin UI | ⬜ not implemented |
+| Database process/query monitoring | ⬜ not implemented |
+
 ### Git deployment
 All ⬜ — explicitly scoped to Phase 2 (`product-plan.md` §9). No Git deployment,
 webhook push-to-deploy, deploy keys, or rollback exist in this codebase yet.

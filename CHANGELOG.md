@@ -2,6 +2,45 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-19 — Database management: control-plane persistence, dashboard UI, secrets at rest
+
+- Closed DB-001/DB-005 in `docs/SERVERAVATAR_PARITY.md` — the gap the previous entry's
+  parity pass had already flagged as "good candidate for the next iteration." The
+  agent-side `db.create`/`db.delete`/`db.list` capabilities existed already; this pass
+  gave them the same dispatch-then-persist-on-success control-plane wiring and
+  dashboard UI that backups got in the previous session.
+- New `databases` table (`server_id`, `site_id`, `engine`, `name`, `owner_user`,
+  `owner_password_cipher`, `status`, `created_at`; unique on `(server_id, name)`) and
+  four new store methods (`createDatabase`/`listDatabases`/`getDatabase`/
+  `deleteDatabase`), each scoped by server ID the same way `getSite`/`getBackup` are.
+- Four new endpoints (`apps/controlplane/databases.go`): `GET`/`POST
+  /api/v1/servers/{id}/sites/{siteId}/databases`, `POST
+  /api/v1/servers/{id}/databases/{databaseId}/reveal`, `DELETE
+  /api/v1/servers/{id}/databases/{databaseId}`. The owner password is always generated
+  control-plane-side (32 random bytes, hex) — never accepted from a client — dispatched
+  to `db.create`, and only encrypted-and-persisted after the agent confirms success.
+- **New: at-rest secret encryption** (`apps/controlplane/secretbox.go`) — AES-256-GCM
+  under a key generated once and persisted (`0600`) alongside the agent CA's own key
+  material. This is the first reversibly-encrypted (as opposed to one-way-hashed)
+  secret this control plane stores; documented in `SECURITY.md` §7, including the
+  known key-rotation gap. Decrypting a stored password (`.../reveal`) is always
+  audit-logged (`database.password_revealed`).
+- Added a "Databases" panel to the site-detail dashboard view: list, "+ New database"
+  modal (name + optional owner user, password shown once on creation), "Show password"
+  (calls the audited reveal endpoint), and "Delete" with a destructive-action
+  confirmation.
+- Added 5 new store/HTTP tests (`TestDatabaseCreateListGetDeleteRoundTrip`,
+  `TestDatabaseEndpointsRequireARealSite`,
+  `TestCreateDatabaseRejectsInvalidNameAndDispatchesWhenValid`) and 5 new secretbox
+  tests (round trip, nonce-uniqueness, tamper rejection, wrong-key rejection, key
+  persistence across process restarts). Full suite: 69 test functions, `go vet`/`gofmt`
+  clean.
+- Updated `SYSTEM.md` (new "Database management" section), `API.md`, `SECURITY.md`,
+  and `SERVERAVATAR_PARITY.md` (DB-001 moved `PARTIAL` → `COMPLETE`; DB-005 folded in).
+  Real `CREATE DATABASE`/`CREATE USER`/`GRANT` execution against a live MariaDB remains
+  unverified by `go test` in this environment (no MariaDB here), same caveat as
+  BAK-001/BAK-002's db/full-scope paths.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

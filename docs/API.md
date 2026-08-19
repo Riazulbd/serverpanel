@@ -46,6 +46,10 @@ protected route; there is no route that skips it by omission.
 | `GET` | `/api/v1/servers/{id}/sites/{siteId}/backups` | List backups for a site, newest first |
 | `POST` | `/api/v1/servers/{id}/sites/{siteId}/backups` | Dispatch `backup.run` and persist the resulting backup record |
 | `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a previously recorded backup |
+| `GET` | `/api/v1/servers/{id}/sites/{siteId}/databases` | List databases for a site, newest first |
+| `POST` | `/api/v1/servers/{id}/sites/{siteId}/databases` | Dispatch `db.create` and persist the resulting database record |
+| `POST` | `/api/v1/servers/{id}/databases/{databaseId}/reveal` | Decrypt and return a database's owner password (audit-logged) |
+| `DELETE` | `/api/v1/servers/{id}/databases/{databaseId}` | Dispatch `db.delete` and remove the database record |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -136,6 +140,40 @@ pre-restore safety backups taken automatically before anything was overwritten,
 isn't connected; `422` if `backup.restore` itself failed on the agent (the agent-side
 error message explains why, and any checkpoint already taken is named in it so it's
 never a silent loss).
+
+### `POST /api/v1/servers/{id}/sites/{siteId}/databases`
+```json
+{"name": "wp_example", "owner_user": ""}
+```
+`name` must match `^[a-z][a-z0-9_]{0,30}$` (checked here and, independently, on the
+agent — see `SYSTEM.md` §12); `owner_user` defaults to `name` when omitted. The owner
+password is never client-supplied — the control plane generates 32 random bytes
+(hex-encoded) itself, dispatches `db.create` with it, and only on the agent reporting
+success encrypts it (AES-256-GCM, see `SECURITY.md` §"Secrets at rest") and persists a
+`databases` row. → `201 {"database": {...databaseView}, "owner_password": "<plaintext,
+shown once>"}`. `404` if the site doesn't exist on that server; `400` for an
+invalid/missing name; `502` if the agent isn't connected; `422` if `db.create` itself
+failed on the agent. `databaseView` never includes the encrypted credential — only
+`ID`, `ServerID`, `SiteID`, `Engine`, `Name`, `OwnerUser`, `Status`, `CreatedAt`.
+
+### `GET /api/v1/servers/{id}/sites/{siteId}/databases`
+→ `200` with an array of `databaseView`, newest first. `404` if the site doesn't exist
+on that server.
+
+### `POST /api/v1/servers/{id}/databases/{databaseId}/reveal`
+No request body. Decrypts the stored owner-password ciphertext and returns
+`{"owner_password": "..."}`. Every call is audit-logged
+(`database.password_revealed`) — this is a deliberate action, not a passive read, the
+same way WordPress auto-login access is meant to be recorded (see the WordPress
+Toolkit section of `SERVERAVATAR_PARITY.md`). `404` if the database doesn't exist on
+that server.
+
+### `DELETE /api/v1/servers/{id}/databases/{databaseId}`
+Dispatches `db.delete` (drops the real MariaDB database and user) and, only on
+success, removes the `databases` row. → `204` on success. `404` if the database
+doesn't exist on that server; `502` if the agent isn't connected; `422` if
+`db.delete` itself failed on the agent — in which case the record is deliberately
+*not* removed, so the dashboard never shows a database as gone when it still exists.
 
 ### `POST /agents/register`
 ```json
