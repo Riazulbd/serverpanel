@@ -73,7 +73,7 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | PHP-FPM, multiple PHP versions | 🚧 php-fpm pool-per-site works; only 8.3 is
   installed by `stack.install` today, though `site.set_php_version` and pool paths are
   already version-parameterized |
-| MariaDB/MySQL | ✅ install + per-DB least-privilege grants |
+| MariaDB/MySQL | ✅ install + per-DB least-privilege grants; control-plane persistence + dashboard UI (`databases` table) |
 | Redis, Git, Composer, WP-CLI | ✅ installed by `stack.install` |
 | Node.js | ⬜ Phase 3 |
 | UFW firewall, Fail2Ban | 🚧 installed with safe defaults; no rule-editing UI |
@@ -253,6 +253,7 @@ EXISTS`, applied on every `openDB` call — idempotent, no separate migration to
 | `audit_log` | append-only: seq, timestamp, server, actor, action, detail |
 | `sites` | id, server, domain, system user, docroot, app type, PHP version, status |
 | `backups` | id, server, site, scope, path, size, sha256, status, created_at |
+| `databases` | id, server, name, owner_user, engine, status, created_at (unique per server+name; owner password is never persisted — see §19a) |
 
 No ORM — every query is a small, explicit SQL statement in `store.go`. All secrets
 (session tokens, bootstrap tokens) are stored only as SHA-256 hashes; passwords use
@@ -262,8 +263,9 @@ bcrypt (cost 12); nothing is stored in plaintext.
 
 Full list with request/response shapes in `API.md`. Summary: `/api/v1/auth/*`
 (signup/login/logout/TOTP enroll+verify/MFA challenge/me), `/api/v1/servers*` (CRUD,
-revoke, task dispatch, sites, audit), `/agents/register` (the one unauthenticated
-agent-facing endpoint, secured by the bootstrap token itself), `/healthz`.
+revoke, task dispatch, sites, backups, databases, audit), `/agents/register` (the one
+unauthenticated agent-facing endpoint, secured by the bootstrap token itself),
+`/healthz`.
 
 ## 10. Background jobs
 
@@ -359,7 +361,7 @@ with short-lived certs and immediate revocation, per-app OS-level isolation
 bcrypt + TOTP for dashboard auth, append-only audit log, path-traversal/symlink-escape
 defenses on the file manager (`resolveScopedPath`).
 
-## 19. Backup and restore model
+## 19. Backup, restore, and database management model
 
 **Backup**: implemented (`backup.run` — local, checksummed tar.gz of DB and/or files,
 persisted as a `backups` row per site).
@@ -369,6 +371,20 @@ control plane created and recorded — the restore is only ever given `archive_p
 caller-supplied free-form values. See `OPERATIONS.md` §Backup and restore for the
 operational walkthrough. Cross-server restore (copying a backup to a different agent
 first) remains a Phase 2 gap — see §21.
+
+**Databases**: `db.create`/`db.delete` (`packages/capabilities/db.go`) are now paired
+with control-plane persistence and a dashboard panel the same way backups are —
+`apps/controlplane/databases.go` dispatches the capability and, only on the agent
+confirming success, writes/removes a `databases` row (`UNIQUE(server_id, name)`).
+Databases are server-scoped, not site-scoped (unlike backups/sites): a database
+commonly gets created ahead of, or shared across, a site. The owner user's password is
+generated server-side (`generateDBPassword`, 24 random bytes hex-encoded) and returned
+to the caller exactly once in the `POST` response — like a bootstrap token, it is never
+persisted in this control plane's database, so there is no plaintext-credential store
+to leak. `db.create`'s agent-side handler now returns structured JSON
+(`{"name","owner_user"}`) as its `TaskEvent.Detail`, matching the `site.create`/
+`backup.run` pattern, instead of a human-readable string the control plane had no
+reliable way to parse.
 
 ## 20. Monitoring and alerting
 

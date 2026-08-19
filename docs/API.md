@@ -46,6 +46,9 @@ protected route; there is no route that skips it by omission.
 | `GET` | `/api/v1/servers/{id}/sites/{siteId}/backups` | List backups for a site, newest first |
 | `POST` | `/api/v1/servers/{id}/sites/{siteId}/backups` | Dispatch `backup.run` and persist the resulting backup record |
 | `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a previously recorded backup |
+| `GET` | `/api/v1/servers/{id}/databases` | List databases on a server, newest first |
+| `POST` | `/api/v1/servers/{id}/databases` | Dispatch `db.create` and persist the resulting database record |
+| `DELETE` | `/api/v1/servers/{id}/databases/{databaseId}` | Dispatch `db.delete` and remove the database record |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -137,6 +140,32 @@ isn't connected; `422` if `backup.restore` itself failed on the agent (the agent
 error message explains why, and any checkpoint already taken is named in it so it's
 never a silent loss).
 
+### `POST /api/v1/servers/{id}/databases`
+```json
+{"name": "wp_example", "owner_user": "wp_example"}
+```
+`name` must match `^[a-z][a-z0-9_]{0,30}$` (the same identifier allow-list `db.create`
+enforces agent-side); `owner_user` is optional and defaults to `name`. The owner
+password is generated server-side (24 random bytes, hex-encoded) — never supplied by
+the caller, never persisted anywhere in this control plane. Dispatches `db.create`,
+and only on the agent reporting success, persists a `databases` row. →
+`201 {"database": {...databaseRecord}, "owner_password": "..."}` — `owner_password` is
+returned exactly once, in this response only, the same one-time-disclosure pattern the
+bootstrap-token install command uses. `404` if the server doesn't exist; `400` for an
+invalid `name`/`owner_user`; `502` if the agent isn't connected; `422` if `db.create`
+itself failed on the agent (e.g. a duplicate name at the database level).
+
+### `GET /api/v1/servers/{id}/databases`
+→ `200` with an array of `databaseRecord` (`ID`, `ServerID`, `Name`, `OwnerUser`,
+`Engine`, `Status`, `CreatedAt`), newest first. `404` if the server doesn't exist.
+
+### `DELETE /api/v1/servers/{id}/databases/{databaseId}`
+No request body — the database's own recorded `name`/`owner_user` are read from the
+`databases` table and passed to `db.delete` verbatim. Only on the agent reporting
+success is the `databases` row removed. → `200 {"status": "deleted"}`. `404` if the
+database doesn't exist on that server; `502` if the agent isn't connected; `422` if
+`db.delete` itself failed on the agent.
+
 ### `POST /agents/register`
 ```json
 {"token": "<bootstrap token>", "csr_pem": "<PEM-encoded CSR>"}
@@ -179,6 +208,17 @@ The full allow-listed capability names `packages/capabilities.Default()` registe
 `site.set_status`, `app.wordpress_install`, `ssl.issue_letsencrypt`,
 `ssl.install_custom`, `db.create`, `db.delete`, `db.list`, `file.list`, `file.read`,
 `file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`.
+
+### `db.create`
+```json
+{"name": "wp_example", "owner_user": "wp_example", "owner_password": "<24+ random bytes, hex>"}
+```
+Creates a MariaDB database and a least-privilege owner user granted access to that one
+database only (never a global grant). `name`/`owner_user` are validated against
+`^[a-z][a-z0-9_]{0,30}$` before any SQL is built (never string-concatenated from
+unvalidated input); `owner_password` must be at least 16 characters. Returns
+`{"name", "owner_user"}` as JSON — the control plane's source of truth for what to
+persist (see `apps/controlplane/databases.go`), not the caller's original request.
 
 ### `backup.restore`
 ```json

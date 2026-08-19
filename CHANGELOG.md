@@ -2,6 +2,49 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-19 — Database control-plane persistence and dashboard UI
+
+- **Closed the gap the previous entry's parity tracker flagged as "good candidate for
+  the next iteration"**: databases created via `db.create` are now persisted to the
+  control plane and shown in the dashboard, matching the treatment `backup.run`
+  already got. New `databases` table (`server_id`, `name`, `owner_user`, `engine`,
+  `status`, `created_at`, `UNIQUE(server_id, name)`); new store methods
+  (`createDatabase`/`listDatabases`/`getDatabase`/`deleteDatabase`, each scoped by
+  server ID the same way `getSite`/`getBackup` are); three new endpoints
+  (`GET`/`POST /api/v1/servers/{id}/databases`,
+  `DELETE /api/v1/servers/{id}/databases/{databaseId}`), all following the existing
+  dispatch-then-persist-on-success discipline — a row is written or removed only after
+  the agent confirms the operation actually happened, never speculatively.
+- **`db.create`'s agent-side handler now returns structured JSON**
+  (`{"name","owner_user"}`) as its `TaskEvent.Detail`, matching the `site.create`/
+  `backup.run` pattern, instead of a human-readable string the control plane had no
+  reliable way to parse.
+- **Owner passwords are generated server-side and never persisted**: `POST
+  /api/v1/servers/{id}/databases` generates a 24-random-byte, hex-encoded password,
+  dispatches it to the agent, and returns it to the caller exactly once in the create
+  response — the same one-time-disclosure pattern the bootstrap-token install command
+  already uses. Nothing in this control plane's database ever holds the plaintext.
+- Added a "Databases" panel to the server-detail dashboard view: a "+ New database"
+  modal (name + optional owner user, defaulting to the name), a databases table, a
+  one-time password-reveal box on creation, and a "Delete" action per row with a
+  destructive-action confirmation dialog.
+- Added 9 new automated tests: 5 capability-level input-validation tests for
+  `db.create`/`db.delete` (invalid name, invalid owner, under-length password — all
+  exercised without a real MariaDB, since validation runs before any connection
+  attempt is made), 2 store-layer round-trip/cross-server-scoping/duplicate-name tests,
+  and 2 HTTP-layer tests (not-found boundaries, and confirming a failed dispatch never
+  leaves an orphan `databases` row). 61 → 70 total test functions, `go vet`/`gofmt`
+  clean, all passing.
+- Updated `SYSTEM.md`, `API.md`, `TESTING.md`, and `SERVERAVATAR_PARITY.md` (DB-001
+  expanded to a full detail block reflecting the new persistence/UI layer; DB-005
+  moved `NOT_STARTED` → `COMPLETE`, folded into DB-001).
+- **Known differences unchanged from before**: MongoDB support (DB-002), a
+  phpMyAdmin/DB-admin-tool integration (DB-003), and database process/query monitoring
+  (DB-004) remain `NOT_STARTED` — out of scope for this pass. The real
+  `CREATE DATABASE`/`CREATE USER`/`GRANT` round trip against a live MariaDB remains
+  `BLOCKED_EXTERNAL` in this environment (no MariaDB here), same as the prior entry's
+  backup db/full-scope gap.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the
