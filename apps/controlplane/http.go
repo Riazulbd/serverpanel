@@ -65,6 +65,8 @@ func (a *apiServer) routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/servers/{id}/sites/{siteId}/backups", a.requireAuth(a.handleListBackups))
 	mux.HandleFunc("POST /api/v1/servers/{id}/sites/{siteId}/backups", a.requireAuth(a.handleCreateBackup))
 	mux.HandleFunc("POST /api/v1/servers/{id}/backups/{backupId}/restore", a.requireAuth(a.handleRestoreBackup))
+	mux.HandleFunc("POST /api/v1/servers/{id}/sites/{siteId}/ssl/letsencrypt", a.requireAuth(a.handleIssueSiteSSL))
+	mux.HandleFunc("POST /api/v1/servers/{id}/sites/{siteId}/ssl/custom", a.requireAuth(a.handleInstallSiteSSL))
 	mux.HandleFunc("GET /api/v1/servers/{id}/databases", a.requireAuth(a.handleListDatabases))
 	mux.HandleFunc("POST /api/v1/servers/{id}/databases", a.requireAuth(a.handleCreateDatabase))
 	mux.HandleFunc("DELETE /api/v1/servers/{id}/databases/{databaseId}", a.requireAuth(a.handleDeleteDatabase))

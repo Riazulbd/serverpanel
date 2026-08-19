@@ -163,6 +163,25 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Known differences**: same-server restore only — there is no capability to restore a backup onto a *different* server (that needs a transfer step first).
 - **Reason**: cross-server restore is coupled to cross-server migration/cloning, both explicitly Phase 2 (`product-plan.md` §9); tracked as a follow-up, not silently dropped.
 
+### SSL-001 — SSL certificate management (Let's Encrypt + custom upload)
+- **Category**: Application Management → SSL
+- **Documentation page**: Application Management → SSL
+- **Short description**: Issue a free certificate for an application's domain, or install a customer-supplied one, with automatic renewal.
+- **Expected behavior**: one action issues and installs a certificate that then renews unattended; a customer with their own certificate can upload it instead.
+- **Our implementation**: `ssl.issue_letsencrypt` drives certbot's nginx plugin non-interactively, then enables and verifies `certbot.timer` (also enabled at `stack.install` time) and reports the renewal state rather than assuming it. `ssl.install_custom` validates the supplied material — `tls.X509KeyPair` proves the key belongs to the certificate, the leaf must not be expired and must cover the domain — writes it (key `0600`), generates a port-443 server block in a file separate from the port-80 vhost, requires `nginx -t` to pass, and restores the previous state if it doesn't.
+- **Frontend**: site-detail "SSL" section — "Issue Let's Encrypt certificate" and "Upload custom certificate" modals.
+- **Backend service**: `apiServer.handleIssueSiteSSL`/`handleInstallSiteSSL` (`apps/controlplane/ssl.go`).
+- **API endpoint(s)**: `POST /api/v1/servers/{id}/sites/{siteId}/ssl/letsencrypt`, `POST /api/v1/servers/{id}/sites/{siteId}/ssl/custom`.
+- **Agent command**: `ssl.issue_letsencrypt`, `ssl.install_custom`.
+- **DB tables**: none — certificates live on the server that serves them; the control plane records the operation in `audit_log` only, and deliberately never stores a private key.
+- **Required permission**: authenticated session. The domain, system user, docroot, app type, and PHP version all come from the stored site record, never the request body: a caller supplying its own `system_user` would be choosing which site's nginx config gets rewritten.
+- **Security considerations**: this capability handles private keys and rewrites web-server config as root, so it gets several distinct defenses — real cryptographic validation before anything is written (a mismatched pair otherwise only fails at reload, with the site already down); validation errors written never to echo submitted PEM, so they are safe to return through the API and audit-log; a strict `^site_[a-z0-9_]{1,28}$` allow-list on the system user, which is interpolated into config paths (a prefix check is not sufficient — see the defect noted in `TESTING.md` §4); and rollback on `nginx -t` failure, since a rejected config left in `sites-enabled` breaks every *later* reload on that server, not just this site's.
+- **Test coverage**: `packages/capabilities/ssl_test.go` — validation against real generated X.509 material (matching pair accepted; mismatched key, expired certificate, and wrong-domain certificate each rejected; no error echoes key material), `handleSSLInstallCustom`'s full input-rejection matrix including traversing/non-site system users, and `validSystemUser`'s traversal regression test. Real ACME issuance is `BLOCKED_EXTERNAL` (needs public DNS pointing at a test host); real `nginx -t`/reload is not exercised here (no nginx in this environment).
+- **Current status**: `COMPLETE` (implementation and validation; real ACME issuance and real nginx activation remain `BLOCKED_EXTERNAL` in this environment)
+- **Completion date**: 2026-08-19
+- **Known differences**: one certificate per site's primary domain — no multi-domain/SAN certificates yet (blocked on APP-003, additional domains per application); no certificate-expiry dashboard or expiry alerting yet.
+- **Reason**: multi-domain certificates are only meaningful once an application can *have* additional domains; expiry alerting belongs with the alerting subsystem (SRV-008), neither of which exists yet.
+
 ### ACC-001 — Authentication, 2FA, session management
 - **Category**: Account Management
 - **Documentation page**: Account Management → "Update Account Info"
@@ -252,8 +271,8 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | APP-012 | Additional one-click installers (Laravel, Joomla, Mautic, Moodle, PrestaShop, Akaunting, Nextcloud, Statamic, Craft CMS, n8n, Node-RED, Uptime Kuma, NodeBB) | `NOT_STARTED` | WordPress is the only one-click installer today |
 | APP-013 | Log Monitoring Suite (traffic analytics) | `NOT_STARTED` | |
 | APP-014 | Application-level WAF / AI-bot blocker | `NOT_STARTED` | |
-| APP-015 | Custom SSL upload | `PARTIAL` | `ssl.install_custom` capability exists agent-side; no dedicated dashboard UI |
-| APP-016 | Let's Encrypt SSL + auto-renewal | `PARTIAL` | `ssl.issue_letsencrypt` implemented; certbot's own renewal timer not yet wired up by `stack.install` |
+| APP-015 | Custom SSL upload | `COMPLETE` | Folded into SSL-001 above |
+| APP-016 | Let's Encrypt SSL + auto-renewal | `COMPLETE` | Folded into SSL-001 above |
 
 ### Database management — not yet started (DB-*)
 | ID | Feature | Status | Notes |
@@ -296,10 +315,10 @@ capability surface (per task-brief §3/§101), not just what's already built.
 
 | Status | Count (detailed entries) | Count (summary-table rows) |
 |---|---|---|
-| `COMPLETE` | 4 (SRV-001, DB-001, BAK-002, ACC-001) | 2 (PROV-006, DB-005) |
-| `PARTIAL` | 4 (SRV-002, APP-001, APP-002, BAK-001) | 6 |
-| `NOT_STARTED` | 0 | ~55 |
-| `BLOCKED_EXTERNAL` | 0 (sub-scoped within DB-001's and BAK-001/BAK-002's live-MariaDB verification) | 0 |
+| `COMPLETE` | 5 (SRV-001, DB-001, SSL-001, BAK-002, ACC-001) | 4 (PROV-006, DB-005, APP-015, APP-016) |
+| `PARTIAL` | 4 (SRV-002, APP-001, APP-002, BAK-001) | 4 |
+| `NOT_STARTED` | 0 | ~53 |
+| `BLOCKED_EXTERNAL` | 0 (sub-scoped within DB-001's and BAK-001/BAK-002's live-MariaDB verification, and SSL-001's real-ACME/real-nginx verification) | 0 |
 | `INTENTIONALLY_NOT_APPLICABLE` | 0 | 1 |
 
 *Note: DB-001, BAK-001, and BAK-002 are each `COMPLETE` for the paths automated tests
@@ -366,3 +385,8 @@ establish the tracking process and close the single highest-priority gap
   password generation with one-time display, and automated test coverage at both the
   store and HTTP layers. Added DB-006 for the multiple-users-per-database gap this
   surfaced.
+- **2026-08-19**: SSL-001 added as `COMPLETE`, absorbing APP-015 and APP-016 (both
+  `PARTIAL` → `COMPLETE`). Also records a security fix found during that work: a
+  path-traversal defect in `system_user` validation reaching root-level file
+  operations, and `ssl.install_custom` previously reporting success without installing
+  anything — see `TESTING.md` §4.

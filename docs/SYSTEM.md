@@ -104,9 +104,12 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | Site cloning, cross-server migration | ⬜ Phase 2 |
 | Maintenance mode | ⬜ not implemented |
 | Basic auth on a site | ⬜ not implemented |
-| Custom + Let's Encrypt SSL | ✅ `ssl.issue_letsencrypt` (certbot), `ssl.install_custom` |
-| Automatic SSL renewal | ⬜ not implemented (certbot's own renewal timer is not
-  wired up by `stack.install` yet) |
+| Custom + Let's Encrypt SSL | ✅ `ssl.issue_letsencrypt` (certbot) and
+  `ssl.install_custom` (validates the cert/key actually match and cover the domain,
+  generates a real TLS server block, rolls back if nginx rejects it), both with
+  dedicated API endpoints and dashboard actions |
+| Automatic SSL renewal | ✅ `certbot.timer` enabled at `stack.install` time and
+  re-verified at issuance, with the outcome surfaced rather than assumed |
 | WordPress auto-login/auto-update | ⬜ not implemented |
 | Application enable/disable | ✅ `site.set_status` |
 | Secure file manager | ✅ `file.list/read/write/delete`, scoped + symlink-safe |
@@ -166,10 +169,10 @@ Phase boundaries and full milestone/estimate tables are in `product-plan.md` §6
 is the condensed status:
 
 - **Phase 1 — secure working foundation:** ~90% of the *capability* surface exists and
-  is tested per-capability (see the tables above). The gaps this phase originally
-  listed — backup **restore**, an automated test suite, and agent certificate
-  auto-rotation — are now closed; **SSL auto-renewal** (wiring up certbot's renewal
-  timer) is the remaining one. Not "GA-ready" yet, but the architecture and security
+  is tested per-capability (see the tables above). Every gap this phase originally
+  listed — backup **restore**, an automated test suite, agent certificate
+  auto-rotation, and SSL auto-renewal — is now closed. Not "GA-ready" yet (see §22 for
+  what remains), but the architecture and security
   primitives it depends on (mTLS with real rotation, allow-listed capabilities, per-app
   isolation, audit log) are real and proven, not stubs.
 - **Phase 2 — professional server management:** not started. Git deployment,

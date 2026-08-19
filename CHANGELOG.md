@@ -2,6 +2,56 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-19 — SSL management, and a security fix
+
+### Security
+
+- **Fixed a path traversal to arbitrary root-level file operations.** A site's
+  `system_user` is interpolated directly into nginx/php-fpm/TLS config paths but was
+  validated only by `strings.HasPrefix(sysUser, "site_")`. A value such as
+  `site_../../../../etc/nginx/sites-enabled/evil` satisfies that check and still
+  escapes the directory it is joined to — so `site.set_status` would `os.Remove` or
+  `os.Symlink` an attacker-chosen path, as root, reachable through the authenticated
+  task-dispatch API. Replaced with a strict `^site_[a-z0-9_]{1,28}$` allow-list
+  (`validSystemUser`), applied everywhere the value reaches a path, with a regression
+  test that also asserts every name `systemUserForDomain` generates still passes.
+- **`ssl.install_custom` reported success without installing anything.** It wrote the
+  certificate and key to a directory, ran `nginx -t` — which passed precisely because
+  nothing referenced those files — and returned "custom certificate installed". No
+  vhost ever served the certificate. This is exactly the fake-success state the
+  project's own rules forbid, and it is now a real implementation.
+
+### SSL
+
+- `ssl.install_custom` rewritten to actually install and activate a certificate:
+  validates the material (`tls.X509KeyPair` proves the key belongs to the certificate;
+  the leaf must not be expired and must cover the domain), writes it with the key at
+  `0600`, generates a port-443 server block, and requires `nginx -t` to pass —
+  restoring the previous state if it doesn't, since a rejected config left in
+  `sites-enabled` breaks every *later* reload on that server, not just this site's.
+  Validating the pair matters on its own: a mismatched certificate and key otherwise
+  fail only at nginx reload, by which point the site is already down.
+- The TLS server block lives in a file **separate** from the port-80 vhost, so
+  regenerating the vhost (which `site.create` does) can't silently drop a site's TLS
+  configuration.
+- **Let's Encrypt certificates now actually renew.** Nothing previously enabled
+  `certbot.timer`, so whether a certificate ever renewed depended on the base image — a
+  90-day outage with a delayed fuse. It is enabled at `stack.install` time and
+  re-verified at issuance, with the result surfaced to the operator ("unattended
+  renewal is active" / an explicit warning) rather than assumed.
+- Added dedicated endpoints (`POST .../sites/{siteId}/ssl/letsencrypt` and
+  `.../ssl/custom`) plus dashboard actions. The site's domain, system user, docroot,
+  app type, and PHP version come from the stored site record, never the request body —
+  a caller supplying its own `system_user` would be choosing which site's nginx config
+  gets rewritten. Neither certificate nor key is persisted by the control plane.
+- Validation errors are written never to echo the submitted PEM, so they are safe to
+  return through the API and write to the audit log; a test asserts this.
+- Added 8 tests against real generated X.509 material. Full suite: 87 test functions,
+  `go vet`/`gofmt` clean, passes with `-race`.
+- Updated `SECURITY.md` §4, `API.md`, `SYSTEM.md`, `TESTING.md` §4 (the defects above,
+  as evidence the testing was real), and `SERVERAVATAR_PARITY.md` (new SSL-001,
+  absorbing APP-015/APP-016).
+
 ## 2026-08-19 — Agent certificate rotation
 
 - **Implemented automatic agent certificate renewal**, closing the last of the three

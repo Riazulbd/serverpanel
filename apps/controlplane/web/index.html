@@ -190,6 +190,13 @@
         <h2 id="siteDetailDomain" style="margin:0 0 4px"></h2>
         <p class="muted" id="siteDetailMeta" style="margin:0 0 20px"></p>
 
+        <div class="section-title">SSL</div>
+        <div class="actions-grid">
+          <button class="primary" onclick="openLetsEncryptModal()">Issue Let's Encrypt certificate</button>
+          <button onclick="openCustomSSLModal()">Upload custom certificate</button>
+        </div>
+        <div id="sslResult" class="task-result hidden"></div>
+
         <div class="section-title" style="display:flex;justify-content:space-between;align-items:center">
           <span>Backups</span>
           <button class="primary" onclick="openNewBackupModal()">+ Create backup</button>
@@ -556,6 +563,7 @@ async function openSiteDetail(siteId) {
   const site = (state.sites || []).find(s => s.ID === siteId);
   showTab('siteDetail');
   document.getElementById('backupResult').classList.add('hidden');
+  document.getElementById('sslResult').classList.add('hidden');
   const server = (state.servers || []).find(s => s.ID === state.selectedServerId);
   document.getElementById('siteDetailServerName').textContent = server ? server.Name : 'Server';
   if (site) {
@@ -641,6 +649,79 @@ async function createBackup() {
 }
 
 function closeModalNoRefresh() { document.getElementById('modalRoot').innerHTML = ''; }
+
+function openLetsEncryptModal() {
+  document.getElementById('modalRoot').innerHTML = `
+    <div class="modal-backdrop" onclick="if(event.target===this) closeModalNoRefresh()">
+      <div class="modal">
+        <h2>Issue Let's Encrypt certificate</h2>
+        <p class="muted">The domain must already resolve to this server — Let's Encrypt validates it before issuing. Unattended renewal is enabled automatically.</p>
+        <div class="field"><label>Contact email</label><input id="leEmail" type="email" placeholder="Let's Encrypt sends expiry and urgent notices here"></div>
+        <button class="primary" style="width:100%" onclick="issueLetsEncrypt()">Issue certificate</button>
+        <div class="error" id="leError"></div>
+        <p class="muted" id="leStatus"></p>
+      </div>
+    </div>`;
+}
+
+async function issueLetsEncrypt() {
+  const email = document.getElementById('leEmail').value.trim();
+  const err = document.getElementById('leError');
+  const status = document.getElementById('leStatus');
+  err.textContent = '';
+  status.textContent = 'Requesting certificate — domain validation can take a minute...';
+  try {
+    const res = await api(API + '/servers/' + state.selectedServerId + '/sites/' + state.selectedSiteId + '/ssl/letsencrypt', {
+      method: 'POST', body: JSON.stringify({email})
+    });
+    closeModalNoRefresh();
+    showSSLResult(true, res.detail || 'Certificate issued.');
+  } catch (e) {
+    status.textContent = '';
+    err.textContent = e.message;
+  }
+}
+
+function openCustomSSLModal() {
+  document.getElementById('modalRoot').innerHTML = `
+    <div class="modal-backdrop" onclick="if(event.target===this) closeModalNoRefresh()">
+      <div class="modal">
+        <h2>Upload custom certificate</h2>
+        <p class="muted">Paste the full certificate chain and its private key. Both are verified to be a matching pair covering this site's domain, and are sent straight to the server — the private key is never stored by the control plane.</p>
+        <div class="field"><label>Certificate (fullchain PEM)</label><textarea id="customCert" rows="6" placeholder="-----BEGIN CERTIFICATE-----"></textarea></div>
+        <div class="field"><label>Private key (PEM)</label><textarea id="customKey" rows="6" placeholder="-----BEGIN PRIVATE KEY-----"></textarea></div>
+        <button class="primary" style="width:100%" onclick="installCustomSSL()">Install certificate</button>
+        <div class="error" id="customSSLError"></div>
+        <p class="muted" id="customSSLStatus"></p>
+      </div>
+    </div>`;
+}
+
+async function installCustomSSL() {
+  const certPem = document.getElementById('customCert').value.trim();
+  const keyPem = document.getElementById('customKey').value.trim();
+  const err = document.getElementById('customSSLError');
+  const status = document.getElementById('customSSLStatus');
+  err.textContent = '';
+  status.textContent = 'Validating and installing certificate...';
+  try {
+    const res = await api(API + '/servers/' + state.selectedServerId + '/sites/' + state.selectedSiteId + '/ssl/custom', {
+      method: 'POST', body: JSON.stringify({cert_pem: certPem, key_pem: keyPem})
+    });
+    closeModalNoRefresh();
+    showSSLResult(true, res.detail || 'Certificate installed.');
+  } catch (e) {
+    status.textContent = '';
+    err.textContent = e.message;
+  }
+}
+
+function showSSLResult(ok, message) {
+  const box = document.getElementById('sslResult');
+  box.className = 'task-result ' + (ok ? 'ok' : 'fail');
+  box.textContent = message;
+  box.classList.remove('hidden');
+}
 
 async function restoreBackup(backupId) {
   if (!confirm('Restore this backup? The site\'s current files/database will be replaced with the backed-up version. A safety checkpoint of the current state is taken automatically before anything is changed.')) return;

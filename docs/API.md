@@ -46,6 +46,8 @@ protected route; there is no route that skips it by omission.
 | `GET` | `/api/v1/servers/{id}/sites/{siteId}/backups` | List backups for a site, newest first |
 | `POST` | `/api/v1/servers/{id}/sites/{siteId}/backups` | Dispatch `backup.run` and persist the resulting backup record |
 | `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a previously recorded backup |
+| `POST` | `/api/v1/servers/{id}/sites/{siteId}/ssl/letsencrypt` | Issue a Let's Encrypt certificate for the site's domain |
+| `POST` | `/api/v1/servers/{id}/sites/{siteId}/ssl/custom` | Install a customer-supplied certificate/key for the site |
 | `GET` | `/api/v1/servers/{id}/databases` | List databases on a server, newest first |
 | `POST` | `/api/v1/servers/{id}/databases` | Dispatch `db.create` and persist the resulting database record |
 | `DELETE` | `/api/v1/servers/{id}/databases/{databaseId}` | Dispatch `db.delete` and remove the persisted database record |
@@ -139,6 +141,33 @@ pre-restore safety backups taken automatically before anything was overwritten,
 isn't connected; `422` if `backup.restore` itself failed on the agent (the agent-side
 error message explains why, and any checkpoint already taken is named in it so it's
 never a silent loss).
+
+### `POST /api/v1/servers/{id}/sites/{siteId}/ssl/letsencrypt`
+```json
+{"email": "ops@example.com"}
+```
+The domain comes from the stored site record, never the request, so a caller can only
+request a certificate for a domain this control plane already configured a vhost for.
+Dispatches `ssl.issue_letsencrypt` with a 10-minute budget (ACME validation is a round
+trip to Let's Encrypt), then verifies unattended renewal is actually enabled and
+reports the outcome in `detail` rather than assuming it. → `200
+{"status": "issued", "detail": "..."}`. `404` unknown site; `400` missing email;
+`502` agent not connected; `422` issuance failed (the agent's message explains why).
+
+### `POST /api/v1/servers/{id}/sites/{siteId}/ssl/custom`
+```json
+{"cert_pem": "-----BEGIN CERTIFICATE-----...", "key_pem": "-----BEGIN PRIVATE KEY-----..."}
+```
+The site's `system_user`, `docroot`, `app_type`, and `php_version` are read from the
+stored site record and passed to the agent — a caller supplying its own `system_user`
+would be choosing *which site's* nginx config gets rewritten, which is not theirs to
+choose. Neither the certificate nor the key is persisted by the control plane: they go
+straight to the server that will serve them. → `200
+{"status": "installed", "detail": "..."}`. `422` with the agent's validation message if
+the pair doesn't match, the certificate doesn't cover the domain, it has expired, or
+nginx rejected the resulting config (in which case the agent has already rolled back).
+Those messages are written never to echo submitted key material, so they are safe to
+surface and to audit-log.
 
 ### `POST /api/v1/servers/{id}/databases`
 ```json
@@ -249,6 +278,24 @@ so the control plane applies the identical rule before ever dispatching);
 to persist the `databases` row (see `POST /api/v1/servers/{id}/databases` above); the
 password itself is never echoed back by the agent, since the control plane already
 knows it (it generated it).
+
+### `ssl.install_custom`
+```json
+{"domain": "example.com", "system_user": "site_example_com",
+ "docroot": "/home/sites/site_example_com/public", "app_type": "php",
+ "php_version": "8.3", "cert_pem": "...", "key_pem": "..."}
+```
+Validates and *activates* a customer-supplied certificate. Validation is real parsing,
+before anything is written: `tls.X509KeyPair` proves the key actually belongs to the
+certificate, and the leaf must not be expired and must cover `domain`. The material is
+then written (key `0600`), a port-443 server block is generated in a file separate from
+the port-80 vhost (so regenerating the vhost can't silently drop TLS), and `nginx -t`
+must pass — if it doesn't, the previous state is restored before returning, because a
+rejected config left in `sites-enabled` breaks every *later* reload on that server, not
+just this site's.
+
+`system_user` must match `^site_[a-z0-9_]{1,28}$`; it is interpolated into config
+paths, so a prefix check is not sufficient validation (see `TESTING.md` §4).
 
 ### `backup.restore`
 ```json

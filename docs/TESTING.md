@@ -2,7 +2,7 @@
 
 ## 1. Current automated coverage
 
-`go test ./...` — 79 test functions across three packages, all passing, no `-race`
+`go test ./...` — 87 test functions across three packages, all passing, no `-race`
 failures, `go vet` clean, `gofmt -l` clean:
 
 ```
@@ -17,7 +17,7 @@ go test ./... -race
 |---|---|---|
 | `apps/controlplane` | 35 | Auth/session lifecycle (create, MFA-verify, expiry, delete), bcrypt password rules, email normalization/uniqueness, TOTP round-trip/skew/rejection, bootstrap-token single-use/expiry/unknown-token, server create/list/get, revocation (cert-serial blocking + status transitions, including that a stray disconnect can't resurrect a revoked server), heartbeat recording, audit-log append, site create/list, `getSite`'s cross-server scoping, backup create/list/get round trip and its own cross-server scoping, database create/list/get/delete round trip and its own cross-server scoping, `commitCertRenewal`'s atomic adopt-new/revoke-old transaction, 4 certificate-rotation integration tests against a **real mTLS gateway listener, real CA, and real database** (a full request→sign→confirm→revoke round trip verifying the successor is bound to the same server identity, uses a new serial, and that nothing changes before the agent confirms; refusal of a second renewal on one session; refusal to renew a revoked certificate; and that an unsolicited renewal acknowledgement revokes nothing), and 8 full HTTP integration tests through `routes()` with `httptest` covering signup→login→protected-route, the full 2FA enroll→logout→login→MFA-challenge→access flow, server create/list/revoke, agent registration with a bad token, the backup endpoints' not-found boundaries, backup-request validation (bad scope, missing `db_name`, and confirming validation runs before dispatch), the database endpoints' empty-list/not-found boundaries, and database-name validation (confirming an injection-shaped name is rejected before dispatch, and before any password is generated) |
 | `apps/agent` | 5 | Certificate-expiry parsing (including rejection of empty/malformed/non-certificate PEM), that each renewal generates a genuinely fresh keypair and a self-consistent CSR, and `persistRenewedIdentity`'s durability properties against a real filesystem: files replaced with 0600 preserved, no temporary file left behind, and — the property the whole renewal ordering depends on — the previous identity left intact and usable when the new one can't be written |
-| `packages/capabilities` | 39 | Capability dispatch (unknown name rejected, `system.ping` works, nil `Progress` doesn't panic, the registry has a handler for every declared `Cap*` constant), `service.control`'s allow-list boundary (unit, action, and an explicit shell-metacharacter-injection attempt, all rejected before `systemctl` is ever invoked), the file manager's path-traversal and symlink-escape defenses (`resolveScopedPath`), oversized-read/write rejection, refusal to delete the site root itself, a real list+write round trip against a real filesystem, log redaction (token/password query params, `Authorization: Bearer`/`Basic`), `logs.tail`'s input validation, domain-name validation (including injection-shaped inputs), `systemUserForDomain`'s bounding/sanitization, the deterministic php-fpm-pool/socket/vhost path builders, `backup.run`'s scope validation and a real files-backup-and-checksum round trip, and `backup.restore`'s archive-location/checksum validation, a real files backup→corrupt→restore round trip (with a real throwaway system user, verifying both content restoration and pre-restore checkpoint creation), and `extractTarGzSafely`'s rejection of path-traversal entries, absolute-path entries, and oversized archives, plus `db.create`/`db.delete`'s pre-connection input validation (invalid database name, invalid owner user, under-length owner password) and `ValidIdentifier`'s boundary cases (leading digit/uppercase, spaces, punctuation, and exactly-at vs. one-over the 31-character cap) |
+| `packages/capabilities` | 47 | Capability dispatch (unknown name rejected, `system.ping` works, nil `Progress` doesn't panic, the registry has a handler for every declared `Cap*` constant), `service.control`'s allow-list boundary (unit, action, and an explicit shell-metacharacter-injection attempt, all rejected before `systemctl` is ever invoked), the file manager's path-traversal and symlink-escape defenses (`resolveScopedPath`), oversized-read/write rejection, refusal to delete the site root itself, a real list+write round trip against a real filesystem, log redaction (token/password query params, `Authorization: Bearer`/`Basic`), `logs.tail`'s input validation, domain-name validation (including injection-shaped inputs), `systemUserForDomain`'s bounding/sanitization, the deterministic php-fpm-pool/socket/vhost path builders, `backup.run`'s scope validation and a real files-backup-and-checksum round trip, and `backup.restore`'s archive-location/checksum validation, a real files backup→corrupt→restore round trip (with a real throwaway system user, verifying both content restoration and pre-restore checkpoint creation), and `extractTarGzSafely`'s rejection of path-traversal entries, absolute-path entries, and oversized archives, plus `db.create`/`db.delete`'s pre-connection input validation (invalid database name, invalid owner user, under-length owner password) and `ValidIdentifier`'s boundary cases (leading digit/uppercase, spaces, punctuation, and exactly-at vs. one-over the 31-character cap), `validSystemUser`'s path-traversal rejection (a regression test for a real defect — see §4) including that every name `systemUserForDomain` generates passes its own validation, and custom-SSL validation against **real generated X.509 material**: a matching pair accepted, a mismatched certificate/key pair rejected, an expired certificate rejected, a certificate not covering the domain rejected, and that no validation error ever echoes the submitted key material |
 
 None of this is mocked where a cheap real implementation was possible: sessions/users/
 servers/audit run against a real temp-file SQLite database with the real schema (not
@@ -103,6 +103,32 @@ From the prior session's manual integration pass:
 This session's automated-test pass (see §1) found **no new defects** — every test
 passed on the first correctly-written attempt, which is consistent with (not
 independent proof beyond) the prior manual pass having been genuine.
+
+Found by code review while extending SSL support (2026-08-19), each now covered by a
+regression test:
+
+- **Path traversal to arbitrary root-level file operations.** `system_user` is
+  interpolated directly into nginx/php-fpm/TLS config paths, but was validated only by
+  `strings.HasPrefix(sysUser, "site_")`. A value like
+  `site_../../../../etc/nginx/sites-enabled/evil` satisfies that check and still
+  escapes the directory it is joined to — so `site.set_status` would `os.Remove` or
+  `os.Symlink` an attacker-chosen path, as root, reachable through the authenticated
+  task-dispatch API. Replaced with a strict `^site_[a-z0-9_]{1,28}$` allow-list
+  (`validSystemUser`), applied everywhere the value reaches a path.
+- **`ssl.install_custom` reported success without installing anything.** It wrote the
+  certificate and key to a directory, then ran `nginx -t` — which passed precisely
+  because nothing referenced those files — and reported "custom certificate
+  installed". No vhost ever served the certificate. It now validates the material,
+  generates a real TLS server block, and rolls back if nginx rejects the result.
+- **No verification that a certificate and key actually match.** A mismatched pair was
+  accepted and would only surface at nginx reload, with the site already down.
+- **Let's Encrypt certificates had no guaranteed renewal.** Nothing enabled
+  `certbot.timer`, so whether a certificate ever renewed depended on the base image —
+  a 90-day outage with a delayed fuse. Now enabled at stack-install time and
+  re-verified at issuance, with the outcome surfaced to the operator.
+- **Data race on the agent's connection encoder.** Heartbeat and task goroutines shared
+  one `json.Encoder` with no synchronization; two interleaved encodes emit a corrupt
+  frame that desynchronizes the session. Now mutex-guarded (`sender`).
 
 ## 5. Known gaps / recommended next testing investment, in priority order
 

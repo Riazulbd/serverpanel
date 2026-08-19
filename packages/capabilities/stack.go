@@ -140,6 +140,21 @@ func phase1LEMPSteps() []installStep {
 			},
 		},
 		{
+			// A certificate that issues but never renews is a 90-day outage
+			// with a delayed fuse, so unattended renewal is set up at stack
+			// install time rather than left to whether the certbot package
+			// happened to enable its own timer on this image.
+			Name: "certbot unattended renewal timer",
+			Check: func(ctx context.Context) bool {
+				out, _ := run(ctx, "systemctl", "is-enabled", "certbot.timer")
+				return strings.TrimSpace(out) == "enabled"
+			},
+			Run: func(ctx context.Context) error {
+				_, err := run(ctx, "systemctl", "enable", "--now", "certbot.timer")
+				return err
+			},
+		},
+		{
 			Name:  "ufw",
 			Check: func(ctx context.Context) bool { return isPackageInstalled(ctx, "ufw") },
 			Run:   func(ctx context.Context) error { _, err := aptInstall(ctx, "ufw"); return err },

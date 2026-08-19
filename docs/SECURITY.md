@@ -133,6 +133,16 @@ Properties this guarantees:
 - All privileged capability invocations are written to an append-only, tamper-evident
   audit log (server-side, in the control plane — not only on the VPS, so a VPS
   compromise can't erase its own history).
+- **Every value that reaches a filesystem path is allow-listed, not merely
+  prefix-checked.** Because the agent runs as root and interpolates a site's
+  `system_user` into nginx, php-fpm, and TLS config paths, that value is validated
+  against `^site_[a-z0-9_]{1,28}$` (`validSystemUser`) — a pattern admitting no path
+  separators or dots. This is not theoretical tidiness: the earlier `HasPrefix(s,
+  "site_")` check accepted `site_../../../..`, which escaped the directory and turned
+  a config write or delete into an arbitrary one, as root, reachable through the
+  authenticated task-dispatch API. Fixed and covered by a regression test
+  (`TestValidSystemUser`, `TestSiteSetStatusRejectsTraversingSystemUser`); recorded in
+  `TESTING.md` §4.
   **Implemented as described** — see `store.log`/`store.auditLog`; every capability
   dispatch is logged before the task is sent (`gateway.dispatch`), and the audit log
   is append-only SQL (no UPDATE/DELETE path exists for `audit_log` rows).

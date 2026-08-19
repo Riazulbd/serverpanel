@@ -12,6 +12,20 @@ import (
 
 var domainRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$`)
 
+// systemUserRe is the allow-list for a site's Linux user name. Every value
+// systemUserForDomain can produce matches it, and — critically — it admits
+// no path separators or dots, because this value is interpolated directly
+// into filesystem paths (nginx vhost, php-fpm pool, socket, TLS config).
+// A prefix check alone is not sufficient validation for that: "site_../.."
+// starts with "site_" and still escapes the directory it is joined to,
+// which would turn a config-file write or delete into an arbitrary one,
+// as root.
+var systemUserRe = regexp.MustCompile(`^site_[a-z0-9_]{1,28}$`)
+
+// validSystemUser reports whether s is a system-user name this agent will
+// interpolate into a path.
+func validSystemUser(s string) bool { return systemUserRe.MatchString(s) }
+
 // disabledPHPFunctions is the default deny-list applied to every site's
 // php-fpm pool. Combined with open_basedir, this is the isolation boundary
 // mentioned throughout docs/security-trust-model.md §4: a compromised
@@ -239,8 +253,8 @@ func handleSiteSetPHP(ctx context.Context, params map[string]any, progress Progr
 	if phpVersion != "8.3" {
 		return "", fmt.Errorf("only php_version 8.3 is available in this release")
 	}
-	if sysUser == "" || !strings.HasPrefix(sysUser, "site_") {
-		return "", fmt.Errorf("invalid system_user")
+	if !validSystemUser(sysUser) {
+		return "", fmt.Errorf("invalid system_user %q", sysUser)
 	}
 	return "no-op: only one PHP version is currently offered", nil
 }
@@ -248,8 +262,8 @@ func handleSiteSetPHP(ctx context.Context, params map[string]any, progress Progr
 func handleSiteSetStatus(ctx context.Context, params map[string]any, progress Progress) (string, error) {
 	sysUser, _ := params["system_user"].(string)
 	status, _ := params["status"].(string)
-	if sysUser == "" || !strings.HasPrefix(sysUser, "site_") {
-		return "", fmt.Errorf("invalid system_user")
+	if !validSystemUser(sysUser) {
+		return "", fmt.Errorf("invalid system_user %q", sysUser)
 	}
 	enabledPath := "/etc/nginx/sites-enabled/" + sysUser + ".conf"
 
