@@ -2,6 +2,43 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-19 — Database persistence and dashboard UI (DB-001/DB-005)
+
+- **Closed the highest-priority documented gap flagged in the previous entry**: the
+  `db.create`/`db.delete`/`db.list` agent capabilities existed but were only reachable
+  through generic task dispatch, with no control-plane record of what databases exist
+  and no dashboard UI — the same persistence/UI gap BAK-001/BAK-002 closed for backups,
+  now closed for databases.
+- Added a `databases` table (`apps/controlplane/db.go`) and matching `store` methods
+  (`createDatabase`/`listDatabases`/`getDatabase`/`deleteDatabase`, each scoped by
+  server ID the same way `getSite`/`getBackup` are) — metadata only (name, owner user,
+  engine, status, created_at); **no password column**, matching the project's existing
+  "secrets are never persisted at rest when a one-time reveal will do" pattern
+  (bootstrap tokens).
+- Added three endpoints (`apps/controlplane/databases.go`): `POST`/`GET
+  /api/v1/servers/{id}/databases`, `DELETE /api/v1/servers/{id}/databases/{dbId}`,
+  following the existing dispatch-then-persist-on-success pattern (`handleCreateSite`,
+  `handleCreateBackup`) — a database row is only ever written after the agent confirms
+  the database and its scoped owner user actually exist. The owner password is
+  generated control-plane-side (256-bit random, base64url-encoded) — never accepted
+  from the client (so a caller can't force a weak/reused password onto a database
+  credential) and returned exactly once in the create response, never stored.
+  Database/owner-user name validation is enforced independently at the HTTP layer
+  (fail fast, clean 400) in addition to the agent's own validation — defense in depth,
+  not a replacement for it.
+- Added a "Databases" panel to the server-detail dashboard view: a table of existing
+  databases with per-row delete, and a "+ New database" modal with a one-time
+  password-reveal box (mirrors the existing "install command shown once" UX pattern).
+- Added automated test coverage: `TestDatabaseCreateListGetDeleteRoundTrip`
+  (`store_test.go`) and `TestDatabaseEndpointsValidateBeforeDispatch` (`http_test.go` —
+  invalid-name/invalid-owner-user rejection, no-agent-connected dispatch failure, and
+  that no database record is persisted when dispatch fails). The real MariaDB round
+  trip for `db.create`/`db.delete` remains environment-`BLOCKED_EXTERNAL` in this
+  session (no MariaDB available here), same sub-scoping as BAK-001/BAK-002.
+- Updated `docs/SERVERAVATAR_PARITY.md` (DB-001 detail block expanded to cover the new
+  layer; the `DB-005` summary row is folded into DB-001, since it was the same
+  capability's missing layer, not a distinct feature) and `docs/SYSTEM.md`.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

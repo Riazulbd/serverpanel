@@ -150,4 +150,19 @@ CREATE TABLE IF NOT EXISTS backups (
 	status     TEXT NOT NULL,
 	created_at TEXT NOT NULL
 );
+
+-- databases records only metadata (name/owner/engine) about a database that
+-- db.create has already confirmed exists on the agent. The owner's password
+-- is never persisted here: db.create's generated password is returned to
+-- the caller exactly once, in the create-database HTTP response, the same
+-- pattern createServer's bootstrap token already uses.
+CREATE TABLE IF NOT EXISTS databases (
+	id         TEXT PRIMARY KEY,
+	server_id  TEXT NOT NULL REFERENCES servers(id),
+	name       TEXT NOT NULL,
+	owner_user TEXT NOT NULL,
+	engine     TEXT NOT NULL DEFAULT 'mariadb',
+	status     TEXT NOT NULL,
+	created_at TEXT NOT NULL
+);
 `
