@@ -2,6 +2,40 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-19 — Database control-plane persistence and dashboard UI (DB-005)
+
+- Closed the gap flagged in DB-001's "Known differences": databases created via
+  `db.create` are now recorded by the control plane and have a dedicated dashboard
+  panel, the same dispatch-then-persist-on-success pattern `handleCreateBackup`/
+  `handleCreateSite` already use — a raw task result alone doesn't establish that a
+  durable database record now exists.
+- New `databases` table (`id`, `server_id`, `name`, `owner_user`, `engine`, `status`,
+  `created_at`, unique on `(server_id, name)`) and matching `store` methods
+  (`createDatabase`/`listDatabases`/`getDatabase`/`deleteDatabase`), each scoped by
+  server ID the same way `getSite`/`getBackup` are, so a database record can never be
+  addressed under the wrong server.
+- New endpoints: `GET`/`POST /api/v1/servers/{id}/databases`,
+  `DELETE /api/v1/servers/{id}/databases/{dbId}`. Create generates a fresh 24-byte
+  random owner password server-side (never trusting the browser to supply one),
+  dispatches `db.create`, and returns the password to the caller exactly once — it is
+  never persisted by the control plane and never written to the audit log, the same
+  pattern `handleCreateServer` uses for bootstrap tokens. Delete reads its dispatch
+  parameters from the stored row, never from free-form client input, matching
+  `handleRestoreBackup`.
+- Exported `capabilities.ValidIdentifier` so the control plane can pre-validate
+  database/user names against the same allow-list the agent itself enforces, instead of
+  duplicating (and risking drift in) the regex.
+- Added a "Databases" panel to the server-detail dashboard view (create modal with a
+  one-time credential display, a databases table, delete with confirmation).
+- Added 2 new capability-layer tests (`ValidIdentifier`), 1 new store round-trip test,
+  and 2 new HTTP tests (invalid-identifier rejection, validation-before-dispatch, and
+  delete-requires-a-real-database). Full suite green, `go vet`/`gofmt` clean. Manually
+  smoke-tested against a running instance (signup → login → create server → create/list/
+  delete database validation paths, including the expected `502` with no agent
+  connected).
+- Updated `docs/SERVERAVATAR_PARITY.md` (DB-001 known-differences, DB-005 promoted from
+  `NOT_STARTED` summary row to a full `COMPLETE` detail entry) and `docs/SYSTEM.md`.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

@@ -16,6 +16,16 @@ import (
 // string into a CREATE DATABASE/USER statement.
 var identifierRe = regexp.MustCompile(`^[a-z][a-z0-9_]{0,30}$`)
 
+// ValidIdentifier reports whether s is safe to use as a MySQL/MariaDB
+// database or user identifier without further escaping beyond
+// backtick-quoting. Exported so the control plane can pre-validate
+// caller-supplied names before ever dispatching db.create/db.delete to an
+// agent — the same allow-list, checked in two places, not two different
+// rules that could drift apart.
+func ValidIdentifier(s string) bool {
+	return identifierRe.MatchString(s)
+}
+
 func mariaDBConn() (*sql.DB, error) {
 	// Connects as root over the local Unix socket, matching MariaDB's
 	// default Debian/Ubuntu package configuration (unix_socket auth
