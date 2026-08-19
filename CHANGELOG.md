@@ -2,6 +2,39 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-19 — Database management: control-plane persistence and dashboard UI
+
+- **Closed the DB-001/DB-005 gap flagged in the parity matrix**: `db.create`/
+  `db.delete` are now dispatched through dedicated control-plane endpoints
+  (`apps/controlplane/databases.go`) instead of only being reachable via generic task
+  dispatch, and — mirroring the dispatch-then-persist-on-success pattern `backup.run`
+  established — a `databases` row is written only after the agent confirms success.
+  `GET /api/v1/servers/{id}/databases`, `POST /api/v1/servers/{id}/databases`,
+  `DELETE /api/v1/servers/{id}/databases/{dbId}`.
+- The owner password is generated server-side with a CSPRNG (128-bit, hex-encoded) —
+  never accepted from the client and never persisted anywhere, including in the new
+  `databases` table (which deliberately has no password column). It's returned to the
+  caller exactly once in the create response, the same one-time-disclosure pattern the
+  bootstrap-token install command already used.
+- Exported `capabilities.ValidIdentifier` so the control plane can reject an unsafe
+  database/user name at the HTTP boundary, before ever dispatching to the agent, using
+  the *exact* rule the agent independently re-enforces — rather than maintaining a
+  second copy of the regex that could silently drift out of sync.
+- Added a "Databases" panel to the server-detail dashboard view: a create modal
+  (name + owner username, one-time credential display) and a databases table with
+  per-row delete (destructive-action confirmation dialog).
+- Tests: `packages/capabilities/db_test.go` (`ValidIdentifier`'s exact boundary,
+  including a backtick and a `DROP TABLE` injection attempt), `apps/controlplane/
+  store_test.go` (create/list/get/delete round trip, cross-server scoping),
+  `apps/controlplane/http_test.go` (validation-before-dispatch, not-found handling,
+  confirming a failed create never leaves an orphan record). All run against real
+  SQLite, not mocks. The underlying `db.create`/`db.delete` agent capabilities
+  themselves were manually verified against a real MariaDB in a prior session; a fresh
+  automated round trip remains `BLOCKED_EXTERNAL` in this environment (no MariaDB
+  available here) — see `docs/SERVERAVATAR_PARITY.md` DB-001.
+- Updated `docs/SYSTEM.md`, `docs/API.md`, `docs/TESTING.md`, and
+  `docs/SERVERAVATAR_PARITY.md` to match.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

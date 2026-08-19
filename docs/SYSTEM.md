@@ -118,6 +118,23 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 All ⬜ — explicitly scoped to Phase 2 (`product-plan.md` §9). No Git deployment,
 webhook push-to-deploy, deploy keys, or rollback exist in this codebase yet.
 
+### Database management
+| Feature | Status |
+|---|---|
+| Create/delete MySQL/MariaDB database + scoped owner user | ✅ `db.create`/`db.delete`
+  dispatched via dedicated endpoints (`apps/controlplane/databases.go`), persisted as a
+  `databases` row only after the agent confirms success — same
+  dispatch-then-persist-on-success pattern as sites/backups |
+| Owner-password handling | ✅ generated server-side with a CSPRNG (never accepted from
+  the client, never persisted anywhere); returned once in the create response |
+| List databases | ✅ `GET /api/v1/servers/{id}/databases`, server-detail "Databases"
+  panel |
+| MongoDB support | ⬜ not implemented |
+| DB admin UI (phpMyAdmin-equivalent) | ⬜ not implemented |
+| Database process/query monitoring | ⬜ not implemented |
+| Password rotation | ⬜ not implemented (would need a new `db.set_password`
+  capability — `db.create` only sets a password at creation) |
+
 ### Backup and restoration
 | Feature | Status |
 |---|---|
@@ -253,6 +270,7 @@ EXISTS`, applied on every `openDB` call — idempotent, no separate migration to
 | `audit_log` | append-only: seq, timestamp, server, actor, action, detail |
 | `sites` | id, server, domain, system user, docroot, app type, PHP version, status |
 | `backups` | id, server, site, scope, path, size, sha256, status, created_at |
+| `databases` | id, server, name, owner_user, status, created_at (no password column — see §12) |
 
 No ORM — every query is a small, explicit SQL statement in `store.go`. All secrets
 (session tokens, bootstrap tokens) are stored only as SHA-256 hashes; passwords use
@@ -262,8 +280,9 @@ bcrypt (cost 12); nothing is stored in plaintext.
 
 Full list with request/response shapes in `API.md`. Summary: `/api/v1/auth/*`
 (signup/login/logout/TOTP enroll+verify/MFA challenge/me), `/api/v1/servers*` (CRUD,
-revoke, task dispatch, sites, audit), `/agents/register` (the one unauthenticated
-agent-facing endpoint, secured by the bootstrap token itself), `/healthz`.
+revoke, task dispatch, sites, backups, databases, audit), `/agents/register` (the one
+unauthenticated agent-facing endpoint, secured by the bootstrap token itself),
+`/healthz`.
 
 ## 10. Background jobs
 

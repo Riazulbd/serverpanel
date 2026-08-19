@@ -297,3 +297,57 @@ func TestBackupCreateListGetRoundTrip(t *testing.T) {
 		t.Fatal("expected getBackup to refuse a backup ID under the wrong server")
 	}
 }
+
+func TestDatabaseCreateListDeleteRoundTrip(t *testing.T) {
+	st := newTestStore(t)
+	serverID, _, _ := st.createServer("web-11", "", nil, time.Hour, "admin@example.com")
+
+	rec, err := st.createDatabase(serverID, "wp_example", "wp_example")
+	if err != nil {
+		t.Fatalf("createDatabase: %v", err)
+	}
+	if rec.ID == "" || rec.Status != "active" {
+		t.Fatalf("unexpected database record: %+v", rec)
+	}
+
+	list := st.listDatabases(serverID)
+	if len(list) != 1 || list[0].Name != "wp_example" {
+		t.Fatalf("listDatabases = %+v, want one entry matching the created database", list)
+	}
+
+	got, ok := st.getDatabase(serverID, rec.ID)
+	if !ok || got.OwnerUser != "wp_example" {
+		t.Fatalf("getDatabase = %+v, ok=%v, fields don't round-trip", got, ok)
+	}
+
+	if err := st.deleteDatabase(serverID, rec.ID); err != nil {
+		t.Fatalf("deleteDatabase: %v", err)
+	}
+	if len(st.listDatabases(serverID)) != 0 {
+		t.Fatal("expected listDatabases to be empty after delete")
+	}
+	if err := st.deleteDatabase(serverID, rec.ID); err == nil {
+		t.Fatal("expected deleteDatabase to error when the record no longer exists")
+	}
+}
+
+func TestGetDatabaseIsScopedToServerID(t *testing.T) {
+	st := newTestStore(t)
+	serverA, _, _ := st.createServer("web-a2", "", nil, time.Hour, "admin@example.com")
+	serverB, _, _ := st.createServer("web-b2", "", nil, time.Hour, "admin@example.com")
+
+	rec, err := st.createDatabase(serverA, "adb", "adb")
+	if err != nil {
+		t.Fatalf("createDatabase: %v", err)
+	}
+
+	if _, ok := st.getDatabase(serverA, rec.ID); !ok {
+		t.Fatal("expected getDatabase to find the database under its real server")
+	}
+	if _, ok := st.getDatabase(serverB, rec.ID); ok {
+		t.Fatal("expected getDatabase to refuse a database ID under the wrong server")
+	}
+	if err := st.deleteDatabase(serverB, rec.ID); err == nil {
+		t.Fatal("expected deleteDatabase to refuse a database ID under the wrong server")
+	}
+}
