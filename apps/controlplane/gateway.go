@@ -14,6 +14,12 @@ import (
 	"github.com/riazulbd/serverpanel/packages/proto"
 )
 
+// agentCertTTL is the validity period issued for both initial agent
+// registration (http.go's handleRegister) and subsequent renewals below —
+// kept as one constant so the two issuance paths can never silently drift
+// apart.
+const agentCertTTL = 30 * 24 * time.Hour
+
 // gateway is the mTLS-terminated, agent-facing side of the control plane.
 // It is deliberately separate from the public HTTP API (see
 // docs/architecture.md §1): only agents holding a certificate signed by our
@@ -173,8 +179,49 @@ func (g *gateway) handleConn(conn net.Conn) {
 					}
 				}
 			}
+		case proto.MsgRenewCert:
+			g.handleRenewCert(sess, serverID, env.RenewCert)
 		}
 	}
+}
+
+// handleRenewCert issues a fresh client certificate for the already-
+// authenticated session's server_id and records it as the server's current
+// cert_serial. The requested identity is never taken from the request body
+// (there isn't one to take — RenewCertRequest only carries a CSR) but from
+// serverID, which the gateway derived from the mTLS peer certificate at
+// connection time, so an agent can only ever renew its own identity.
+//
+// The old certificate is deliberately left un-revoked: it stays valid until
+// its own natural expiry (at most agentCertTTL from when it was issued). If
+// this were revoked immediately instead, a renewal response lost to a
+// network drop right after this point would leave the agent holding a
+// newly-revoked old cert and no new one on disk, forcing a hard lockout that
+// only manual bootstrap-token re-registration could fix. A short overlap
+// window where two certificates are simultaneously valid for one server_id
+// is the accepted trade-off — see docs/SECURITY.md §2.
+func (g *gateway) handleRenewCert(sess *agentSession, serverID string, req *proto.RenewCertRequest) {
+	result := proto.RenewCertResult{}
+	if req == nil || req.CSRPEM == "" {
+		result.Error = "empty renewal request"
+	} else if _, ok := g.store.get(serverID); !ok {
+		result.Error = "server no longer registered"
+	} else {
+		certPEM, serial, err := g.ca.signAgentCSR([]byte(req.CSRPEM), serverID, agentCertTTL)
+		if err != nil {
+			result.Error = err.Error()
+		} else {
+			g.store.renewCertSerial(serverID, serial.String())
+			result.Ok = true
+			result.CertPEM = string(certPEM)
+		}
+	}
+	if !result.Ok {
+		g.store.log(serverID, "", "agent.cert_renewal_failed", result.Error)
+	}
+	sess.mu.Lock()
+	sess.enc.Encode(proto.Envelope{Type: proto.MsgRenewCertResult, RenewCertResult: &result})
+	sess.mu.Unlock()
 }
 
 // dispatch sends a task to a connected agent and waits (bounded by ctx) for

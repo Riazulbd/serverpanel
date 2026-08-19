@@ -40,7 +40,7 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Documentation page**: Server Management → "Installation (Direct Method)"
 - **Short description**: Connect a VPS to the control plane via a one-time install command.
 - **Expected behavior** (per ServerAvatar's documented workflow): operator creates a server record, gets an install command, runs it on a clean VPS, server appears connected.
-- **Our implementation**: bootstrap-token → mTLS client-certificate exchange (`POST /agents/register`); agent connects outbound to the gateway, no inbound port required.
+- **Our implementation**: bootstrap-token → mTLS client-certificate exchange (`POST /agents/register`); agent connects outbound to the gateway, no inbound port required. Certificates auto-renew before their 30-day expiry over the live mTLS session (`proto.MsgRenewCert`/`MsgRenewCertResult`, `apps/agent/certrenew.go`, `gateway.handleRenewCert`) — see SRV-001b.
 - **Frontend**: `web/index.html` "+ New server" modal, server list/detail views.
 - **Backend service**: `apiServer.handleCreateServer`, `agentCA`, `gateway`.
 - **API endpoint(s)**: `POST /api/v1/servers`, `POST /agents/register`.
@@ -51,8 +51,27 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Test coverage**: `apps/controlplane/http_test.go` (`TestServerCreateListRevokeFlow`, `TestRegisterEndpointRejectsBadToken`), `apps/controlplane/store_test.go`.
 - **Current status**: `COMPLETE`
 - **Completion date**: 2026-08-14
-- **Known differences**: no agent certificate auto-renewal before 30-day expiry yet.
-- **Reason**: scoped out of the initial secure-foundation pass; tracked in `SYSTEM.md` §21.
+- **Known differences**: none remaining — see SRV-001b for the renewal follow-up.
+- **Reason**: n/a.
+
+### SRV-001b — Agent certificate auto-renewal
+- **Category**: Server Management (agent security)
+- **Documentation page**: n/a — infrastructure hardening behind SRV-001, not a directly documented ServerAvatar page; included because a fleet whose agents silently need manual re-enrollment every 30 days is not production-ready regardless of upstream documentation.
+- **Short description**: an agent proactively obtains a fresh client certificate before its current one expires, without operator intervention.
+- **Expected behavior**: an agent connected for weeks/months keeps working indefinitely without anyone re-running the install command.
+- **Our implementation**: the agent checks its certificate's expiry hourly (`renewalLoop`, `apps/agent/certrenew.go`) and, once fewer than 7 days remain (`renewalWindow`), generates a fresh keypair/CSR and requests renewal over its already-authenticated mTLS session (`proto.MsgRenewCert`). The gateway (`gateway.handleRenewCert`, `apps/controlplane/gateway.go`) signs the new cert bound to the session's server_id (never a CSR-requested subject) and advances the stored `cert_serial` so revocation continues to target the certificate actually in use. The agent persists the new cert/key atomically (temp-file-then-rename) so a crash mid-write can't corrupt its identity.
+- **Frontend**: n/a — fully automatic, no UI surface (renewal/failure events are in the audit log via `agent.cert_renewed`/`agent.cert_renewal_failed`).
+- **Backend service**: `gateway.handleRenewCert`.
+- **API endpoint(s)**: n/a — agent-initiated over the existing mTLS session, not a REST endpoint (matches how the rest of the agent protocol works; see `API.md`).
+- **Agent command**: n/a — a protocol message (`MsgRenewCert`/`MsgRenewCertResult`), not a dispatched capability.
+- **DB tables**: `servers` (`cert_serial`), `audit_log`.
+- **Required permission**: n/a (agent identity only, already established by mTLS for the session).
+- **Security considerations**: new keypair generated per renewal (never reuses the expiring key); identity bound server-side from the authenticated session, not agent-asserted data; the previous certificate is intentionally left to expire naturally rather than proactively revoked, to avoid a lost-response self-lockout — see `docs/SECURITY.md` §2 for the full trade-off writeup.
+- **Test coverage**: `apps/controlplane/gateway_test.go` (`TestHandleRenewCertIssuesFreshCertAndUpdatesStore`, `TestHandleRenewCertRejectsUnknownServer`, `TestHandleRenewCertRejectsEmptyRequest`), `apps/controlplane/store_test.go` (`TestRenewCertSerialUpdatesRevocationTarget`), `apps/agent/certrenew_test.go` (`TestShouldRenew`, `TestCertNotAfterParsesExpiry`, `TestPersistRenewedCertIsAtomicAndUpdatesIdentity`, `TestAttemptRenewalRoundTrip`, `TestAttemptRenewalSurfacesGatewayDecline`).
+- **Current status**: `COMPLETE`
+- **Completion date**: 2026-08-19
+- **Known differences**: brief dual-valid-certificate overlap window on renewal (documented, not a security gap — both certs are bound to the same identity/authorization).
+- **Reason**: n/a.
 
 ### SRV-002 — Hosting stack installation (LEMP)
 - **Category**: Server Management

@@ -152,6 +152,41 @@ func TestRevokeServerBlocksReuseOfCertSerial(t *testing.T) {
 	}
 }
 
+func TestRenewCertSerialUpdatesRevocationTarget(t *testing.T) {
+	st := newTestStore(t)
+	id, _, err := st.createServer("web-4", "", nil, time.Hour, "admin@example.com")
+	if err != nil {
+		t.Fatalf("createServer: %v", err)
+	}
+	st.markIssuedCert(id, "100")
+	st.setConnected(id, true)
+
+	st.renewCertSerial(id, "101")
+
+	rec, ok := st.get(id)
+	if !ok {
+		t.Fatal("server should still exist")
+	}
+	if rec.CertSerial != "101" {
+		t.Fatalf("cert_serial = %q, want %q", rec.CertSerial, "101")
+	}
+	// renewCertSerial must not clobber connected status the way
+	// markIssuedCert (first-registration-only) does.
+	if rec.Status != statusConnected {
+		t.Fatalf("status = %q, want %q (renewal must not touch connection status)", rec.Status, statusConnected)
+	}
+
+	if err := st.revokeServer(id, "admin@example.com"); err != nil {
+		t.Fatalf("revokeServer: %v", err)
+	}
+	if st.isRevoked("100") {
+		t.Fatal("stale pre-renewal serial should not be the one revocation targets")
+	}
+	if !st.isRevoked("101") {
+		t.Fatal("revocation must target the renewed (currently in-use) serial")
+	}
+}
+
 func TestRevokeServerRejectsUnknownServer(t *testing.T) {
 	st := newTestStore(t)
 	if err := st.revokeServer("srv_doesnotexist", "admin@example.com"); err == nil {

@@ -12,6 +12,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/riazulbd/serverpanel/packages/capabilities"
@@ -20,13 +21,29 @@ import (
 
 const agentVersion = "0.1.0-dev"
 
+// safeEncoder serializes concurrent writers onto one *json.Encoder / net.Conn.
+// The Hello message, the periodic heartbeat loop, per-task result reporting,
+// and (as of cert renewal) the renewal-request loop each run on their own
+// goroutine and all write to the same connection; without this, interleaved
+// concurrent Encode calls could corrupt the newline-delimited JSON stream.
+type safeEncoder struct {
+	mu  sync.Mutex
+	enc *json.Encoder
+}
+
+func (w *safeEncoder) Encode(env proto.Envelope) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.enc.Encode(env)
+}
+
 // runConnection maintains one mTLS session to the gateway: sends Hello,
 // then loops sending periodic heartbeats and executing any Task the
 // gateway sends, replying with TaskEvents. The hosted services the agent
 // manages (nginx, php-fpm, mariadb, ...) run under systemd independent of
 // this connection — see docs/architecture.md §2 — so a dropped connection
 // here degrades orchestration/observability only, never site serving.
-func runConnection(ctx context.Context, id *identity, reg capabilities.Registry) error {
+func runConnection(ctx context.Context, id *identity, reg capabilities.Registry, dataDir string) error {
 	cert, err := tls.X509KeyPair(id.CertPEM, id.KeyPEM)
 	if err != nil {
 		return err
@@ -49,10 +66,10 @@ func runConnection(ctx context.Context, id *identity, reg capabilities.Registry)
 	}
 	defer conn.Close()
 
-	enc := json.NewEncoder(conn)
+	w := &safeEncoder{enc: json.NewEncoder(conn)}
 	dec := json.NewDecoder(bufio.NewReader(conn))
 
-	if err := enc.Encode(proto.Envelope{Type: proto.MsgHello, Hello: &proto.Hello{ServerID: id.ServerID, AgentVersion: agentVersion}}); err != nil {
+	if err := w.Encode(proto.Envelope{Type: proto.MsgHello, Hello: &proto.Hello{ServerID: id.ServerID, AgentVersion: agentVersion}}); err != nil {
 		return err
 	}
 
@@ -70,25 +87,39 @@ func runConnection(ctx context.Context, id *identity, reg capabilities.Registry)
 	}
 	log.Printf("connected to gateway %s as %s", id.GatewayAddr, id.ServerID)
 
-	go heartbeatLoop(ctx, enc)
+	go heartbeatLoop(ctx, w)
+
+	renewalResults := make(chan proto.RenewCertResult, 1)
+	go renewalLoop(ctx, w, dataDir, id, renewalResults)
 
 	for {
 		var env proto.Envelope
 		if err := dec.Decode(&env); err != nil {
 			return err
 		}
-		if env.Type != proto.MsgTask || env.Task == nil {
-			continue
+		switch env.Type {
+		case proto.MsgTask:
+			if env.Task != nil {
+				go handleTask(ctx, w, reg, *env.Task)
+			}
+		case proto.MsgRenewCertResult:
+			if env.RenewCertResult != nil {
+				select {
+				case renewalResults <- *env.RenewCertResult:
+				default:
+					// No renewal currently awaiting a response (e.g. a
+					// stray/duplicate message) — nothing to deliver it to.
+				}
+			}
 		}
-		go handleTask(ctx, enc, reg, *env.Task)
 	}
 }
 
-func handleTask(ctx context.Context, enc *json.Encoder, reg capabilities.Registry, task proto.Task) {
+func handleTask(ctx context.Context, w *safeEncoder, reg capabilities.Registry, task proto.Task) {
 	send := func(ev proto.TaskEvent) {
 		ev.TaskID = task.ID
 		ev.At = time.Now().UTC()
-		_ = enc.Encode(proto.Envelope{Type: proto.MsgTaskEvent, TaskEvent: &ev})
+		_ = w.Encode(proto.Envelope{Type: proto.MsgTaskEvent, TaskEvent: &ev})
 	}
 
 	send(proto.TaskEvent{Status: proto.TaskRunning, Message: "starting " + task.Capability})
@@ -111,7 +142,7 @@ func handleTask(ctx context.Context, enc *json.Encoder, reg capabilities.Registr
 	send(proto.TaskEvent{Status: proto.TaskSucceeded, Message: "ok", Detail: detail})
 }
 
-func heartbeatLoop(ctx context.Context, enc *json.Encoder) {
+func heartbeatLoop(ctx context.Context, w *safeEncoder) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -126,7 +157,7 @@ func heartbeatLoop(ctx context.Context, enc *json.Encoder) {
 				MemUsedPct:  memUsedPct(),
 				DiskUsedPct: diskUsedPct(),
 			}
-			_ = enc.Encode(proto.Envelope{Type: proto.MsgHeartbeat, Heartbeat: &hb})
+			_ = w.Encode(proto.Envelope{Type: proto.MsgHeartbeat, Heartbeat: &hb})
 		}
 	}
 }

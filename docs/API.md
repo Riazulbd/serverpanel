@@ -160,6 +160,8 @@ connection carries newline-delimited JSON `Envelope`s in both directions
 {"type": "task", "task": {"id": "...", "capability": "...", "params": {}, "issued_at": "..."}}
 {"type": "task_event", "task_event": {"task_id": "...", "status": "queued|running|succeeded|failed|rejected", "message": "...", "detail": "...", "at": "..."}}
 {"type": "ack"}
+{"type": "renew_cert", "renew_cert": {"csr_pem": "<PEM-encoded CSR, fresh keypair every renewal>"}}
+{"type": "renew_cert_result", "renew_cert_result": {"ok": true, "cert_pem": "..."}}
 ```
 
 Flow: gateway accepts → verifies cert → sends `ack` → agent sends `hello`, then
@@ -170,6 +172,13 @@ HTTP handler) until it sees a terminal event for the task ID it sent, or its con
 deadline expires. There is no message type for a free-form command — `capability` must
 be a name in `packages/capabilities`'s fixed registry, or the agent returns `rejected`
 without executing anything.
+
+Separately and asynchronously, the agent checks its certificate's expiry once an hour
+and, with fewer than 7 days left, sends `renew_cert` on this same authenticated
+session; the gateway signs a fresh certificate bound to the session's already-verified
+`server_id` (never a subject requested in the CSR) and replies with
+`renew_cert_result` (`{"ok": false, "error": "..."}` on decline). See `SECURITY.md` §2
+for the full renewal design and its documented dual-cert overlap-window trade-off.
 
 ## 4. Capability reference
 

@@ -54,17 +54,36 @@ Properties this guarantees:
   certificate issued by the internal Agent CA, and the agent verifies the gateway's
   certificate/pinned CA to prevent MITM or connecting to a spoofed endpoint.
   **Implemented as described** — see `apps/controlplane/gateway.go` `handleConn`.
-- Client certs are **short-lived** (e.g. 30–90 days) and **auto-rotated**: before
-  expiry, the agent requests renewal authenticated by its current still-valid cert (no
-  shared long-lived secret is ever reused for renewal). If a renewal window is missed
-  (agent offline past expiry), the agent falls back to a manual re-registration flow
-  requiring a fresh bootstrap token from the dashboard — this is an intentional
-  fail-closed behavior, not silent re-trust.
-  **Not yet implemented**: certs are issued with a fixed 30-day TTL
-  (`apps/controlplane/http.go` `handleRegister`) and there is no renewal
-  capability/endpoint yet — an agent whose cert expires must be manually
-  re-registered with a fresh bootstrap token today. Auto-rotation before expiry is
-  tracked as a known gap in `SYSTEM.md`.
+- Client certs are **short-lived** (30 days, `agentCertTTL` in
+  `apps/controlplane/gateway.go`) and **auto-rotated**: before expiry, the agent
+  requests renewal authenticated by its current still-valid cert over the already-open
+  mTLS session (`proto.MsgRenewCert`/`MsgRenewCertResult`) — no shared long-lived
+  secret is ever reused for renewal, and the agent always generates a brand new
+  keypair for each renewal rather than reusing the previous one. If a renewal window
+  is missed (agent offline past expiry), the agent falls back to a manual
+  re-registration flow requiring a fresh bootstrap token from the dashboard — this is
+  an intentional fail-closed behavior, not silent re-trust.
+  **Implemented** (`apps/agent/certrenew.go`, `apps/controlplane/gateway.go`
+  `handleRenewCert`): the agent checks its certificate's expiry hourly and requests
+  renewal once fewer than 7 days remain (`renewalWindow`), giving multiple retries
+  before a missed window would force manual re-registration. The gateway signs the
+  new cert bound to the session's already-authenticated `server_id` (never a
+  CSR-requested subject) and advances the server's recorded `cert_serial` so a
+  subsequent revocation targets the certificate actually in use. **Known trade-off**:
+  the previous certificate is deliberately *not* proactively revoked on renewal — it
+  is left to expire naturally (at most 30 days later) rather than revoked immediately,
+  because immediate revocation combined with a renewal response lost to a network
+  drop would leave an agent holding a freshly-revoked old cert and no new one on disk,
+  forcing the same manual-re-registration lockout this feature exists to avoid. This
+  means there is a window (normally hours, worst case ~30 days if an agent never
+  reconnects with its new cert) where two certificates are simultaneously valid for
+  one `server_id`; both are still bound to that same identity and subject to the same
+  authorization checks, so this does not grant any extra access — it only means an
+  explicit revoke-agent action doesn't retroactively invalidate a *just-renewed but
+  not-yet-revoked-old* cert. If tighter guarantees are needed later, the fix is having
+  the agent explicitly ack "switched to the new cert" before the gateway revokes the
+  old one, deferred for now as added protocol complexity beyond what this risk
+  justifies.
 - The Agent CA's private key is held in a dedicated, tightly access-controlled service
   (e.g. `step-ca` or HSM-backed KMS in later stages), separate from the general
   application database, so a control-plane app-tier compromise doesn't automatically

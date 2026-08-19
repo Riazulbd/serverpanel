@@ -172,6 +172,19 @@ func (s *store) markIssuedCert(serverID, serial string) {
 	s.log(serverID, "", "agent.registered", fmt.Sprintf("cert_serial=%s", serial))
 }
 
+// renewCertSerial updates the server's "current" certificate serial after a
+// successful renewal, without touching status/connected state (unlike
+// markIssuedCert, which is only correct for first-time registration, before
+// any connection exists). This matters for correctness, not just cosmetics:
+// revokeServer only ever revokes whatever serial is currently on file for a
+// server, so if this weren't updated on renewal, a user revoking an agent
+// after it had renewed would revoke a stale, already-superseded serial and
+// leave the agent's actual in-use certificate still trusted.
+func (s *store) renewCertSerial(serverID, serial string) {
+	s.db.Exec(`UPDATE servers SET cert_serial = ? WHERE id = ?`, serial, serverID)
+	s.log(serverID, "", "agent.cert_renewed", fmt.Sprintf("cert_serial=%s", serial))
+}
+
 func (s *store) isRevoked(serial string) bool {
 	var n int
 	s.db.QueryRow(`SELECT COUNT(1) FROM revoked_certs WHERE serial = ?`, serial).Scan(&n)
