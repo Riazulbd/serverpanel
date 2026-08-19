@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -485,7 +486,115 @@ func scanBackup(row rowScanner) (*backupRecord, error) {
 	return &rec, nil
 }
 
+type databaseRecord struct {
+	ID        string
+	ServerID  string
+	SiteID    string
+	Name      string
+	OwnerUser string
+	Status    string
+	CreatedAt time.Time
+}
+
+// createDatabase persists a database record, mirroring createBackup's
+// dispatch-then-persist-on-success pattern (see databases.go
+// handleCreateDatabase): only called after db.create has already succeeded
+// on the agent. Deliberately does NOT take or store the owner password —
+// db.create's generated password is returned to the caller exactly once in
+// the HTTP response and never persisted anywhere, the same
+// shown-once-never-stored principle applied to bootstrap tokens and session
+// tokens elsewhere in this store.
+func (s *store) createDatabase(serverID, siteID, name, ownerUser string) (*databaseRecord, error) {
+	rec := &databaseRecord{
+		ID: randID("db"), ServerID: serverID, SiteID: siteID, Name: name,
+		OwnerUser: ownerUser, Status: "active", CreatedAt: time.Now().UTC(),
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO databases (id, server_id, site_id, name, owner_user, status, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		rec.ID, rec.ServerID, rec.SiteID, rec.Name, rec.OwnerUser, rec.Status,
+		rec.CreatedAt.Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return nil, err
+	}
+	return rec, nil
+}
+
+// listDatabases returns every database record for one server, newest
+// first. Unlike sites/backups, databases are not necessarily tied to a
+// single site (db.list on the agent enumerates the whole MariaDB
+// instance), so this lists per-server rather than per-site.
+func (s *store) listDatabases(serverID string) []*databaseRecord {
+	rows, err := s.db.Query(
+		`SELECT id, server_id, site_id, name, owner_user, status, created_at
+		 FROM databases WHERE server_id = ? ORDER BY created_at DESC`, serverID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var out []*databaseRecord
+	for rows.Next() {
+		rec, err := scanDatabase(rows)
+		if err != nil {
+			continue
+		}
+		out = append(out, rec)
+	}
+	return out
+}
+
+// getDatabase looks up one database scoped to serverID, for the same
+// cross-tenant-addressing reason getSite/getBackup are scoped to serverID.
+func (s *store) getDatabase(serverID, dbID string) (*databaseRecord, bool) {
+	row := s.db.QueryRow(
+		`SELECT id, server_id, site_id, name, owner_user, status, created_at
+		 FROM databases WHERE id = ? AND server_id = ?`, dbID, serverID)
+	rec, err := scanDatabase(row)
+	if err != nil {
+		return nil, false
+	}
+	return rec, true
+}
+
+// deleteDatabaseRecord removes the control-plane record after db.delete
+// has already succeeded on the agent. Scoped by serverID for the same
+// reason getDatabase is.
+func (s *store) deleteDatabaseRecord(serverID, dbID string) error {
+	res, err := s.db.Exec(`DELETE FROM databases WHERE id = ? AND server_id = ?`, dbID, serverID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return errors.New("database record not found")
+	}
+	return nil
+}
+
+func scanDatabase(row rowScanner) (*databaseRecord, error) {
+	var rec databaseRecord
+	var createdAt string
+	if err := row.Scan(&rec.ID, &rec.ServerID, &rec.SiteID, &rec.Name, &rec.OwnerUser, &rec.Status, &createdAt); err != nil {
+		return nil, err
+	}
+	rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+	return &rec, nil
+}
+
 func randID(prefix string) string {
 	n, _ := rand.Int(rand.Reader, big.NewInt(1<<62))
 	return fmt.Sprintf("%s_%x", prefix, n)
+}
+
+// generateSecurePassword returns a URL-safe random password long enough to
+// satisfy the agent's db.create owner_password length requirement (>= 16
+// chars — see packages/capabilities/db.go), generated with crypto/rand and
+// never logged or persisted (see createDatabase's doc comment).
+func generateSecurePassword() (string, error) {
+	buf := make([]byte, 24)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(buf), nil
 }

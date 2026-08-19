@@ -297,3 +297,77 @@ func TestBackupCreateListGetRoundTrip(t *testing.T) {
 		t.Fatal("expected getBackup to refuse a backup ID under the wrong server")
 	}
 }
+
+func TestDatabaseCreateListGetDeleteRoundTrip(t *testing.T) {
+	st := newTestStore(t)
+	serverID, _, _ := st.createServer("web-11", "", nil, time.Hour, "admin@example.com")
+	site, err := st.createSite(serverID, "d.example.com", "sp_d", "/home/sites/sp_d", "wordpress", "8.3")
+	if err != nil {
+		t.Fatalf("createSite: %v", err)
+	}
+
+	rec, err := st.createDatabase(serverID, site.ID, "wpdb", "wpdb_owner")
+	if err != nil {
+		t.Fatalf("createDatabase: %v", err)
+	}
+	if rec.ID == "" || rec.Status != "active" {
+		t.Fatalf("unexpected database record: %+v", rec)
+	}
+
+	list := st.listDatabases(serverID)
+	if len(list) != 1 || list[0].Name != "wpdb" {
+		t.Fatalf("listDatabases = %+v, want one entry matching the created database", list)
+	}
+
+	got, ok := st.getDatabase(serverID, rec.ID)
+	if !ok {
+		t.Fatal("expected getDatabase to find the created database")
+	}
+	if got.OwnerUser != "wpdb_owner" || got.SiteID != site.ID {
+		t.Fatalf("getDatabase = %+v, fields don't round-trip", got)
+	}
+
+	otherServer, _, _ := st.createServer("web-12", "", nil, time.Hour, "admin@example.com")
+	if _, ok := st.getDatabase(otherServer, rec.ID); ok {
+		t.Fatal("expected getDatabase to refuse a database ID under the wrong server")
+	}
+	if err := st.deleteDatabaseRecord(otherServer, rec.ID); err == nil {
+		t.Fatal("expected deleteDatabaseRecord to refuse a database ID under the wrong server")
+	}
+
+	if err := st.deleteDatabaseRecord(serverID, rec.ID); err != nil {
+		t.Fatalf("deleteDatabaseRecord: %v", err)
+	}
+	if list := st.listDatabases(serverID); len(list) != 0 {
+		t.Fatalf("listDatabases after delete = %+v, want empty", list)
+	}
+}
+
+func TestCreateDatabaseRejectsDuplicateName(t *testing.T) {
+	st := newTestStore(t)
+	serverID, _, _ := st.createServer("web-13", "", nil, time.Hour, "admin@example.com")
+
+	if _, err := st.createDatabase(serverID, "", "dupdb", "dupdb_owner"); err != nil {
+		t.Fatalf("first createDatabase: %v", err)
+	}
+	if _, err := st.createDatabase(serverID, "", "dupdb", "another_owner"); err == nil {
+		t.Fatal("expected createDatabase to reject a duplicate name on the same server")
+	}
+}
+
+func TestGenerateSecurePasswordIsLongAndRandom(t *testing.T) {
+	p1, err := generateSecurePassword()
+	if err != nil {
+		t.Fatalf("generateSecurePassword: %v", err)
+	}
+	p2, err := generateSecurePassword()
+	if err != nil {
+		t.Fatalf("generateSecurePassword: %v", err)
+	}
+	if len(p1) < 16 {
+		t.Fatalf("generated password too short for db.create's owner_password requirement: %d chars", len(p1))
+	}
+	if p1 == p2 {
+		t.Fatal("expected two generated passwords to differ")
+	}
+}

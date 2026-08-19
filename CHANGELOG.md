@@ -2,6 +2,47 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-19 — Database management: control-plane persistence + dashboard UI (DB-005)
+
+- **Closed the DB-001/DB-005 gap flagged in the previous parity pass**: `db.create`/
+  `db.delete`/`db.list` existed agent-side but had no control-plane record or dashboard
+  UI — the same gap backups had before BAK-001. Added a `databases` table
+  (`apps/controlplane/db.go`: id, server_id, site_id (optional), name, owner_user,
+  status, created_at — `UNIQUE(server_id, name)`, and **deliberately no password
+  column**), `store` methods (`createDatabase`/`listDatabases`/`getDatabase`/
+  `deleteDatabaseRecord`, each scoped by server ID the same way `getSite`/`getBackup`
+  are), and three new endpoints (`GET`/`POST /api/v1/servers/{id}/databases`,
+  `DELETE /api/v1/servers/{id}/databases/{dbId}`) following the same
+  dispatch-then-persist-on-success pattern as sites and backups: `db.create`/
+  `db.delete` are only ever dispatched to the agent first, and the control-plane
+  record only written/removed once the agent confirms success.
+- The owner password is generated server-side with `crypto/rand`
+  (`generateSecurePassword`, 24 random bytes, base64url), dispatched to the agent, and
+  returned to the caller **exactly once** in the create response — never persisted
+  (no password column exists to persist it in) and never written to the audit log,
+  matching the shown-once-never-stored handling already used for bootstrap tokens.
+  Identifier validation (`^[a-z][a-z0-9_]{0,30}$`) is duplicated at the control-plane
+  HTTP boundary (`databases.go`) so an invalid name/owner_user is rejected before ever
+  reaching the agent, not just at the agent's own `identifierRe` check.
+- Added a "Databases" panel to the server-detail dashboard view (`web/index.html`):
+  create-database modal (name + optional owner user, defaulting to the database name),
+  a databases table, and a delete button with a destructive-action confirmation dialog;
+  the generated password is surfaced once in a dismissible result banner.
+- Added 4 new control-plane tests (`TestDatabaseCreateListGetDeleteRoundTrip`,
+  `TestCreateDatabaseRejectsDuplicateName`, `TestGenerateSecurePasswordIsLongAndRandom`
+  in `store_test.go`; `TestDatabaseEndpointsValidateAndScope` in `http_test.go` —
+  covering invalid-name rejection, nonexistent-`site_id` rejection, no-agent-connected
+  surfacing as `502` rather than a validation error, and delete-of-an-unrecorded-database
+  404ing, proving validation runs before dispatch the same way the backup endpoint
+  tests do). Full suite: 65 test functions, `go vet`/`gofmt` clean.
+- Updated `SYSTEM.md`, `API.md`, `TESTING.md`, and `SERVERAVATAR_PARITY.md` (DB-001's
+  detail block rewritten to describe the now-implemented persistence/UI layer; DB-005
+  moved from `NOT_STARTED` to `COMPLETE`). The agent-side SQL execution itself
+  (`db.create`/`db.delete`/`db.list` against a real MariaDB) remains manually verified
+  in a prior session only — a real end-to-end round trip through the new endpoints is
+  still `BLOCKED_EXTERNAL` pending a MariaDB-equipped test environment, called out
+  explicitly in DB-001's "Test coverage" rather than left ambiguous.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the
