@@ -89,6 +89,22 @@ real, not because they're still open):
   (`get.serverpanel.example`, `api.serverpanel.example`) that don't exist — the one-line
   install flow was not actually installable. Fixed: see "Self-hosted install flow" below.
 
+Two further bugs were found later by the automated test suite (see "Tests" below), both
+in `systemUserForDomain`, both confirmed against a real Ubuntu host:
+- **Site creation was broken outright for longer domains.** The derived name was
+  `"site_"` (5 chars) + up to 28 = up to 33 characters, and Ubuntu's `useradd` *rejects*
+  names over 32 rather than truncating them (`invalid user name ... use --badname to
+  ignore`), so `site.create` failed for any domain past that length.
+- **Distinct domains could collide onto one system user, silently removing the isolation
+  boundary between two sites.** Sanitizing folds both `.` and `-` to `_`, so
+  `foo-bar.com` and `foo.bar.com` — plausibly two different customers — both produced
+  `site_foo_bar_com`; truncation of long domains caused the same collision. Two sites
+  sharing a system user share a PHP-FPM pool and file ownership, which is precisely the
+  isolation the security model depends on. Names now always carry a short hash of the
+  full domain, keeping them unique and within the 32-character limit. Verified on a real
+  host: the two domains above now get separate Linux users with separate, mutually
+  inaccessible home directories.
+
 ## Self-hosted install flow (now real, not just designed)
 
 `install.sh`, the systemd unit, and the agent binary itself are now all served by the
@@ -130,9 +146,50 @@ tested here (no public DNS pointing at this box).
   change.
 - SQLite (not Postgres) backs the control plane for now; the `store` type's method set
   is the only thing any caller touches, so this is a swap, not a rewrite, when it's time.
-- No automated test suite yet — verification so far is the manual integration pass
-  described above. Adding `go test` coverage (especially around the capability
-  allow-list boundaries and the auth/session logic) is worth prioritizing next.
+- Test coverage is focused on security boundaries and pure logic (see "Tests" below).
+  The capability handlers' *effects* on a real system — apt installs, systemd calls,
+  certbot — are still covered by manual integration testing rather than automated tests,
+  since they need a real VPS to be meaningful.
+
+## Tests
+
+`go test -race ./...` — run in CI (`.github/workflows/ci.yml`, which also enforces
+`gofmt`, `go vet`, cross-compiles the agent, and shellchecks the installer).
+
+The suite deliberately targets the security boundaries and the pure logic behind them,
+which is where a silent regression would be both most likely and most damaging:
+
+- **Capability allow-list** — the registry is pinned to an exact reviewed set (a new
+  capability appearing without review fails the test), no capability name may look like
+  an execution entry point, unknown names are rejected by `Dispatch`, and
+  `service.control` refuses non-allow-listed units (including `sshd`) and actions.
+- **File-manager containment** — path traversal, symlinks planted inside a site pointing
+  out of it, symlinked parent directories, and unmanaged `site_root` values are all
+  rejected; deleting the site root itself is refused.
+- **Input validation** — SQL identifier and domain allow-lists (with injection attempts),
+  WordPress docroot confinement, log-tail selectors, backup scopes, SSL params.
+- **System-user derivation** — length bound and, importantly, collision-freedom, since a
+  collision means two sites share an isolation boundary.
+- **Log redaction** — tokens, passwords, API keys, and `Authorization` headers are
+  stripped, while ordinary log lines pass through untouched.
+- **Bootstrap tokens** — single-use (including under 16-way concurrency, which is what
+  the "atomically" claim in the security model actually rests on), expiry, hash-only
+  storage, and absence from the audit log.
+- **Auth** — every protected route rejects anonymous and forged sessions, login errors
+  don't reveal whether an account exists, passwords are bcrypt-hashed, logout and expiry
+  invalidate sessions, and a 2FA-enabled account's password-only session is blocked
+  until it passes the challenge (and is *not* promoted by a failed one).
+- **TOTP** — validated against the published RFC 6238 test vectors, so real
+  authenticator apps interoperate rather than the implementation merely agreeing with
+  itself; plus skew-window bounds in both directions.
+- **PKI / mTLS** — the CA stamps identity from the validated `server_id` so an agent
+  can't claim another server's identity via its CSR; issued certs are client-auth-only
+  and non-CA; serials are unique and reseeded above known-max after a restart; the CA
+  survives restart (the regression that once invalidated every agent); and, over a real
+  TLS listener, the gateway accepts enrolled agents while rejecting revoked
+  certificates and certificates from an untrusted CA.
+- **Downloads** — the unauthenticated `/downloads/` endpoint refuses path traversal, and
+  the served checksum actually matches the served binary.
 
 ## Running it locally
 

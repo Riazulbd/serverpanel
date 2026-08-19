@@ -2,6 +2,8 @@ package capabilities
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -34,13 +36,42 @@ type siteResult struct {
 	AppType    string `json:"app_type"`
 }
 
+// maxSystemUserLen is useradd's practical limit on most distros
+// (Ubuntu's shadow-utils rejects anything longer outright, rather than
+// truncating: "invalid user name ... use --badname to ignore").
+const maxSystemUserLen = 32
+
+// systemUserForDomain derives the isolated Linux user name for a site.
+//
+// Two properties matter here and both are load-bearing for isolation, not
+// cosmetics:
+//
+//  1. The result must fit in maxSystemUserLen, or useradd refuses it and
+//     site.create fails outright for longer domains.
+//  2. Distinct domains must never collide onto one user name. Sanitizing
+//     alone does not give that: "." and "-" both fold to "_", so
+//     foo-bar.com and foo.bar.com would otherwise both yield
+//     "site_foo_bar_com" — and two sites sharing a system user share a
+//     PHP-FPM pool and file ownership, which silently removes the
+//     isolation boundary between them. Truncating long domains
+//     reintroduces the same hazard.
+//
+// A short hash of the full domain is therefore always appended, so the
+// name stays unique even when the readable part is truncated or folded.
 func systemUserForDomain(domain string) string {
-	safe := strings.NewReplacer(".", "_", "-", "_").Replace(domain)
-	safe = strings.ToLower(safe)
-	if len(safe) > 28 {
-		safe = safe[:28]
+	domain = strings.ToLower(strings.TrimSpace(domain))
+
+	sum := sha256.Sum256([]byte(domain))
+	suffix := "_" + hex.EncodeToString(sum[:])[:6]
+
+	const prefix = "site_"
+	maxBase := maxSystemUserLen - len(prefix) - len(suffix)
+
+	base := strings.NewReplacer(".", "_", "-", "_").Replace(domain)
+	if len(base) > maxBase {
+		base = base[:maxBase]
 	}
-	return "site_" + safe
+	return prefix + base + suffix
 }
 
 func primaryIP(ctx context.Context) string {
@@ -77,7 +108,7 @@ func handleSiteCreate(ctx context.Context, params map[string]any, progress Progr
 	}
 
 	sysUser := systemUserForDomain(domain)
-	home := filepath.Join("/home/sites", sysUser)
+	home := siteHome(sysUser)
 	docroot := filepath.Join(home, "public")
 
 	progress("creating isolated system user " + sysUser)

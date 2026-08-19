@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -52,6 +53,22 @@ const (
 	CapBackupRun        = "backup.run"
 	CapLogsTail         = "logs.tail"
 )
+
+// sitesRoot is the single parent directory every managed site's isolated
+// home lives under. It is the anchor for the file manager's containment
+// check (file.go resolveScopedPath) and for the "is this really one of our
+// sites?" guards in app.go/backup.go, so it is defined once here rather
+// than repeated as a literal at each call site.
+//
+// It is a package var solely so tests can point it at a temp directory;
+// nothing reachable from a task's params can change it, so remote input
+// cannot widen the file manager's scope by touching this.
+var sitesRoot = "/home/sites"
+
+// siteHome returns the isolated home directory for a site's system user.
+func siteHome(sysUser string) string {
+	return filepath.Join(sitesRoot, sysUser)
+}
 
 // managedUnits is the allow-list of systemd units the agent will ever act
 // on via service.control. An arbitrary unit name in a task's params is

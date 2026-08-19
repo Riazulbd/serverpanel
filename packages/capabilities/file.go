@@ -21,7 +21,7 @@ import (
 // planted inside the site root that points outside of it is rejected, not
 // just a literal "..".
 func resolveScopedPath(siteRoot, relPath string) (string, error) {
-	if !strings.HasPrefix(siteRoot, "/home/sites/") {
+	if !strings.HasPrefix(siteRoot, sitesRoot+"/") {
 		return "", fmt.Errorf("site_root must be a managed site home directory")
 	}
 	realRoot, err := filepath.EvalSymlinks(siteRoot)

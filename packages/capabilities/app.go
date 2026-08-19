@@ -34,7 +34,7 @@ func handleWordPressInstall(ctx context.Context, params map[string]any, progress
 	if sysUser == "" || !strings.HasPrefix(sysUser, "site_") {
 		return "", fmt.Errorf("invalid system_user")
 	}
-	expectedRoot := filepath.Join("/home/sites", sysUser)
+	expectedRoot := siteHome(sysUser)
 	if !strings.HasPrefix(docroot, expectedRoot) {
 		return "", fmt.Errorf("docroot must be under %s (got %q) — refusing to operate outside the site's isolated home", expectedRoot, docroot)
 	}

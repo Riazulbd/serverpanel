@@ -37,7 +37,7 @@ func handleBackupRun(ctx context.Context, params map[string]any, progress Progre
 	if scope != "db" && scope != "files" && scope != "full" {
 		return "", fmt.Errorf("scope must be one of db, files, full")
 	}
-	if (scope == "files" || scope == "full") && !strings.HasPrefix(siteRoot, "/home/sites/") {
+	if (scope == "files" || scope == "full") && !strings.HasPrefix(siteRoot, sitesRoot+"/") {
 		return "", fmt.Errorf("site_root must be a managed site home directory")
 	}
 	if (scope == "db" || scope == "full") && !identifierRe.MatchString(dbName) {
