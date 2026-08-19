@@ -2,6 +2,37 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-19 — Database control-plane persistence, dashboard UI, password rotation
+
+- **Closed DB-001's persistence/UI gap** — the highest-priority `PARTIAL` item flagged
+  in the previous parity pass. Added a `databases` control-plane table and a
+  dispatch-then-persist-on-success database lifecycle (`apps/controlplane/databases.go`):
+  `createDatabase`/`listDatabases`/`getDatabase`/`deleteDatabase` store methods, and
+  `POST`/`GET /api/v1/servers/{id}/databases`, `DELETE .../databases/{databaseId}`,
+  `POST .../databases/{databaseId}/reset-password` endpoints — the same pattern
+  BAK-001/BAK-002 established for backups.
+- **Added `db.reset_password`** (`packages/capabilities/db.go`) — an `ALTER USER`
+  capability that rotates a database owner's password without touching the database or
+  its grants. This exists because the control plane deliberately never persists a
+  database owner's password (no encryption-at-rest subsystem exists yet to do that
+  safely): the password is generated server-side and returned exactly once, in the
+  create/reset-password API response, mirroring the bootstrap-token return-once pattern
+  server registration already uses. `db.create`/`db.delete` now return structured JSON
+  detail (`DBCreateResult`/`DBDeleteResult`) instead of a free-text message, so the
+  control plane can parse results the same way it already does for `backup.run`.
+- Added a "Databases" panel per server in the dashboard: create-database modal,
+  databases table, and per-row reset-password/delete actions, each showing the
+  one-time password in a dismissable result banner.
+- Added 6 new capability-layer validation tests (`packages/capabilities/db_test.go`),
+  1 new store round-trip test, and 1 new HTTP test proving validation happens before
+  agent dispatch (`TestCreateDatabaseValidatesBeforeDispatch`) — same shape as the
+  existing backup tests. Full suite green, `go vet`/`gofmt` clean. The real
+  `CREATE DATABASE`/`CREATE USER` round trip against a live MariaDB remains
+  `BLOCKED_EXTERNAL` in this environment (no `mysqld` available) — manually verified in
+  a prior session.
+- Updated `docs/SERVERAVATAR_PARITY.md` (DB-001 moves `PARTIAL` → `COMPLETE`, DB-005 row
+  removed — folded into DB-001) and `docs/SYSTEM.md`.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

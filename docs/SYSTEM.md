@@ -73,7 +73,8 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | PHP-FPM, multiple PHP versions | 🚧 php-fpm pool-per-site works; only 8.3 is
   installed by `stack.install` today, though `site.set_php_version` and pool paths are
   already version-parameterized |
-| MariaDB/MySQL | ✅ install + per-DB least-privilege grants |
+| MariaDB/MySQL | ✅ install + per-DB least-privilege grants; see "Database management"
+  below for the create/list/delete/reset-password lifecycle |
 | Redis, Git, Composer, WP-CLI | ✅ installed by `stack.install` |
 | Node.js | ⬜ Phase 3 |
 | UFW firewall, Fail2Ban | 🚧 installed with safe defaults; no rule-editing UI |
@@ -113,6 +114,18 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | Archive creation/extraction | ⬜ not implemented |
 | Application logs / advanced log viewer | 🚧 `logs.tail` (redacted) exists; no
   filtering/search UI yet |
+
+### Database management
+| Feature | Status |
+|---|---|
+| Create/delete database with a scoped least-privilege owner user | ✅ `db.create`/
+  `db.delete`, persisted as a `databases` row, listed in a "Databases" panel per server |
+| Owner-password recovery | ✅ `db.reset_password` — the only recovery path, since the
+  control plane never persists the password itself (returned once, at create/reset
+  time, in the API response) |
+| MongoDB support | ⬜ not implemented |
+| phpMyAdmin / DB admin UI integration | ⬜ not implemented |
+| Database process/query monitoring | ⬜ not implemented |
 
 ### Git deployment
 All ⬜ — explicitly scoped to Phase 2 (`product-plan.md` §9). No Git deployment,
@@ -253,6 +266,9 @@ EXISTS`, applied on every `openDB` call — idempotent, no separate migration to
 | `audit_log` | append-only: seq, timestamp, server, actor, action, detail |
 | `sites` | id, server, domain, system user, docroot, app type, PHP version, status |
 | `backups` | id, server, site, scope, path, size, sha256, status, created_at |
+| `databases` | id, server, site (optional), name, owner user, status, created_at — no
+  password column: the owner password is returned once at create/reset time and never
+  persisted (see §12) |
 
 No ORM — every query is a small, explicit SQL statement in `store.go`. All secrets
 (session tokens, bootstrap tokens) are stored only as SHA-256 hashes; passwords use
@@ -262,8 +278,9 @@ bcrypt (cost 12); nothing is stored in plaintext.
 
 Full list with request/response shapes in `API.md`. Summary: `/api/v1/auth/*`
 (signup/login/logout/TOTP enroll+verify/MFA challenge/me), `/api/v1/servers*` (CRUD,
-revoke, task dispatch, sites, audit), `/agents/register` (the one unauthenticated
-agent-facing endpoint, secured by the bootstrap token itself), `/healthz`.
+revoke, task dispatch, sites, backups, databases, audit), `/agents/register` (the one
+unauthenticated agent-facing endpoint, secured by the bootstrap token itself),
+`/healthz`.
 
 ## 10. Background jobs
 
@@ -296,9 +313,10 @@ in `packages/capabilities/capabilities_test.go`), not just convention.
 Current capability list: `system.ping`, `service.control`, `diagnostics.basic`,
 `stack.install`, `site.create`, `site.set_php_version`, `site.set_status`,
 `app.wordpress_install`, `ssl.issue_letsencrypt`, `ssl.install_custom`, `db.create`,
-`db.delete`, `db.list`, `file.list`, `file.read`, `file.write`, `file.delete`,
-`backup.run`, `backup.restore`, `logs.tail`. Notably absent (by design, until reviewed
-and added): `git.deploy`, `cron.upsert`, `ssh.*`, `firewall.*`, `agent.self_update`.
+`db.delete`, `db.list`, `db.reset_password`, `file.list`, `file.read`, `file.write`,
+`file.delete`, `backup.run`, `backup.restore`, `logs.tail`. Notably absent (by design,
+until reviewed and added): `git.deploy`, `cron.upsert`, `ssh.*`, `firewall.*`,
+`agent.self_update`.
 
 ## 13. Installation and deployment
 
@@ -483,6 +501,13 @@ sizing, and two persistence bugs where a successful operation wasn't actually sa
 - **No proprietary Webuzo/ServerAvatar code, branding, or assets** — every protocol,
   UI, and mechanism here is independently designed against open standards (mTLS,
   systemd, ACME/Let's Encrypt, RFC 6238 TOTP).
+- **Database owner passwords are never persisted** — no secrets-at-rest encryption
+  subsystem exists yet (a real one is future work, not a shortcut taken here), so rather
+  than store a database owner's password in plaintext in SQLite, `db.create`/
+  `db.reset_password` return it exactly once, in the API response, and it is
+  unrecoverable after that — only rotatable via `db.reset_password`. Same return-once
+  shape as bootstrap tokens (§11). This trades a little convenience for not having a
+  plaintext-secret column to eventually explain away.
 
 ## 29. Dated change log
 

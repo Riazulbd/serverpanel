@@ -3,8 +3,10 @@ package capabilities
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"regexp"
+	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 )
@@ -15,6 +17,26 @@ import (
 // before backtick-quoting and interpolating, never to accept an arbitrary
 // string into a CREATE DATABASE/USER statement.
 var identifierRe = regexp.MustCompile(`^[a-z][a-z0-9_]{0,30}$`)
+
+// DBCreateResult, DBDeleteResult and DBResetPasswordResult are the JSON
+// detail payloads db.create/db.delete/db.reset_password return, so the
+// control plane can parse a structured result instead of a free-text
+// message (matching the pattern backup.run/backup.restore already use).
+type DBCreateResult struct {
+	Name      string    `json:"name"`
+	OwnerUser string    `json:"owner_user"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type DBDeleteResult struct {
+	Name      string    `json:"name"`
+	DeletedAt time.Time `json:"deleted_at"`
+}
+
+type DBResetPasswordResult struct {
+	OwnerUser string    `json:"owner_user"`
+	ResetAt   time.Time `json:"reset_at"`
+}
 
 func mariaDBConn() (*sql.DB, error) {
 	// Connects as root over the local Unix socket, matching MariaDB's
@@ -75,7 +97,8 @@ func handleDBCreate(ctx context.Context, params map[string]any, progress Progres
 		return "", fmt.Errorf("flush privileges: %w", err)
 	}
 
-	return fmt.Sprintf("database %q created, owned by user %q with grants scoped to that database only", name, owner), nil
+	out, err := json.Marshal(DBCreateResult{Name: name, OwnerUser: owner, CreatedAt: time.Now().UTC()})
+	return string(out), err
 }
 
 func handleDBDelete(ctx context.Context, params map[string]any, progress Progress) (string, error) {
@@ -100,7 +123,40 @@ func handleDBDelete(ctx context.Context, params map[string]any, progress Progres
 		}
 		db.ExecContext(ctx, fmt.Sprintf("DROP USER IF EXISTS `%s`@'localhost'", owner))
 	}
-	return fmt.Sprintf("database %q deleted", name), nil
+	out, err := json.Marshal(DBDeleteResult{Name: name, DeletedAt: time.Now().UTC()})
+	return string(out), err
+}
+
+// handleDBResetPassword rotates a database owner user's password without
+// touching the database or its grants. This is the only way to recover
+// access if the one-time password shown at db.create time is lost — the
+// control plane never persists it (see apps/controlplane/databases.go).
+func handleDBResetPassword(ctx context.Context, params map[string]any, progress Progress) (string, error) {
+	owner, _ := params["owner_user"].(string)
+	password, _ := params["owner_password"].(string)
+
+	if !identifierRe.MatchString(owner) {
+		return "", fmt.Errorf("invalid owner_user %q", owner)
+	}
+	if len(password) < 16 {
+		return "", fmt.Errorf("owner_password must be at least 16 characters")
+	}
+
+	db, err := mariaDBConn()
+	if err != nil {
+		return "", err
+	}
+	defer db.Close()
+
+	if _, err := db.ExecContext(ctx, fmt.Sprintf("ALTER USER `%s`@'localhost' IDENTIFIED BY ?", owner), password); err != nil {
+		return "", fmt.Errorf("alter user: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, "FLUSH PRIVILEGES"); err != nil {
+		return "", fmt.Errorf("flush privileges: %w", err)
+	}
+
+	out, err := json.Marshal(DBResetPasswordResult{OwnerUser: owner, ResetAt: time.Now().UTC()})
+	return string(out), err
 }
 
 func handleDBList(ctx context.Context, params map[string]any, progress Progress) (string, error) {
