@@ -2,6 +2,35 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-19 — Let's Encrypt auto-renewal wired up in `stack.install`
+
+- **Closed the documented APP-016 gap**: `certbot`'s own renewal timer was installed
+  as a package dependency but never explicitly enabled, so `ssl.issue_letsencrypt`
+  certificates had no verified renewal path. `phase1LEMPSteps()`
+  (`packages/capabilities/stack.go`) now has two new idempotent, ordered steps after
+  the certbot package install: (1) enable `certbot.timer` via `systemctl enable --now`
+  and verify it reports `active` before considering the step done — failing loudly
+  (and safely retryable, per the existing `stack.install` failure contract) rather than
+  silently leaving renewal off; (2) install a fixed, argument-free deploy-hook script
+  at `/etc/letsencrypt/renewal-hooks/deploy/serverpanel-reload-nginx.sh` that runs
+  `nginx -t` then `systemctl reload nginx` after every successful renewal, as
+  defense-in-depth alongside certbot's own `--nginx`-installer reload (belt-and-braces
+  for certs that end up renewed through a path that doesn't reload nginx itself). The
+  hook script has no caller-supplied input and never reads certbot's renewal
+  environment variables (`RENEWED_DOMAINS`/`RENEWED_LINEAGE`) — checked directly by a
+  test.
+- Added `packages/capabilities/stack_test.go`: unit tests for the deploy-hook's
+  install/idempotency/content-drift-detection logic (against a temp directory, not the
+  real `/etc/letsencrypt`) and a step-ordering regression test asserting the certbot
+  package step precedes the new timer and hook steps. The `systemctl enable --now
+  certbot.timer` call itself still requires a real systemd host to exercise — not
+  covered by `go test` in this sandbox, same category as the rest of `stack.install`
+  (see `TESTING.md` §2).
+- Updated `docs/SERVERAVATAR_PARITY.md` (APP-016 → `TESTING`, SRV-002 detail block),
+  `docs/SYSTEM.md` §7 checklist, and `docs/TESTING.md` §1/§2/§5 to reflect the new
+  behavior and its actual (not claimed) test coverage. Full go test suite: 66/66
+  passing, `go vet`/`gofmt` clean.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

@@ -59,7 +59,7 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Documentation page**: Server Management (stack/software install)
 - **Short description**: One-click install of nginx/PHP/database/supporting tools.
 - **Expected behavior**: select a stack profile, it installs idempotently, retryably.
-- **Our implementation**: `stack.install` capability — nginx, PHP 8.3-FPM, MariaDB, Redis, Git, Composer, WP-CLI, Certbot, UFW, Fail2Ban, all idempotent (checked via `dpkg-query` before each install step).
+- **Our implementation**: `stack.install` capability — nginx, PHP 8.3-FPM, MariaDB, Redis, Git, Composer, WP-CLI, Certbot (package + verified-active `certbot.timer` + an nginx-reload deploy-hook), UFW, Fail2Ban, all idempotent (checked via `dpkg-query`/`systemctl is-active`/content comparison before each install step).
 - **Frontend**: server-detail "Install Phase 1 stack" action button.
 - **Backend service**: `gateway.dispatch` → `packages/capabilities.handleStackInstall`.
 - **API endpoint(s)**: `POST /api/v1/servers/{id}/tasks` with `capability: stack.install`.
@@ -67,7 +67,7 @@ actually exists — expand a row into a full block the moment work on it begins
 - **DB tables**: none directly (task result only; server's `heartbeat_json`/status reflect connectivity).
 - **Required permission**: authenticated session.
 - **Security considerations**: OS/version/resource preflight checks (defense in depth, re-checked agent-side even though `install.sh` checks too); allow-listed package set only.
-- **Test coverage**: manually verified against a real Ubuntu 24.04 host in a prior session (see `TESTING.md` §2); not covered by `go test` (requires real apt/systemd).
+- **Test coverage**: manually verified against a real Ubuntu 24.04 host in a prior session (see `TESTING.md` §2); not covered by `go test` for the apt/systemd-dependent steps (requires a real host). The new certbot renewal deploy-hook's install/idempotency/drift-detection logic is unit-tested against a temp directory in `packages/capabilities/stack_test.go` (`TestInstallCertbotDeployHookWritesExecutableScript`, `TestCertbotDeployHookInstalledIsIdempotent`, `TestCertbotDeployHookDetectsDrift`, `TestPhase1LEMPStepsInstallsCertbotTimerAndHookAfterCertbotPackage`).
 - **Current status**: `PARTIAL`
 - **Completion date**: n/a
 - **Known differences**: only PHP 8.3 is actually installed by `stack.install` today, even though per-site PHP-version selection is already parameterized; Apache/OpenLiteSpeed stack adapters don't exist yet.
@@ -253,7 +253,7 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | APP-013 | Log Monitoring Suite (traffic analytics) | `NOT_STARTED` | |
 | APP-014 | Application-level WAF / AI-bot blocker | `NOT_STARTED` | |
 | APP-015 | Custom SSL upload | `PARTIAL` | `ssl.install_custom` capability exists agent-side; no dedicated dashboard UI |
-| APP-016 | Let's Encrypt SSL + auto-renewal | `PARTIAL` | `ssl.issue_letsencrypt` implemented; certbot's own renewal timer not yet wired up by `stack.install` |
+| APP-016 | Let's Encrypt SSL + auto-renewal | `TESTING` | `ssl.issue_letsencrypt` implemented; `stack.install` now explicitly enables and verifies `certbot.timer` (idempotent, retried on failure) and installs a deploy-hook that reloads nginx after every renewal, defense-in-depth alongside certbot's own `--nginx` installer reload. Unit-tested (`stack_test.go`) for the hook install/idempotency/drift-detection logic; the timer-enable step itself and a real end-to-end renewal require a live systemd+certbot host, not available in this sandbox — no dashboard visibility into cert status/expiration yet (tracked separately, see APP-015's dashboard-UI gap) |
 
 ### Database management — not yet started (DB-*)
 | ID | Feature | Status | Notes |
