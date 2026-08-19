@@ -18,16 +18,28 @@ const (
 	MsgTask      MessageType = "task"       // gateway -> agent, requests a capability run
 	MsgTaskEvent MessageType = "task_event" // agent -> gateway, progress/result of a task
 	MsgAck       MessageType = "ack"        // either direction, generic acknowledgement
+
+	// Certificate renewal, carried over the already-authenticated mTLS
+	// session rather than a separate endpoint: possession of a currently
+	// valid, non-revoked client certificate is exactly the right
+	// authorization to be issued its successor, and the gateway already
+	// knows which server it is talking to without trusting anything the
+	// agent asserts in-band.
+	MsgRenewRequest  MessageType = "renew_request"  // agent -> gateway, CSR for a successor certificate
+	MsgRenewResponse MessageType = "renew_response" // gateway -> agent, the signed successor certificate
+	MsgRenewAck      MessageType = "renew_ack"      // agent -> gateway, successor certificate is durably on disk
 )
 
 // Envelope is the outer message wrapper. Exactly one of the typed payload
 // fields is populated, matching Type.
 type Envelope struct {
-	Type      MessageType `json:"type"`
-	Hello     *Hello      `json:"hello,omitempty"`
-	Heartbeat *Heartbeat  `json:"heartbeat,omitempty"`
-	Task      *Task       `json:"task,omitempty"`
-	TaskEvent *TaskEvent  `json:"task_event,omitempty"`
+	Type          MessageType    `json:"type"`
+	Hello         *Hello         `json:"hello,omitempty"`
+	Heartbeat     *Heartbeat     `json:"heartbeat,omitempty"`
+	Task          *Task          `json:"task,omitempty"`
+	TaskEvent     *TaskEvent     `json:"task_event,omitempty"`
+	RenewRequest  *RenewRequest  `json:"renew_request,omitempty"`
+	RenewResponse *RenewResponse `json:"renew_response,omitempty"`
 }
 
 // Hello is sent by the agent immediately after the mTLS handshake completes,
@@ -81,6 +93,27 @@ type TaskEvent struct {
 	Message string     `json:"message,omitempty"`
 	Detail  string     `json:"detail,omitempty"`
 	At      time.Time  `json:"at"`
+}
+
+// RenewRequest asks the gateway to sign a successor to the client
+// certificate the agent is *currently connected with*. It deliberately
+// carries no server ID: the gateway uses the identity it already derived
+// from the mTLS handshake, so an agent can never renew into another
+// server's identity by crafting this message.
+type RenewRequest struct {
+	CSRPEM string `json:"csr_pem"`
+}
+
+// RenewResponse carries the signed successor certificate, plus the current
+// CA certificate so an agent that renews across a CA rotation still ends up
+// with a chain it can verify the gateway against. Error is set (and CertPEM
+// empty) when the gateway declined to renew, so the agent can log a real
+// reason and keep using its existing certificate rather than treating a
+// silent failure as success.
+type RenewResponse struct {
+	CertPEM string `json:"cert_pem,omitempty"`
+	CAPEM   string `json:"ca_pem,omitempty"`
+	Error   string `json:"error,omitempty"`
 }
 
 // RegisterRequest is the body of the one-time POST /agents/register call

@@ -51,7 +51,18 @@ func main() {
 
 	backoff := time.Second
 	for {
-		err := runConnection(ctx, id, reg)
+		// Reload the identity from disk each cycle so a certificate renewed
+		// during the previous session (see connect.go handleRenewResponse)
+		// is the one this connection actually authenticates with. Renewal
+		// deliberately doesn't tear down a healthy session, so this
+		// reconnect is where a rotated certificate takes effect.
+		if reloaded, err := loadIdentity(*dataDir); err == nil {
+			id = reloaded
+		} else {
+			log.Printf("could not reload identity from %s, continuing with the one already in memory: %v", *dataDir, err)
+		}
+
+		err := runConnection(ctx, id, *dataDir, reg)
 		if ctx.Err() != nil {
 			log.Println("shutting down")
 			return

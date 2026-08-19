@@ -189,6 +189,9 @@ connection carries newline-delimited JSON `Envelope`s in both directions
 {"type": "task", "task": {"id": "...", "capability": "...", "params": {}, "issued_at": "..."}}
 {"type": "task_event", "task_event": {"task_id": "...", "status": "queued|running|succeeded|failed|rejected", "message": "...", "detail": "...", "at": "..."}}
 {"type": "ack"}
+{"type": "renew_request", "renew_request": {"csr_pem": "..."}}
+{"type": "renew_response", "renew_response": {"cert_pem": "...", "ca_pem": "...", "error": "..."}}
+{"type": "renew_ack"}
 ```
 
 Flow: gateway accepts → verifies cert → sends `ack` → agent sends `hello`, then
@@ -199,6 +202,30 @@ HTTP handler) until it sees a terminal event for the task ID it sent, or its con
 deadline expires. There is no message type for a free-form command — `capability` must
 be a name in `packages/capabilities`'s fixed registry, or the agent returns `rejected`
 without executing anything.
+
+### Certificate renewal
+
+Renewal rides the already-authenticated session rather than a separate endpoint:
+holding a currently valid, non-revoked client certificate is exactly the right
+authorization to be issued its successor, and the gateway already knows who it is
+talking to.
+
+With 10 days of its 30-day certificate remaining, the agent sends `renew_request`
+carrying a CSR for a **freshly generated keypair** (never the existing key). The
+gateway signs a successor whose `CommonName` it sets from the identity derived at
+handshake — the CSR's requested subject is ignored, so an agent cannot renew into
+another server's identity — and replies with `renew_response`. Nothing about the
+existing certificate changes yet. The agent writes the new certificate/key to disk
+(write-temp → fsync → rename, so an interrupted write can't truncate the identity in
+place) and only then sends `renew_ack`, which is what makes the gateway atomically
+adopt the new serial and revoke the old one. An agent that dies anywhere in this
+sequence still holds a valid certificate and retries on its next reconnect.
+
+`renew_response` carries `error` (with no `cert_pem`) when the gateway declines:
+the certificate is revoked, or a renewal already completed on this session (one per
+session, which bounds serial-number churn from a misbehaving agent). The renewed
+identity takes effect on the agent's next reconnect; a healthy session is deliberately
+not torn down to rotate.
 
 ## 4. Capability reference
 

@@ -52,8 +52,9 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | User/organization management | 🚧 single-user model only; no orgs/teams yet |
 | Multiple-server management | ✅ create/list/get/revoke, search/filter in UI |
 | Secure agent install/registration | ✅ bootstrap token → mTLS cert exchange |
-| Agent identity, cert rotation, revocation | 🚧 issuance + revocation done; no
-  auto-renewal before expiry yet (see `SECURITY.md` §2) |
+| Agent identity, cert rotation, revocation | ✅ issuance, automatic renewal before
+  expiry (new keypair each time, old serial revoked only after the agent confirms the
+  new one is on disk), and revocation — see `SECURITY.md` §2 |
 | Server health monitoring | ✅ heartbeat: uptime, load, mem%, disk% |
 | Server groups/tags/metadata | ✅ `group`, `tags[]` on server records |
 | Background job queue | ⬜ task dispatch is synchronous request/response today,
@@ -165,11 +166,12 @@ Phase boundaries and full milestone/estimate tables are in `product-plan.md` §6
 is the condensed status:
 
 - **Phase 1 — secure working foundation:** ~90% of the *capability* surface exists and
-  is tested per-capability (see the tables above); the biggest real gaps are backup
-  **restore**, an automated test suite (now added, see `TESTING.md`), SSL auto-renewal,
-  and agent cert auto-rotation. Not "GA-ready" yet, but the architecture and security
-  primitives it depends on (mTLS, allow-listed capabilities, per-app isolation, audit
-  log) are real and proven, not stubs.
+  is tested per-capability (see the tables above). The gaps this phase originally
+  listed — backup **restore**, an automated test suite, and agent certificate
+  auto-rotation — are now closed; **SSL auto-renewal** (wiring up certbot's renewal
+  timer) is the remaining one. Not "GA-ready" yet, but the architecture and security
+  primitives it depends on (mTLS with real rotation, allow-listed capabilities, per-app
+  isolation, audit log) are real and proven, not stubs.
 - **Phase 2 — professional server management:** not started. Git deployment,
   cron/process management, SSH/firewall management UI, remote backups, cross-server
   migration all remain ⬜.
@@ -234,8 +236,14 @@ Unix-socket MySQL driver (no cgo, no external runtime deps). Lifecycle:
    `/proc/meminfo`, disk% via `syscall.Statfs("/")`) and receiving `Task`s, which it
    dispatches into `packages/capabilities.Default().Dispatch(...)` and reports back as
    `TaskEvent`s.
-3. **Reconnect**: on any connection loss, `main.go`'s loop retries with exponential
-   backoff (1s → 30s cap) until the process is signaled to stop (`SIGTERM`/`SIGINT`).
+3. **Renew**: on connecting, if the certificate has under 10 days left, the agent
+   requests a successor over the same authenticated session (`connect.go`
+   `maybeRequestRenewal`/`handleRenewResponse`), generating a fresh keypair, persisting
+   the result atomically, and only then acknowledging — see `SECURITY.md` §2.
+4. **Reconnect**: on any connection loss, `main.go`'s loop reloads the identity from
+   disk (so a certificate renewed during the previous session takes effect) and retries
+   with exponential backoff (1s → 30s cap) until the process is signaled to stop
+   (`SIGTERM`/`SIGINT`).
 
 The agent has **no shell-exec entry point in its protocol or code** — see §8.
 
@@ -282,7 +290,11 @@ See `SECURITY.md` in full. Summary: single-use, short-lived (15 min default),
 hashed-at-rest bootstrap tokens exchanged exactly once for a 30-day mTLS client
 certificate bound (by `CommonName`) to the server's ID; the gateway independently
 derives identity from the certificate on every connection (never trusts anything the
-agent asserts in-band) and checks a revocation list on every handshake.
+agent asserts in-band) and checks a revocation list on every handshake. That
+certificate then rotates itself: with 10 days left the agent asks for a successor over
+its existing authenticated session, generating a new keypair each time, and the
+predecessor is revoked only once the agent confirms the replacement is durably on
+disk — so rotation can be interrupted at any point without stranding a server.
 
 ## 12. Privileged operations and allow-list
 
@@ -405,7 +417,6 @@ all ⬜, scoped to Phase 2 per `product-plan.md` §9.
 - No backup scheduling/retention policy — backups are on-demand only.
 - No on-disk agent task journal — a task in flight when the agent process restarts is
   lost, not resumed (see `ARCHITECTURE.md` §4 "As built").
-- No agent certificate auto-renewal before its 30-day expiry (see `SECURITY.md` §2).
 - No agent self-update mechanism (see `SECURITY.md` §3).
 - No background job queue — task dispatch is synchronous and bounded by a 120s HTTP
   timeout; this will not scale past a moderate number of concurrent long-running tasks

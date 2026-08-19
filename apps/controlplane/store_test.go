@@ -298,6 +298,37 @@ func TestBackupCreateListGetRoundTrip(t *testing.T) {
 	}
 }
 
+func TestCommitCertRenewal(t *testing.T) {
+	st := newTestStore(t)
+	serverID, _, _ := st.createServer("web-14", "", nil, time.Hour, "admin@example.com")
+	st.markIssuedCert(serverID, "500")
+
+	if err := st.commitCertRenewal(serverID, "500", "501"); err != nil {
+		t.Fatalf("commitCertRenewal: %v", err)
+	}
+
+	rec, ok := st.get(serverID)
+	if !ok || rec.CertSerial != "501" {
+		t.Fatalf("cert_serial = %q, want the successor serial", rec.CertSerial)
+	}
+	if !st.isRevoked("500") {
+		t.Fatal("the superseded serial should be revoked")
+	}
+	if st.isRevoked("501") {
+		t.Fatal("the new serial must not be revoked")
+	}
+
+	// A server that has never been issued a certificate (empty old serial)
+	// must adopt the new one without writing a bogus empty revocation entry.
+	other, _, _ := st.createServer("web-15", "", nil, time.Hour, "admin@example.com")
+	if err := st.commitCertRenewal(other, "", "600"); err != nil {
+		t.Fatalf("commitCertRenewal with no prior serial: %v", err)
+	}
+	if st.isRevoked("") {
+		t.Fatal("an empty serial should never be written to the revocation list")
+	}
+}
+
 func TestDatabaseCreateListGetDeleteRoundTrip(t *testing.T) {
 	st := newTestStore(t)
 	serverID, _, _ := st.createServer("web-11", "", nil, time.Hour, "admin@example.com")

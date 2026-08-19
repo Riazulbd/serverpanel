@@ -9,6 +9,15 @@ import (
 	"time"
 )
 
+// agentCertTTL is how long an issued agent client certificate stays valid.
+// It is deliberately short relative to a server's lifetime so that a leaked
+// certificate has a bounded blast radius and rotation is a routine,
+// well-exercised path rather than an emergency one — which is only true if
+// agents actually renew, so this constant is shared by the initial issuance
+// (handleRegister) and the renewal path (gateway.handleRenewRequest) rather
+// than written twice.
+const agentCertTTL = 30 * 24 * time.Hour
+
 // apiServer is the public-facing HTTP API a browser dashboard (and, later,
 // the public API mentioned in the product plan) talks to. It is a distinct
 // listener from the mTLS agent gateway (apps/controlplane/gateway.go) — a
@@ -103,7 +112,7 @@ func (a *apiServer) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	certPEM, serial, err := a.ca.signAgentCSR([]byte(req.CSRPEM), serverID, 30*24*time.Hour)
+	certPEM, serial, err := a.ca.signAgentCSR([]byte(req.CSRPEM), serverID, agentCertTTL)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, fmt.Sprintf("could not sign certificate: %v", err))
 		return

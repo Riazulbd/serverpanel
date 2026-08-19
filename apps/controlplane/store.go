@@ -172,6 +172,33 @@ func (s *store) markIssuedCert(serverID, serial string) {
 	s.log(serverID, "", "agent.registered", fmt.Sprintf("cert_serial=%s", serial))
 }
 
+// commitCertRenewal atomically makes newSerial the server's certificate of
+// record and revokes oldSerial. Both happen in one transaction because the
+// half-applied states are both bad: revoking the old without adopting the
+// new would strand the server, and adopting the new without revoking the
+// old would leave a superseded certificate silently usable until its own
+// expiry — which is precisely what rotation exists to prevent.
+func (s *store) commitCertRenewal(serverID, oldSerial, newSerial string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if oldSerial != "" {
+		if _, err := tx.Exec(
+			`INSERT OR REPLACE INTO revoked_certs (serial, server_id, revoked_at) VALUES (?, ?, ?)`,
+			oldSerial, serverID, time.Now().UTC().Format(time.RFC3339Nano),
+		); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`UPDATE servers SET cert_serial = ? WHERE id = ?`, newSerial, serverID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (s *store) isRevoked(serial string) bool {
 	var n int
 	s.db.QueryRow(`SELECT COUNT(1) FROM revoked_certs WHERE serial = ?`, serial).Scan(&n)

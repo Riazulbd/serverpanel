@@ -32,22 +32,41 @@ type agentSession struct {
 	serverID string
 	conn     net.Conn
 	enc      *json.Encoder
-	mu       sync.Mutex // guards writes to enc
+	mu       sync.Mutex // guards writes to enc and the renewal fields below
 	pending  map[string]chan proto.TaskEvent
+
+	// certSerial is the serial of the certificate this session actually
+	// authenticated with — the one a completed renewal supersedes.
+	certSerial string
+	// pendingRenewSerial is set once a successor certificate has been
+	// signed and sent but the agent has not yet confirmed it reached disk.
+	// Until that confirmation arrives, nothing about the old certificate
+	// changes, so an agent that dies mid-renewal reconnects with the
+	// certificate it still has rather than being locked out of its own
+	// control plane.
+	pendingRenewSerial string
+	// renewed records that this session already completed one renewal. A
+	// session needs at most one; refusing further ones bounds how fast a
+	// single misbehaving or compromised agent can churn through serial
+	// numbers and revocation-list entries.
+	renewed bool
 }
 
 func newGateway(ca *agentCA, st *store) *gateway {
 	return &gateway{ca: ca, store: st, sessions: map[string]*agentSession{}}
 }
 
-func (g *gateway) listenAndServe(addr string) error {
+// listen binds the mTLS agent listener. It is separate from serve so a
+// caller (including a test) can learn the bound address before any agent
+// connects — necessary when binding to port 0.
+func (g *gateway) listen(addr string) (net.Listener, error) {
 	certPEM, keyPEM, err := g.ca.signServerCert([]string{"localhost", "127.0.0.1", "serverpanel-gateway"})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	cert, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	cfg := &tls.Config{
@@ -56,21 +75,26 @@ func (g *gateway) listenAndServe(addr string) error {
 		ClientCAs:    g.ca.certPool(),
 		MinVersion:   tls.VersionTLS13,
 	}
+	return tls.Listen("tcp", addr, cfg)
+}
 
-	ln, err := tls.Listen("tcp", addr, cfg)
-	if err != nil {
-		return err
-	}
-	log.Printf("agent gateway (mTLS) listening on %s", addr)
-
+func (g *gateway) serve(ln net.Listener) error {
+	log.Printf("agent gateway (mTLS) listening on %s", ln.Addr())
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			log.Printf("gateway accept error: %v", err)
-			continue
+			return err
 		}
 		go g.handleConn(conn)
 	}
+}
+
+func (g *gateway) listenAndServe(addr string) error {
+	ln, err := g.listen(addr)
+	if err != nil {
+		return err
+	}
+	return g.serve(ln)
 }
 
 func (g *gateway) handleConn(conn net.Conn) {
@@ -106,10 +130,11 @@ func (g *gateway) handleConn(conn net.Conn) {
 	}
 
 	sess := &agentSession{
-		serverID: serverID,
-		conn:     conn,
-		enc:      json.NewEncoder(conn),
-		pending:  map[string]chan proto.TaskEvent{},
+		serverID:   serverID,
+		conn:       conn,
+		enc:        json.NewEncoder(conn),
+		pending:    map[string]chan proto.TaskEvent{},
+		certSerial: serial,
 	}
 
 	g.mu.Lock()
@@ -160,6 +185,12 @@ func (g *gateway) handleConn(conn net.Conn) {
 					At: env.Heartbeat.SentAt,
 				})
 			}
+		case proto.MsgRenewRequest:
+			if env.RenewRequest != nil {
+				g.handleRenewRequest(sess, env.RenewRequest)
+			}
+		case proto.MsgRenewAck:
+			g.handleRenewAck(sess)
 		case proto.MsgTaskEvent:
 			if env.TaskEvent != nil {
 				g.store.log(serverID, "", "task.event", fmt.Sprintf("task_id=%s status=%s message=%q", env.TaskEvent.TaskID, env.TaskEvent.Status, env.TaskEvent.Message))
@@ -175,6 +206,91 @@ func (g *gateway) handleConn(conn net.Conn) {
 			}
 		}
 	}
+}
+
+// handleRenewRequest signs a successor to the certificate this session
+// authenticated with. The new certificate's identity comes from
+// sess.serverID — derived by the gateway from the mTLS handshake, never
+// from anything in the request — so an agent cannot renew into a different
+// server's identity no matter what it puts in its CSR.
+//
+// Nothing about the existing certificate changes here. The old serial is
+// superseded only once the agent confirms (handleRenewAck) that the new
+// certificate is durably on disk; see agentSession.pendingRenewSerial.
+func (g *gateway) handleRenewRequest(sess *agentSession, req *proto.RenewRequest) {
+	reply := func(resp proto.RenewResponse) {
+		sess.mu.Lock()
+		defer sess.mu.Unlock()
+		_ = sess.enc.Encode(proto.Envelope{Type: proto.MsgRenewResponse, RenewResponse: &resp})
+	}
+
+	sess.mu.Lock()
+	alreadyRenewed := sess.renewed
+	sess.mu.Unlock()
+	if alreadyRenewed {
+		g.store.log(sess.serverID, "", "agent.cert_renew_refused", "a renewal already completed on this session")
+		reply(proto.RenewResponse{Error: "a certificate renewal already completed on this session; reconnect with the new certificate before renewing again"})
+		return
+	}
+
+	// A revoked agent must not be able to renew its way back into the
+	// fleet. Revocation is checked at handshake, but a session can outlive
+	// the moment its certificate was revoked, so it is re-checked here —
+	// issuing a fresh certificate is exactly the operation where a stale
+	// authorization would matter most.
+	if g.store.isRevoked(sess.certSerial) {
+		g.store.log(sess.serverID, "", "agent.cert_renew_refused", "certificate is revoked")
+		reply(proto.RenewResponse{Error: "this certificate has been revoked and cannot be renewed"})
+		return
+	}
+
+	certPEM, serial, err := g.ca.signAgentCSR([]byte(req.CSRPEM), sess.serverID, agentCertTTL)
+	if err != nil {
+		g.store.log(sess.serverID, "", "agent.cert_renew_failed", err.Error())
+		reply(proto.RenewResponse{Error: "could not sign the renewal request: " + err.Error()})
+		return
+	}
+
+	sess.mu.Lock()
+	sess.pendingRenewSerial = serial.String()
+	sess.mu.Unlock()
+
+	g.store.log(sess.serverID, "", "agent.cert_renew_issued",
+		fmt.Sprintf("old_serial=%s new_serial=%s awaiting_agent_confirmation=true", sess.certSerial, serial))
+	reply(proto.RenewResponse{CertPEM: string(certPEM), CAPEM: string(g.ca.CAPEM())})
+}
+
+// handleRenewAck commits a renewal the agent has confirmed it persisted:
+// the successor becomes the server's certificate of record and the
+// predecessor is revoked, so a copy of the old certificate stolen before
+// rotation stops being usable immediately rather than lingering until its
+// own expiry.
+//
+// The live session is deliberately left open even though it authenticated
+// with the now-revoked certificate: revocation gates new handshakes, and
+// tearing down a healthy connection mid-renewal would turn routine rotation
+// into a visible outage. The agent picks up the new certificate on its next
+// reconnect.
+func (g *gateway) handleRenewAck(sess *agentSession) {
+	sess.mu.Lock()
+	newSerial := sess.pendingRenewSerial
+	oldSerial := sess.certSerial
+	if newSerial == "" {
+		sess.mu.Unlock()
+		return // no renewal outstanding; nothing to commit
+	}
+	sess.pendingRenewSerial = ""
+	sess.renewed = true
+	sess.mu.Unlock()
+
+	if err := g.store.commitCertRenewal(sess.serverID, oldSerial, newSerial); err != nil {
+		g.store.log(sess.serverID, "", "agent.cert_renew_failed",
+			fmt.Sprintf("old_serial=%s new_serial=%s: %v", oldSerial, newSerial, err))
+		return
+	}
+	g.store.log(sess.serverID, "", "agent.cert_renewed",
+		fmt.Sprintf("old_serial=%s new_serial=%s", oldSerial, newSerial))
+	log.Printf("agent certificate renewed: server_id=%s old_serial=%s new_serial=%s", sess.serverID, oldSerial, newSerial)
 }
 
 // dispatch sends a task to a connected agent and waits (bounded by ctx) for

@@ -2,7 +2,7 @@
 
 ## 1. Current automated coverage
 
-`go test ./...` — 69 test functions across two packages, all passing, no `-race`
+`go test ./...` — 79 test functions across three packages, all passing, no `-race`
 failures, `go vet` clean, `gofmt -l` clean:
 
 ```
@@ -15,7 +15,8 @@ go test ./... -race
 
 | Package | Tests | What they cover |
 |---|---|---|
-| `apps/controlplane` | 30 | Auth/session lifecycle (create, MFA-verify, expiry, delete), bcrypt password rules, email normalization/uniqueness, TOTP round-trip/skew/rejection, bootstrap-token single-use/expiry/unknown-token, server create/list/get, revocation (cert-serial blocking + status transitions, including that a stray disconnect can't resurrect a revoked server), heartbeat recording, audit-log append, site create/list, `getSite`'s cross-server scoping, backup create/list/get round trip and its own cross-server scoping, database create/list/get/delete round trip and its own cross-server scoping, and 8 full HTTP integration tests through `routes()` with `httptest` covering signup→login→protected-route, the full 2FA enroll→logout→login→MFA-challenge→access flow, server create/list/revoke, agent registration with a bad token, the backup endpoints' not-found boundaries, backup-request validation (bad scope, missing `db_name`, and confirming validation runs before dispatch), the database endpoints' empty-list/not-found boundaries, and database-name validation (confirming an injection-shaped name is rejected before dispatch, and before any password is generated) |
+| `apps/controlplane` | 35 | Auth/session lifecycle (create, MFA-verify, expiry, delete), bcrypt password rules, email normalization/uniqueness, TOTP round-trip/skew/rejection, bootstrap-token single-use/expiry/unknown-token, server create/list/get, revocation (cert-serial blocking + status transitions, including that a stray disconnect can't resurrect a revoked server), heartbeat recording, audit-log append, site create/list, `getSite`'s cross-server scoping, backup create/list/get round trip and its own cross-server scoping, database create/list/get/delete round trip and its own cross-server scoping, `commitCertRenewal`'s atomic adopt-new/revoke-old transaction, 4 certificate-rotation integration tests against a **real mTLS gateway listener, real CA, and real database** (a full request→sign→confirm→revoke round trip verifying the successor is bound to the same server identity, uses a new serial, and that nothing changes before the agent confirms; refusal of a second renewal on one session; refusal to renew a revoked certificate; and that an unsolicited renewal acknowledgement revokes nothing), and 8 full HTTP integration tests through `routes()` with `httptest` covering signup→login→protected-route, the full 2FA enroll→logout→login→MFA-challenge→access flow, server create/list/revoke, agent registration with a bad token, the backup endpoints' not-found boundaries, backup-request validation (bad scope, missing `db_name`, and confirming validation runs before dispatch), the database endpoints' empty-list/not-found boundaries, and database-name validation (confirming an injection-shaped name is rejected before dispatch, and before any password is generated) |
+| `apps/agent` | 5 | Certificate-expiry parsing (including rejection of empty/malformed/non-certificate PEM), that each renewal generates a genuinely fresh keypair and a self-consistent CSR, and `persistRenewedIdentity`'s durability properties against a real filesystem: files replaced with 0600 preserved, no temporary file left behind, and — the property the whole renewal ordering depends on — the previous identity left intact and usable when the new one can't be written |
 | `packages/capabilities` | 39 | Capability dispatch (unknown name rejected, `system.ping` works, nil `Progress` doesn't panic, the registry has a handler for every declared `Cap*` constant), `service.control`'s allow-list boundary (unit, action, and an explicit shell-metacharacter-injection attempt, all rejected before `systemctl` is ever invoked), the file manager's path-traversal and symlink-escape defenses (`resolveScopedPath`), oversized-read/write rejection, refusal to delete the site root itself, a real list+write round trip against a real filesystem, log redaction (token/password query params, `Authorization: Bearer`/`Basic`), `logs.tail`'s input validation, domain-name validation (including injection-shaped inputs), `systemUserForDomain`'s bounding/sanitization, the deterministic php-fpm-pool/socket/vhost path builders, `backup.run`'s scope validation and a real files-backup-and-checksum round trip, and `backup.restore`'s archive-location/checksum validation, a real files backup→corrupt→restore round trip (with a real throwaway system user, verifying both content restoration and pre-restore checkpoint creation), and `extractTarGzSafely`'s rejection of path-traversal entries, absolute-path entries, and oversized archives, plus `db.create`/`db.delete`'s pre-connection input validation (invalid database name, invalid owner user, under-length owner password) and `ValidIdentifier`'s boundary cases (leading digit/uppercase, spaces, punctuation, and exactly-at vs. one-over the 31-character cap) |
 
 None of this is mocked where a cheap real implementation was possible: sessions/users/
@@ -34,8 +35,10 @@ meaningfully fake are **not** exercised by the automated suite:
 MariaDB), `ssl.issue_letsencrypt` (real ACME/public DNS), `db.create/delete/list`'s
 actual SQL execution (a running MariaDB — their input validation, which runs entirely
 before the connection is opened, *is* covered), `service.control`'s actual `systemctl`
-invocation, and the agent's
-registration/connect/reconnect loop against a live gateway. `backup.run`'s and
+invocation, and the agent binary's own reconnect-with-backoff loop against a live
+gateway (agent *enrollment*, mTLS *session establishment*, and certificate *rotation*
+are covered for real by `gateway_test.go`; what isn't is the long-running
+process-level retry behavior across a genuine network partition). `backup.run`'s and
 `backup.restore`'s **files** scope are exercised for real (real files, real archive,
 real throwaway system user, real `chown`); their **db**/**full** scope (real
 `mysqldump`/`mysql` against a running MariaDB) is not — this environment doesn't run

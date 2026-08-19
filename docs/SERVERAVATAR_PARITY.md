@@ -48,11 +48,11 @@ actually exists — expand a row into a full block the moment work on it begins
 - **DB tables**: `servers`, `bootstrap_tokens`, `revoked_certs`.
 - **Required permission**: authenticated session (single-user model today — see ORG-001).
 - **Security considerations**: single-use/short-lived hashed bootstrap tokens; certificate identity independently derived from the mTLS handshake, never trusted from agent-asserted data; revocation checked every handshake.
-- **Test coverage**: `apps/controlplane/http_test.go` (`TestServerCreateListRevokeFlow`, `TestRegisterEndpointRejectsBadToken`), `apps/controlplane/store_test.go`.
+- **Test coverage**: `apps/controlplane/http_test.go` (`TestServerCreateListRevokeFlow`, `TestRegisterEndpointRejectsBadToken`), `apps/controlplane/store_test.go`, and `apps/controlplane/gateway_test.go` — which enrolls an agent through the real `/agents/register` endpoint and connects it to a real mTLS gateway listener, covering the enrollment→session→rotation path end to end rather than at the unit boundary.
 - **Current status**: `COMPLETE`
-- **Completion date**: 2026-08-14
-- **Known differences**: no agent certificate auto-renewal before 30-day expiry yet.
-- **Reason**: scoped out of the initial secure-foundation pass; tracked in `SYSTEM.md` §22.
+- **Completion date**: 2026-08-14 (enrollment); 2026-08-19 (certificate rotation)
+- **Known differences**: an agent that stays offline past its certificate's expiry must be re-registered with a fresh bootstrap token rather than recovering on its own.
+- **Reason**: deliberate fail-closed behavior, not a gap — a certificate that has already expired is exactly the case where silent re-trust would be wrong. The 10-day renewal headroom means an agent gets many retries before that point.
 
 ### SRV-002 — Hosting stack installation (LEMP)
 - **Category**: Server Management

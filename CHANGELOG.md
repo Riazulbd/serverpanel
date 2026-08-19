@@ -2,6 +2,50 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-19 — Agent certificate rotation
+
+- **Implemented automatic agent certificate renewal**, closing the last of the three
+  gaps `SYSTEM.md` had flagged as blocking Phase 1. Agent certificates are issued for
+  30 days and, until now, had no renewal path at all: every connected server would
+  have silently dropped out of the fleet 30 days after enrollment, recoverable only by
+  manually re-registering each one.
+- Renewal rides the **already-authenticated mTLS session** rather than a new endpoint
+  (`renew_request`/`renew_response`/`renew_ack` in `packages/proto`). Possession of a
+  currently valid, non-revoked certificate is precisely the right authorization to be
+  issued its successor, and the gateway already knows the peer's identity without
+  trusting anything asserted in-band.
+- Ordering is built so an interruption can never strand a server: the gateway signs and
+  sends the successor but changes *nothing* until the agent confirms it is durably on
+  disk; the agent writes each file write-temp → fsync → rename, and only then
+  acknowledges; the acknowledgement is what atomically adopts the new serial and
+  revokes the old one (`store.commitCertRenewal`, one transaction — the half-applied
+  states both being bad is exactly why). An agent that dies at any point still holds a
+  valid certificate and retries on its next reconnect, with ~10 days of headroom.
+- Each renewal generates a **new keypair** rather than re-certifying the existing one:
+  rotating the certificate while keeping the key leaves the thing most worth stealing
+  unchanged. The successor's identity is set by the gateway from the handshake, never
+  from the CSR, so an agent cannot renew into another server's identity. A revoked
+  certificate cannot be renewed (re-checked at renewal time, since a session can
+  outlive the revocation that happened during it), and one renewal per session bounds
+  serial-number churn from a misbehaving agent.
+- **Fixed a pre-existing data race**: the agent wrote to a shared `json.Encoder` from
+  the heartbeat goroutine and every task goroutine with no synchronization. Two
+  interleaved encodes emit a corrupt frame that desynchronizes the connection for the
+  rest of the session. Writes now go through a mutex-guarded `sender`.
+- `gateway.listenAndServe` split into `listen`/`serve` so the listener's bound address
+  is knowable before serving (needed to test against an ephemeral port). The accept
+  loop now returns its error to `main`'s existing `log.Fatalf` instead of `continue`ing
+  forever, which on a closed listener was an unlogged busy-spin.
+- Added 10 tests, including 4 rotation integration tests against a real mTLS listener,
+  real CA, and real database — enrolling an agent through the actual `/agents/register`
+  endpoint and driving the real protocol — plus the first tests in `apps/agent`. Full
+  suite: 79 test functions across three packages, `go vet`/`gofmt` clean, passes with
+  `-race`.
+- Updated `SECURITY.md` §2 (`partially implemented` → `implemented`), `API.md` (wire
+  protocol + a renewal section), `SYSTEM.md` (§2 feature table, §3 phase status, §7
+  agent lifecycle, §11 agent auth, and removed the now-closed known limitation),
+  `TESTING.md`, and `SERVERAVATAR_PARITY.md` (SRV-001).
+
 ## 2026-08-19 — Database management end-to-end
 
 - **Wired database management through the full stack**, closing the highest-priority
