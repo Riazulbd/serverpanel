@@ -152,6 +152,32 @@ func TestRevokeServerBlocksReuseOfCertSerial(t *testing.T) {
 	}
 }
 
+func TestMarkRenewedCertUpdatesSerialWithoutChangingStatus(t *testing.T) {
+	st := newTestStore(t)
+	id, _, err := st.createServer("web-4", "", nil, time.Hour, "admin@example.com")
+	if err != nil {
+		t.Fatalf("createServer: %v", err)
+	}
+	st.markIssuedCert(id, "42")
+	st.setConnected(id, true)
+
+	st.markRenewedCert(id, "99")
+
+	rec, ok := st.get(id)
+	if !ok {
+		t.Fatal("server should still exist after renewal")
+	}
+	if rec.CertSerial != "99" {
+		t.Fatalf("cert_serial = %q, want %q", rec.CertSerial, "99")
+	}
+	if rec.Status != statusConnected {
+		t.Fatalf("status after renewal = %q, want %q (renewal must not knock a live agent offline)", rec.Status, statusConnected)
+	}
+	if st.isRevoked("42") {
+		t.Fatal("renewal should not revoke the previous certificate serial — it stays valid until its own expiry")
+	}
+}
+
 func TestRevokeServerRejectsUnknownServer(t *testing.T) {
 	st := newTestStore(t)
 	if err := st.revokeServer("srv_doesnotexist", "admin@example.com"); err == nil {

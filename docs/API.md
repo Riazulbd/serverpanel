@@ -160,6 +160,8 @@ connection carries newline-delimited JSON `Envelope`s in both directions
 {"type": "task", "task": {"id": "...", "capability": "...", "params": {}, "issued_at": "..."}}
 {"type": "task_event", "task_event": {"task_id": "...", "status": "queued|running|succeeded|failed|rejected", "message": "...", "detail": "...", "at": "..."}}
 {"type": "ack"}
+{"type": "renew", "renew": {"csr_pem": "..."}}
+{"type": "renew_result", "renew_result": {"cert_pem": "...", "error": ""}}
 ```
 
 Flow: gateway accepts → verifies cert → sends `ack` → agent sends `hello`, then
@@ -170,6 +172,16 @@ HTTP handler) until it sees a terminal event for the task ID it sent, or its con
 deadline expires. There is no message type for a free-form command — `capability` must
 be a name in `packages/capabilities`'s fixed registry, or the agent returns `rejected`
 without executing anything.
+
+Independently of task dispatch, the agent may send `renew` at any time (in practice,
+once fewer than 7 days remain on its current 30-day certificate — see `SECURITY.md`
+§2) to request a fresh client certificate without a new bootstrap token. The gateway
+signs it for the `server_id` already bound to this connection's verified client
+certificate — the CSR's own requested subject is ignored — and replies with
+`renew_result`, either a signed `cert_pem` or a non-empty `error`. Either outcome
+leaves the current connection and certificate valid; a renewal is best-effort and
+never disruptive on its own. The agent persists a successful renewal to disk and then
+closes and immediately redials with the new identity.
 
 ## 4. Capability reference
 

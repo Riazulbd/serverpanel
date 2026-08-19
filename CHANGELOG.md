@@ -2,6 +2,38 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-19 — Agent certificate auto-renewal, connection write-race fix
+
+- **Implemented in-band agent certificate auto-renewal**, closing the last open gap on
+  SRV-001 (see `SERVERAVATAR_PARITY.md`) and the top item under "server-agent
+  correctness" in the priority order. Client certificates are issued with a 30-day TTL
+  (`agentCertTTL`, `apps/controlplane/gateway.go`); the agent now checks hourly
+  (`apps/agent/connect.go`) and, once fewer than 7 days remain, generates a fresh
+  keypair and sends its CSR over its *existing, already-authenticated* mTLS session as
+  a new `proto.MsgRenew` message — no bootstrap token needed. The gateway's
+  `handleRenew` signs the new certificate bound to that connection's already-verified
+  `server_id`, deliberately ignoring the CSR's own requested subject, so a compromised
+  agent can never use renewal to claim a different server's identity (covered by
+  `TestRenewCannotClaimAnotherServersIdentity`). The agent persists the new cert/key
+  atomically (temp file + rename) and immediately reconnects with the new identity
+  (`errCertRenewed`, handled by `main.go`'s retry loop so this doesn't count against
+  reconnect backoff). The prior certificate is left to expire naturally rather than
+  being revoked, so a renewal in flight never disrupts the still-valid connection it's
+  renewing.
+- **Fixed a latent unsynchronized-concurrent-write bug** on the agent's connection
+  encoder: heartbeats, task-event replies, and (now) renewal requests were each written
+  by separate goroutines directly through one shared `*json.Encoder` with no locking,
+  risking interleaved partial JSON writes corrupting the message stream under
+  concurrent load. All writes now go through one mutex-guarded `send` closure.
+- New tests: `apps/controlplane/gateway_test.go` (`TestRenewOverGatewayIssuesFreshCertBoundToSameServerID`,
+  `TestRenewCannotClaimAnotherServersIdentity` — real mTLS dials against a live
+  gateway listener), `apps/controlplane/store_test.go`
+  (`TestMarkRenewedCertUpdatesSerialWithoutChangingStatus`), and
+  `apps/agent/register_test.go` (cert-expiry parsing, atomic persistence). Full suite
+  (`go build`, `go vet`, `go test ./...`, `go test ./... -race`) passes.
+- Updated `SYSTEM.md`, `SECURITY.md` §2, `API.md` §3, and `SERVERAVATAR_PARITY.md`
+  (SRV-001) to reflect the closed gap.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

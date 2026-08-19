@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"log"
 	"os"
@@ -51,10 +52,17 @@ func main() {
 
 	backoff := time.Second
 	for {
-		err := runConnection(ctx, id, reg)
+		err := runConnection(ctx, id, *dataDir, reg)
 		if ctx.Err() != nil {
 			log.Println("shutting down")
 			return
+		}
+		if errors.Is(err, errCertRenewed) {
+			// A deliberate, healthy disconnect to pick up the identity
+			// runConnection just persisted — reconnect right away rather
+			// than treating it like a failure and backing off.
+			backoff = time.Second
+			continue
 		}
 		log.Printf("connection to gateway lost: %v (retrying in %s)", err, backoff)
 		select {

@@ -70,16 +70,10 @@ func loadIdentity(dataDir string) (*identity, error) {
 // token is read once from the caller-supplied value and is never written to
 // disk or logged; only the resulting certificate and identifiers persist.
 func register(apiAddr, token, dataDir string) (*identity, error) {
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	key, csrPEM, err := newKeyAndCSR()
 	if err != nil {
-		return nil, fmt.Errorf("generate key: %w", err)
+		return nil, err
 	}
-	csrTmpl := &x509.CertificateRequest{Subject: pkix.Name{CommonName: "pending-registration"}}
-	csrDER, err := x509.CreateCertificateRequest(rand.Reader, csrTmpl, key)
-	if err != nil {
-		return nil, fmt.Errorf("create CSR: %w", err)
-	}
-	csrPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
 
 	reqBody, _ := json.Marshal(map[string]string{"token": token, "csr_pem": string(csrPEM)})
 	httpClient := &http.Client{Timeout: 30 * time.Second}
@@ -128,4 +122,90 @@ func register(apiAddr, token, dataDir string) (*identity, error) {
 	}
 
 	return &identity{ServerID: rr.ServerID, CertPEM: []byte(rr.CertPEM), KeyPEM: keyPEM, CAPEM: []byte(rr.CAPEM), GatewayAddr: rr.GatewayAddr}, nil
+}
+
+// newKeyAndCSR generates a fresh ECDSA keypair and a certificate signing
+// request for it. The CSR's requested Subject is never trusted by the
+// control plane (see proto.RenewRequest) — for a renewal the signed
+// identity comes entirely from the already-authenticated connection it's
+// sent over — so any placeholder subject here is fine.
+func newKeyAndCSR() (*ecdsa.PrivateKey, []byte, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, nil, fmt.Errorf("generate key: %w", err)
+	}
+	csrTmpl := &x509.CertificateRequest{Subject: pkix.Name{CommonName: "pending-registration"}}
+	csrDER, err := x509.CreateCertificateRequest(rand.Reader, csrTmpl, key)
+	if err != nil {
+		return nil, nil, fmt.Errorf("create CSR: %w", err)
+	}
+	return key, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER}), nil
+}
+
+// certExpiry returns the NotAfter time of a PEM-encoded certificate, used
+// by the renewal loop to decide when the current identity is close enough
+// to expiry to renew.
+func certExpiry(certPEM []byte) (time.Time, error) {
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		return time.Time{}, fmt.Errorf("invalid certificate PEM")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return cert.NotAfter, nil
+}
+
+// atomicWriteFile writes data to path via a temp file + rename, so a crash
+// or power loss mid-write can never leave behind a truncated identity file
+// the agent would fail (or worse, silently misbehave) trying to load on
+// its next start.
+func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, perm); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// pendingRenewal holds a freshly generated key while a renewal request is
+// in flight with the gateway. Nothing is persisted to disk until the
+// gateway's signed certificate comes back and finish is called, so a
+// renewal that never completes (connection drops mid-exchange, gateway
+// refuses it) leaves the existing, still-valid identity on disk untouched.
+type pendingRenewal struct {
+	key *ecdsa.PrivateKey
+}
+
+// startRenewal generates the keypair/CSR for a renewal attempt.
+func startRenewal() (*pendingRenewal, []byte, error) {
+	key, csrPEM, err := newKeyAndCSR()
+	if err != nil {
+		return nil, nil, err
+	}
+	return &pendingRenewal{key: key}, csrPEM, nil
+}
+
+// finish persists the gateway-signed certificate paired with this
+// renewal's private key, and updates id in place so the caller's next
+// reconnect attempt picks up the new identity automatically.
+func (p *pendingRenewal) finish(dataDir string, id *identity, certPEM string) error {
+	keyDER, err := x509.MarshalECPrivateKey(p.key)
+	if err != nil {
+		return fmt.Errorf("marshal renewed key: %w", err)
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+
+	certPath, keyPath, _, _ := identityPaths(dataDir)
+	if err := atomicWriteFile(keyPath, keyPEM, 0600); err != nil {
+		return fmt.Errorf("persist renewed key: %w", err)
+	}
+	if err := atomicWriteFile(certPath, []byte(certPEM), 0600); err != nil {
+		return fmt.Errorf("persist renewed cert: %w", err)
+	}
+
+	id.CertPEM = []byte(certPEM)
+	id.KeyPEM = keyPEM
+	return nil
 }

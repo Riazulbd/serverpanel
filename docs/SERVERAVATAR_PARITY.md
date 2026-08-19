@@ -48,11 +48,11 @@ actually exists — expand a row into a full block the moment work on it begins
 - **DB tables**: `servers`, `bootstrap_tokens`, `revoked_certs`.
 - **Required permission**: authenticated session (single-user model today — see ORG-001).
 - **Security considerations**: single-use/short-lived hashed bootstrap tokens; certificate identity independently derived from the mTLS handshake, never trusted from agent-asserted data; revocation checked every handshake.
-- **Test coverage**: `apps/controlplane/http_test.go` (`TestServerCreateListRevokeFlow`, `TestRegisterEndpointRejectsBadToken`), `apps/controlplane/store_test.go`.
+- **Test coverage**: `apps/controlplane/http_test.go` (`TestServerCreateListRevokeFlow`, `TestRegisterEndpointRejectsBadToken`), `apps/controlplane/store_test.go`, `apps/controlplane/gateway_test.go` (`TestRenewOverGatewayIssuesFreshCertBoundToSameServerID`, `TestRenewCannotClaimAnotherServersIdentity`), `apps/agent/register_test.go`.
 - **Current status**: `COMPLETE`
-- **Completion date**: 2026-08-14
-- **Known differences**: no agent certificate auto-renewal before 30-day expiry yet.
-- **Reason**: scoped out of the initial secure-foundation pass; tracked in `SYSTEM.md` §21.
+- **Completion date**: 2026-08-19
+- **Known differences**: agent certificates now auto-renew in-band (over the existing mTLS session, no new bootstrap token) once fewer than 7 days remain of their 30-day TTL — see `SECURITY.md` §2. None outstanding.
+- **Reason**: n/a.
 
 ### SRV-002 — Hosting stack installation (LEMP)
 - **Category**: Server Management
@@ -359,3 +359,13 @@ establish the tracking process and close the single highest-priority gap
   BAK-001/BAK-002 reflecting this session's backup-restore implementation. ~60
   capabilities enumerated overall (detailed + summary), the large majority honestly
   `NOT_STARTED`.
+- **2026-08-19**: implemented in-band agent certificate auto-renewal (SRV-001's last
+  open gap), picked per the priority order in §7 (server-agent correctness ranks above
+  SSL/backups/Git-deploy, and this was the last concrete item under it). The agent now
+  requests a fresh 30-day certificate over its existing mTLS session once <7 days
+  remain, with the new identity bound server-side to the connection's already-verified
+  `server_id` (never the CSR's claimed subject). Also fixed a latent unsynchronized-
+  concurrent-write bug on the agent's connection encoder (heartbeat, task results, and
+  the new renewal messages could previously interleave partial JSON writes onto the
+  same connection with no lock) while touching that code. No count changes: SRV-001 was
+  already `COMPLETE`, this closes its one documented "known difference."

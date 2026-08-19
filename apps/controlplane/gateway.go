@@ -20,6 +20,12 @@ import (
 // internal CA can open a session here, and each session is authenticated by
 // the certificate's CommonName (the server_id bound at registration), not
 // by anything the agent asserts in-band.
+// agentCertTTL is the lifetime of every client certificate this control
+// plane issues to an agent, at initial registration and at every renewal
+// alike — see connect.go's renewal loop on the agent side, which requests a
+// fresh one well before this expires.
+const agentCertTTL = 30 * 24 * time.Hour
+
 type gateway struct {
 	ca    *agentCA
 	store *store
@@ -173,7 +179,37 @@ func (g *gateway) handleConn(conn net.Conn) {
 					}
 				}
 			}
+		case proto.MsgRenew:
+			if env.Renew != nil {
+				g.handleRenew(sess, serverID, *env.Renew)
+			}
 		}
+	}
+}
+
+// handleRenew issues a fresh client certificate for serverID, the identity
+// already bound to this authenticated connection — the request's CSR is
+// used only for its public key, never for the identity it claims, so an
+// agent can only ever renew the certificate it already holds. A refused or
+// failed renewal never tears down the connection: the caller's current
+// certificate keeps working until its own expiry, so this is a
+// best-effort, non-disruptive exchange.
+func (g *gateway) handleRenew(sess *agentSession, serverID string, req proto.RenewRequest) {
+	var result proto.RenewResult
+	certPEM, serial, err := g.ca.signAgentCSR([]byte(req.CSRPEM), serverID, agentCertTTL)
+	if err != nil {
+		result.Error = err.Error()
+		g.store.log(serverID, "", "agent.cert_renew_failed", err.Error())
+	} else {
+		result.CertPEM = string(certPEM)
+		g.store.markRenewedCert(serverID, serial.String())
+	}
+
+	sess.mu.Lock()
+	err = sess.enc.Encode(proto.Envelope{Type: proto.MsgRenewResult, RenewResult: &result})
+	sess.mu.Unlock()
+	if err != nil {
+		log.Printf("agent %s: failed to send renewal result: %v", serverID, err)
 	}
 }
 
