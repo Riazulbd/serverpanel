@@ -85,6 +85,31 @@ real, not because they're still open):
 - Heartbeats only ever populated uptime; load/memory/disk were left at zero because
   nothing collected them. Implemented via `/proc/loadavg`, `/proc/meminfo`, and
   `syscall.Statfs`.
+- The install command shown by the dashboard was hardcoded to placeholder domains
+  (`get.serverpanel.example`, `api.serverpanel.example`) that don't exist — the one-line
+  install flow was not actually installable. Fixed: see "Self-hosted install flow" below.
+
+## Self-hosted install flow (now real, not just designed)
+
+`install.sh`, the systemd unit, and the agent binary itself are now all served by the
+control plane at its own `-public-url` (`GET /install.sh`, `GET
+/downloads/serverpanel-agent.service`, `GET
+/downloads/serverpanel-agent-linux-{amd64,arm64}[.sha256]` —
+`apps/controlplane/downloads.go`) — there's no separate release host to stand up or keep
+in sync. `handleCreateServer` builds the install command from `-public-url` instead of a
+placeholder. `scripts/build-agent-releases.sh` cross-compiles the agent for both
+architectures into a directory the control plane serves from (`-agent-binaries-dir`,
+default `./dist`).
+
+This was verified for real, not just wired up: built real release binaries, started the
+control plane with `-public-url` pointing at itself, created a server through the API to
+get a real install command, and ran the **exact** `curl -fsSL .../install.sh | sudo bash
+-s -- ...` a user would copy-paste — not a bypassed/manual equivalent. It ran the
+compatibility checks, downloaded the real binary, verified its checksum ("OK"),
+registered, and only stopped at the systemd step (`daemon-reload`), which fails here
+because this sandbox has no systemd as PID 1 — the same documented limitation as
+everywhere else in this file, not a new one. Starting the installed binary manually
+confirmed it connects and the dashboard shows it live.
 
 What is **not** independently verified in this environment (documented rather than
 glossed over): `systemctl start/stop/restart` of the installed services, since this
@@ -114,17 +139,23 @@ tested here (no public DNS pointing at this box).
 ```
 go build -o controlplane ./apps/controlplane
 go build -o agent ./apps/agent
+scripts/build-agent-releases.sh   # cross-compiles the agent into ./dist for install.sh to serve
 
 # terminal 1
 ./controlplane -api-addr=127.0.0.1:8080 -gateway-addr=127.0.0.1:8843 \
+  -public-url=http://127.0.0.1:8080 -agent-binaries-dir=./dist \
   -db=./serverpanel.db -insecure-cookies
+# -public-url must be an address the target VPS can actually reach — for anything
+# beyond same-machine local dev, that's your real domain/IP, not 127.0.0.1.
 # -insecure-cookies is for plain-HTTP local dev only; omit it (the default) whenever
 # the dashboard is served over TLS.
 
 # browser: http://127.0.0.1:8080/  → create the first admin account, add a server,
-# copy the install command it shows you.
+# copy the install command it shows you — it's now a real, runnable command:
+#   curl -fsSL <public-url>/install.sh | sudo bash -s -- --server=... --token=... --api=...
 
-# terminal 2, on the box you want to manage (root):
+# on the actual VPS you want to manage (root), just run that copied command. Or, for
+# local dev without a second machine, do what it does by hand:
 ./agent -api=http://127.0.0.1:8080 -token=<from the install command> \
   -data-dir=/etc/serverpanel-agent -register-only
 ./agent -data-dir=/etc/serverpanel-agent   # long-running

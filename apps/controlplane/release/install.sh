@@ -2,11 +2,14 @@
 # ServerPanel agent installer.
 #
 # This is the script referenced by the one-time install command shown in
-# the dashboard after creating a server (see apps/controlplane/http.go
-# handleCreateServer). It is meant to be run exactly once, as root, on a
+# the dashboard after creating a server (see apps/controlplane/sites.go and
+# handleCreateServer in http.go, which build the actual command from this
+# control plane's own -public-url). It is served BY the control plane
+# itself at GET /install.sh (apps/controlplane/downloads.go) — there is no
+# separate release host to keep in sync. Run exactly once, as root, on a
 # clean Ubuntu 24.04 LTS VPS:
 #
-#   curl -fsSL https://get.serverpanel.example/install.sh | sudo bash -s -- \
+#   curl -fsSL <your-control-plane-url>/install.sh | sudo bash -s -- \
 #     --server=<server_id> --token=<bootstrap_token> --api=<control_plane_url>
 #
 # It only: (1) sanity-checks the box is compatible, (2) installs the agent
@@ -22,13 +25,11 @@ set -euo pipefail
 SERVER_ID=""
 TOKEN=""
 API_ADDR=""
-AGENT_VERSION="latest"
 INSTALL_DIR="/usr/local/bin"
 DATA_DIR="/etc/serverpanel-agent"
-DOWNLOAD_BASE="${SERVERPANEL_DOWNLOAD_BASE:-https://releases.serverpanel.example}"
 
 usage() {
-  echo "usage: install.sh --server=<id> --token=<token> --api=<control-plane-url> [--version=<agent-version>]" >&2
+  echo "usage: install.sh --server=<id> --token=<token> --api=<control-plane-url> [--download-base=<url>]" >&2
   exit 1
 }
 
@@ -37,12 +38,19 @@ for arg in "$@"; do
     --server=*) SERVER_ID="${arg#*=}" ;;
     --token=*) TOKEN="${arg#*=}" ;;
     --api=*) API_ADDR="${arg#*=}" ;;
-    --version=*) AGENT_VERSION="${arg#*=}" ;;
+    --download-base=*) DOWNLOAD_BASE_OVERRIDE="${arg#*=}" ;;
     *) echo "unknown argument: $arg" >&2; usage ;;
   esac
 done
 
 [[ -n "$SERVER_ID" && -n "$TOKEN" && -n "$API_ADDR" ]] || usage
+
+# Agent binaries and the systemd unit are served by this same control
+# plane's /downloads/ endpoint by default — the control plane you're
+# registering with is also where the installer fetches its payload from,
+# so there's nothing else to stand up or keep in sync. Override only if
+# you're deliberately hosting release artifacts somewhere else.
+DOWNLOAD_BASE="${SERVERPANEL_DOWNLOAD_BASE:-${DOWNLOAD_BASE_OVERRIDE:-${API_ADDR%/}/downloads}}"
 
 if [[ "$EUID" -ne 0 ]]; then
   echo "error: this script must be run as root (e.g. via sudo)." >&2
@@ -63,16 +71,20 @@ if [[ "${ID:-}" != "ubuntu" || "${VERSION_ID:-}" != "24.04" ]]; then
   exit 1
 fi
 
-ARCH="$(uname -m)"
-case "$ARCH" in
-  x86_64|aarch64) ;;
-  *) echo "error: unsupported CPU architecture: $ARCH" >&2; exit 1 ;;
+# Map uname's arch names onto Go's GOARCH names, since that's how the
+# control plane's build script (scripts/build-agent-releases.sh) names the
+# binaries it serves.
+UNAME_ARCH="$(uname -m)"
+case "$UNAME_ARCH" in
+  x86_64) ARCH="amd64" ;;
+  aarch64) ARCH="arm64" ;;
+  *) echo "error: unsupported CPU architecture: $UNAME_ARCH" >&2; exit 1 ;;
 esac
 
 CPU_COUNT="$(nproc)"
 MEM_MB="$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)"
 DISK_AVAIL_MB="$(df -Pm / | awk 'NR==2 {print $4}')"
-echo "    OS: ${PRETTY_NAME}, arch: ${ARCH}, CPUs: ${CPU_COUNT}, RAM: ${MEM_MB}MB, free disk on /: ${DISK_AVAIL_MB}MB"
+echo "    OS: ${PRETTY_NAME}, arch: ${UNAME_ARCH}, CPUs: ${CPU_COUNT}, RAM: ${MEM_MB}MB, free disk on /: ${DISK_AVAIL_MB}MB"
 
 if (( MEM_MB < 512 )); then
   echo "error: at least 512MB RAM is recommended before installing the agent; found ${MEM_MB}MB." >&2
@@ -90,11 +102,11 @@ for svc in apache2 nginx; do
   fi
 done
 
-echo "==> Downloading agent (version: ${AGENT_VERSION}, arch: ${ARCH})"
+echo "==> Downloading agent (arch: ${ARCH}) from ${DOWNLOAD_BASE}"
 TMP_BIN="$(mktemp)"
-trap 'rm -f "$TMP_BIN"' EXIT
-curl -fsSL "${DOWNLOAD_BASE}/${AGENT_VERSION}/serverpanel-agent-linux-${ARCH}" -o "$TMP_BIN"
-curl -fsSL "${DOWNLOAD_BASE}/${AGENT_VERSION}/serverpanel-agent-linux-${ARCH}.sha256" -o "${TMP_BIN}.sha256"
+trap 'rm -f "$TMP_BIN" "${TMP_BIN}.sha256"' EXIT
+curl -fsSL "${DOWNLOAD_BASE}/serverpanel-agent-linux-${ARCH}" -o "$TMP_BIN"
+curl -fsSL "${DOWNLOAD_BASE}/serverpanel-agent-linux-${ARCH}.sha256" -o "${TMP_BIN}.sha256"
 ( cd "$(dirname "$TMP_BIN")" && sha256sum -c <(sed "s#.*#& $(basename "$TMP_BIN")#" "${TMP_BIN}.sha256") ) \
   || { echo "error: checksum verification failed, aborting." >&2; exit 1; }
 
@@ -110,7 +122,7 @@ chmod 700 "$DATA_DIR"
 "${INSTALL_DIR}/serverpanel-agent" --api="$API_ADDR" --token="$TOKEN" --data-dir="$DATA_DIR" --register-only
 
 echo "==> Installing systemd service"
-curl -fsSL "${DOWNLOAD_BASE}/${AGENT_VERSION}/serverpanel-agent.service" -o /etc/systemd/system/serverpanel-agent.service
+curl -fsSL "${DOWNLOAD_BASE}/serverpanel-agent.service" -o /etc/systemd/system/serverpanel-agent.service
 systemctl daemon-reload
 systemctl enable --now serverpanel-agent
 

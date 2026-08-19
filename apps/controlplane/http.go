@@ -19,12 +19,14 @@ import (
 // challenge endpoint are reachable without one, matching the routes listed
 // in routes() below exactly.
 type apiServer struct {
-	store       *store
-	ca          *agentCA
-	gw          *gateway
-	gatewayAddr string
-	tokenTTL    time.Duration
-	publicDir   string // static dashboard assets; see dashboard.go
+	store            *store
+	ca               *agentCA
+	gw               *gateway
+	gatewayAddr      string
+	tokenTTL         time.Duration
+	publicDir        string // static dashboard assets; see dashboard.go
+	publicURL        string // this control plane's own reachable base URL; see downloads.go and handleCreateServer
+	agentBinariesDir string // pre-built agent binaries; see downloads.go
 }
 
 func (a *apiServer) routes() http.Handler {
@@ -57,6 +59,7 @@ func (a *apiServer) routes() http.Handler {
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
 
+	a.mountDownloads(mux)
 	a.mountDashboard(mux)
 	return mux
 }
@@ -130,11 +133,15 @@ func (a *apiServer) handleCreateServer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// The one-time install command the user copies onto a clean Ubuntu
-	// 24.04 VPS and runs as root. In production this points at a signed
-	// release download; the placeholder host below is illustrative.
+	// 24.04 VPS and runs as root. Both the script and the agent binary it
+	// fetches are served by THIS control plane (see downloads.go) at
+	// a.publicURL — there is no separate release host to configure or
+	// keep in sync. a.publicURL must be the address this VPS can actually
+	// reach (set via -public-url; see main.go), not localhost/127.0.0.1
+	// unless the VPS genuinely is this same machine.
 	installCmd := fmt.Sprintf(
-		"curl -fsSL https://get.serverpanel.example/install.sh | sudo bash -s -- --server=%s --token=%s --api=%s",
-		id, token, "https://api.serverpanel.example",
+		"curl -fsSL %s/install.sh | sudo bash -s -- --server=%s --token=%s --api=%s",
+		a.publicURL, id, token, a.publicURL,
 	)
 
 	writeJSON(w, http.StatusCreated, map[string]any{

@@ -3,6 +3,7 @@
 /agent
 /apps/controlplane/controlplane
 /apps/agent/agent
+/dist/
 
 # Local runtime state (SQLite DB, persisted CA, agent identity) — never
 # commit real deployment secrets/state alongside the source.
