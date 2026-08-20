@@ -177,8 +177,21 @@ The full allow-listed capability names `packages/capabilities.Default()` registe
 (see `SYSTEM.md` §12 for the allow-list rationale): `system.ping`, `service.control`,
 `diagnostics.basic`, `stack.install`, `site.create`, `site.set_php_version`,
 `site.set_status`, `app.wordpress_install`, `ssl.issue_letsencrypt`,
-`ssl.install_custom`, `db.create`, `db.delete`, `db.list`, `file.list`, `file.read`,
-`file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`.
+`ssl.install_custom`, `ssl.status`, `db.create`, `db.delete`, `db.list`, `file.list`,
+`file.read`, `file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`.
+
+### `ssl.status`
+Reports Let's Encrypt certificate expiry and whether `certbot.timer` (installed and
+enabled by `stack.install`) is actively running. `domain` is optional — omit it to list
+every certificate on the server.
+```json
+{"domain": "example.com"}
+```
+Result (JSON-encoded string in the task's `detail`):
+```json
+{"certificates": [{"domain": "example.com", "not_after": "2026-11-01T00:00:00Z",
+ "days_remaining": 73, "expired": false}], "renewal_timer_active": true}
+```
 
 ### `backup.restore`
 ```json

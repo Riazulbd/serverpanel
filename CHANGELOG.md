@@ -2,6 +2,38 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-20 — SSL automatic renewal, certificate status reporting
+
+- **Closed the documented "certbot's own renewal timer is not wired up by
+  `stack.install`" gap** (`SYSTEM.md` §2, `SERVERAVATAR_PARITY.md` APP-016): `stack.install`
+  now has an explicit "certbot automatic renewal timer" step that `systemctl enable`s
+  and `start`s `certbot.timer`, and — because a package being installed doesn't mean its
+  timer is actually enabled *and* running on every base image — independently verifies
+  both `is-enabled` and `is-active` before considering the step done, the same idempotent
+  check/run pattern every other install step already uses.
+- **Added `ssl.status`** (`packages/capabilities/ssl.go`), a new read-only capability
+  that parses every Let's Encrypt certificate under `/etc/letsencrypt/live` directly via
+  Go's `crypto/x509` (never shells out to `openssl`) and reports each domain's expiry
+  date, days remaining, and whether it's already expired, plus whether `certbot.timer`
+  is currently active — the two facts "a cert was issued once" doesn't answer on its
+  own. Optionally scoped to one domain (validated against the existing `domainRe`
+  allow-list before touching the filesystem).
+- Wired a "Check SSL status" quick-action button into the dashboard, reusing the
+  existing generic `dispatchQuick`/task-dispatch mechanism — no new backend endpoint
+  needed since `POST /api/v1/servers/{id}/tasks` already dispatches any allow-listed
+  capability by name.
+- Registered `ssl.status` in the capability allow-list (`packages/capabilities.go`) and
+  its coverage test; added `packages/capabilities/ssl_test.go` (8 tests: certificate
+  expiry parsing, malformed/missing file handling, mixed expired/valid listings,
+  certbot's non-directory `README` entry correctly ignored, a cert-less domain
+  directory skipped without failing the whole report, missing base directory treated as
+  empty rather than an error, invalid/unknown-domain rejection).
+- Updated `docs/SYSTEM.md`, `docs/API.md`, and `docs/SERVERAVATAR_PARITY.md` (APP-016
+  promoted from a `NOT_STARTED`-table row to a full detail entry, status `PARTIAL` — the
+  renewal-timer step and a real ACME issuance/renewal round trip remain
+  `BLOCKED_EXTERNAL` for real-systemd verification in this environment, same category as
+  the rest of `stack.install`).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

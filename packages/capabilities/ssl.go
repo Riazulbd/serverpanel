@@ -2,10 +2,21 @@ package capabilities
 
 import (
 	"context"
+	"crypto/x509"
+	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
+	"time"
 )
+
+// letsEncryptLiveDir is where certbot stores each issued certificate's
+// current symlinked files, one subdirectory per domain (the directory name
+// is the domain certbot issued for, i.e. what was passed as -d).
+const letsEncryptLiveDir = "/etc/letsencrypt/live"
 
 // handleSSLIssueLetsEncrypt issues (or renews) a Let's Encrypt certificate
 // for a domain using certbot's nginx plugin with a fixed, non-interactive
@@ -70,4 +81,111 @@ func handleSSLInstallCustom(ctx context.Context, params map[string]any, progress
 	}
 	run(ctx, "systemctl", "reload", "nginx")
 	return "custom certificate installed for " + domain, nil
+}
+
+// sslCertInfo is one certificate's reported expiry state.
+type sslCertInfo struct {
+	Domain        string    `json:"domain"`
+	NotAfter      time.Time `json:"not_after"`
+	DaysRemaining int       `json:"days_remaining"`
+	Expired       bool      `json:"expired"`
+}
+
+// sslStatusReport is handleSSLStatus's JSON-encoded result.
+type sslStatusReport struct {
+	Certificates       []sslCertInfo `json:"certificates"`
+	RenewalTimerActive bool          `json:"renewal_timer_active"`
+}
+
+// handleSSLStatus reports every Let's Encrypt certificate this agent knows
+// about (or just one domain's, if given) and whether certbot's automatic
+// renewal timer is actually running — the two facts an operator or an
+// expiry alert needs and neither of which "the certificate was issued
+// successfully at some point" answers on its own.
+func handleSSLStatus(ctx context.Context, params map[string]any, progress Progress) (string, error) {
+	domain, _ := params["domain"].(string)
+	if domain != "" && !domainRe.MatchString(strings.ToLower(domain)) {
+		return "", fmt.Errorf("invalid domain %q", domain)
+	}
+
+	certs, err := listLetsEncryptCerts(letsEncryptLiveDir)
+	if err != nil {
+		return "", fmt.Errorf("list certificates: %w", err)
+	}
+	if domain != "" {
+		var filtered []sslCertInfo
+		for _, c := range certs {
+			if c.Domain == domain {
+				filtered = append(filtered, c)
+			}
+		}
+		if len(filtered) == 0 {
+			return "", fmt.Errorf("no certificate found for domain %q", domain)
+		}
+		certs = filtered
+	}
+
+	timerOut, _ := run(ctx, "systemctl", "is-active", "certbot.timer")
+	report := sslStatusReport{
+		Certificates:       certs,
+		RenewalTimerActive: strings.TrimSpace(timerOut) == "active",
+	}
+	b, err := json.Marshal(report)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+// listLetsEncryptCerts reads every domain subdirectory under baseDir and
+// parses its cert.pem for an expiry date. A missing baseDir (no certificate
+// ever issued yet) is not an error — it just means an empty report. A
+// single unreadable/malformed entry is skipped rather than failing the
+// whole report, since one broken directory shouldn't hide the status of
+// every other certificate on the server.
+func listLetsEncryptCerts(baseDir string) ([]sslCertInfo, error) {
+	entries, err := os.ReadDir(baseDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	now := time.Now()
+	var out []sslCertInfo
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		notAfter, err := certExpiry(filepath.Join(baseDir, e.Name(), "cert.pem"))
+		if err != nil {
+			continue
+		}
+		out = append(out, sslCertInfo{
+			Domain:        e.Name(),
+			NotAfter:      notAfter,
+			DaysRemaining: int(notAfter.Sub(now).Hours() / 24),
+			Expired:       now.After(notAfter),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Domain < out[j].Domain })
+	return out, nil
+}
+
+// certExpiry returns a PEM certificate file's NotAfter time.
+func certExpiry(certPath string) (time.Time, error) {
+	data, err := os.ReadFile(certPath)
+	if err != nil {
+		return time.Time{}, err
+	}
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return time.Time{}, fmt.Errorf("%s: no PEM data found", certPath)
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("%s: %w", certPath, err)
+	}
+	return cert.NotAfter, nil
 }

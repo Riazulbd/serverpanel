@@ -140,6 +140,32 @@ func phase1LEMPSteps() []installStep {
 			},
 		},
 		{
+			Name: "certbot automatic renewal timer",
+			// The certbot apt package ships certbot.timer (twice-daily
+			// renewal check) but does not reliably leave it enabled+running
+			// on every base image — a known Phase 1 gap where issuing a
+			// certificate worked but nothing renewed it before its 90-day
+			// expiry. Both "enabled" (survives reboot) and "active"
+			// (running now) are required and independently verified, so a
+			// broken timer shows up here at install time rather than as a
+			// silent expiry surprise later. ssl.status re-checks the same
+			// thing on demand.
+			Check: func(ctx context.Context) bool {
+				enabled, _ := run(ctx, "systemctl", "is-enabled", "certbot.timer")
+				active, _ := run(ctx, "systemctl", "is-active", "certbot.timer")
+				return strings.TrimSpace(enabled) == "enabled" && strings.TrimSpace(active) == "active"
+			},
+			Run: func(ctx context.Context) error {
+				if _, err := run(ctx, "systemctl", "enable", "certbot.timer"); err != nil {
+					return fmt.Errorf("enable certbot.timer: %w", err)
+				}
+				if _, err := run(ctx, "systemctl", "start", "certbot.timer"); err != nil {
+					return fmt.Errorf("start certbot.timer: %w", err)
+				}
+				return nil
+			},
+		},
+		{
 			Name:  "ufw",
 			Check: func(ctx context.Context) bool { return isPackageInstalled(ctx, "ufw") },
 			Run:   func(ctx context.Context) error { _, err := aptInstall(ctx, "ufw"); return err },

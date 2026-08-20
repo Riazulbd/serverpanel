@@ -181,6 +181,25 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Known differences**: no backup/recovery codes for 2FA, no login-history UI, no IP allowlisting, no API token management yet.
 - **Reason**: those are listed Phase 2 account-security items (`product-plan.md` §9) not yet built.
 
+### APP-016 — Let's Encrypt SSL issuance, automatic renewal, and status reporting
+- **Category**: Application Management → SSL
+- **Documentation page**: Application Management → SSL Management
+- **Short description**: Issue a Let's Encrypt certificate for a site's domain, keep it renewed automatically, and report expiry/renewal-timer health.
+- **Expected behavior** (per ServerAvatar's documented workflow): enable free SSL for a domain, it renews itself before expiry with no further action, and its status/expiry is visible.
+- **Our implementation**: `ssl.issue_letsencrypt` issues via certbot's `--nginx` plugin (unchanged from before this pass). `stack.install` now includes a "certbot automatic renewal timer" step that explicitly `systemctl enable`s and `start`s `certbot.timer` and verifies both `is-enabled`/`is-active` before considering the step done — closing the previously-documented gap where the timer wasn't reliably left running on every base image. A new `ssl.status` capability reports every certificate's `not_after`/`days_remaining`/`expired` (parsed directly via `crypto/x509`, no shelling to `openssl`) plus whether `certbot.timer` is currently active, either for one domain or the whole server.
+- **Frontend**: server-detail "Check SSL status" quick action (generic task-dispatch pattern, same as `system.ping`/`diagnostics.basic`); no dedicated SSL panel/expiry-badge UI yet.
+- **Backend service**: `gateway.dispatch` → `packages/capabilities.handleSSLIssueLetsEncrypt` / `handleSSLStatus`; `packages/capabilities.phase1LEMPSteps` (renewal-timer step).
+- **API endpoint(s)**: `POST /api/v1/servers/{id}/tasks` (`capability: ssl.issue_letsencrypt` / `ssl.status`).
+- **Agent command**: `ssl.issue_letsencrypt`, `ssl.install_custom`, `ssl.status`.
+- **DB tables**: none — certificate state lives on the server (certbot's own `/etc/letsencrypt`), not persisted control-plane-side yet (same gap as DB-001's "no `databases` table" — a future `certificates` table mirroring per-site SSL state is the natural next step).
+- **Required permission**: authenticated session.
+- **Security considerations**: `ssl.status`'s `domain` parameter is validated against the same `domainRe` allow-list as every other domain-taking capability before touching the filesystem; certificate parsing uses Go's `crypto/x509` directly on `cert.pem` (never `openssl` shelled out, never trusts filenames beyond using them as an already-validated directory listing).
+- **Test coverage**: `packages/capabilities/ssl_test.go` — `certExpiry` (valid cert, malformed PEM, missing file), `listLetsEncryptCerts` (mixed expired/valid certs, certbot's non-directory `README` entry correctly skipped, missing base directory treated as empty rather than an error, a domain directory with no `cert.pem` skipped without failing the whole report), `handleSSLStatus` (invalid-domain rejection, unknown-domain error). The renewal-timer install step and a real end-to-end certbot renewal are not exercised by `go test` (require real systemd + a real ACME issuance) — `BLOCKED_EXTERNAL`, same category as the rest of `stack.install`'s manual verification (`TESTING.md` §2).
+- **Current status**: `PARTIAL` (issuance + renewal-timer wiring + status reporting implemented and unit-tested; real-certbot renewal-timer and ACME issuance verification remain `BLOCKED_EXTERNAL` in this environment; no dedicated SSL dashboard panel yet)
+- **Completion date**: n/a
+- **Known differences**: no per-certificate dashboard panel (expiry badges, renew/reissue buttons) yet — today's UI exposure is the generic "Check SSL status" quick action; no SSL-expiration alert (depends on the not-yet-built notification-channel/alert-threshold subsystem, INT-004).
+- **Reason**: the notification/alerting subsystem SSL expiry alerts would feed into doesn't exist yet (tracked separately); this pass closed the actual renewal-timer gap and made expiry state inspectable, which was the highest-priority piece of the documented gap.
+
 ---
 
 ## 2. Summary tables — not yet started
@@ -253,7 +272,6 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | APP-013 | Log Monitoring Suite (traffic analytics) | `NOT_STARTED` | |
 | APP-014 | Application-level WAF / AI-bot blocker | `NOT_STARTED` | |
 | APP-015 | Custom SSL upload | `PARTIAL` | `ssl.install_custom` capability exists agent-side; no dedicated dashboard UI |
-| APP-016 | Let's Encrypt SSL + auto-renewal | `PARTIAL` | `ssl.issue_letsencrypt` implemented; certbot's own renewal timer not yet wired up by `stack.install` |
 
 ### Database management — not yet started (DB-*)
 | ID | Feature | Status | Notes |
@@ -296,8 +314,8 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | Status | Count (detailed entries) | Count (summary-table rows) |
 |---|---|---|
 | `COMPLETE` | 3 (SRV-001, BAK-002, ACC-001) | 1 (PROV-006) |
-| `PARTIAL` | 3 (SRV-002, APP-001, APP-002, DB-001, BAK-001 — 5 total, see note) | 6 |
-| `NOT_STARTED` | 0 | ~55 |
+| `PARTIAL` | 6 (SRV-002, APP-001, APP-002, APP-016, DB-001, BAK-001 — 6 total, see note) | 5 |
+| `NOT_STARTED` | 0 | ~54 |
 | `BLOCKED_EXTERNAL` | 0 (sub-scoped within BAK-001/BAK-002's db/full-scope MariaDB verification) | 0 |
 | `INTENTIONALLY_NOT_APPLICABLE` | 0 | 1 |
 
