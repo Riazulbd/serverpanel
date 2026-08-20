@@ -17,6 +17,22 @@ func TestDispatchRejectsUnknownCapability(t *testing.T) {
 	}
 }
 
+func TestValidIdentifier(t *testing.T) {
+	valid := []string{"wp_example", "a", "db1", "site_prod_2"}
+	for _, name := range valid {
+		if !ValidIdentifier(name) {
+			t.Errorf("ValidIdentifier(%q) = false, want true", name)
+		}
+	}
+
+	invalid := []string{"", "1abc", "Has-Caps", "has space", "has;semi", "a'b", "way-too-long-identifier-that-exceeds-the-limit"}
+	for _, name := range invalid {
+		if ValidIdentifier(name) {
+			t.Errorf("ValidIdentifier(%q) = true, want false", name)
+		}
+	}
+}
+
 func TestDispatchSystemPing(t *testing.T) {
 	r := Default()
 	out, err := r.Dispatch(context.Background(), CapSystemPing, nil, nil)

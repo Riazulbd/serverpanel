@@ -2,6 +2,44 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-20 — Control-plane persistence and dashboard UI for databases
+
+- Closed the gap DB-001/DB-005 in `docs/SERVERAVATAR_PARITY.md` flagged as the
+  recommended next iteration: database create/list/delete now follow the same
+  dispatch-then-persist-on-success pattern already established for sites and backups,
+  instead of being dispatchable only through the generic task-dispatch endpoint with no
+  durable record.
+- New `databases` table (`apps/controlplane/db.go`) and `store` methods
+  (`createDatabase`/`listDatabases`/`getDatabase`/`deleteDatabase`,
+  `apps/controlplane/store.go`), each scoped by server ID for the same cross-tenant-
+  addressing reason `getSite`/`getBackup` already are.
+- Three new endpoints (`apps/controlplane/databases.go`): `GET`/
+  `POST /api/v1/servers/{id}/sites/{siteId}/databases`,
+  `DELETE /api/v1/servers/{id}/databases/{databaseId}`. Create validates the database
+  name and owner user against the same identifier allow-list the agent's `db.create`
+  capability itself enforces (`packages/capabilities/db.go`'s `identifierRe`, now
+  exported as `ValidIdentifier`/`IdentifierPattern` so the control plane and agent share
+  one source of truth instead of two regexes that could drift apart) *before* ever
+  dispatching to the agent. The owner password is generated server-side with
+  `crypto/rand`, never accepted from the caller, and never persisted anywhere — it is
+  returned exactly once in the create response, the same shown-once pattern the server
+  bootstrap token already uses. Delete dispatches `db.delete` using the name/owner_user
+  read back from the stored record (never caller-supplied free-form values, matching
+  `handleRestoreBackup`'s addressing discipline), and only removes the row after the
+  agent confirms success.
+- Added a "Databases" panel to the site-detail view in the dashboard
+  (`apps/controlplane/web/index.html`): a create-database modal (name, optional owner
+  user, a one-time password reveal box) and a databases table with a delete button per
+  row.
+- Added 1 capability-layer test (`TestValidIdentifier`), 1 store-layer round-trip test
+  (`TestDatabaseCreateListGetDeleteRoundTrip`, including cross-server scoping), and 2
+  HTTP-layer tests (`TestDatabaseEndpointsRequireARealSite`,
+  `TestCreateDatabaseRejectsInvalidIdentifiers`, proving validation happens before
+  dispatch). Full suite: 65 test functions, `go vet`/`gofmt` clean.
+- Updated `SYSTEM.md` and `docs/SERVERAVATAR_PARITY.md` (DB-001 moved from `PARTIAL`
+  toward its control-plane-persistence gap being closed; DB-005 removed from the
+  not-yet-started table).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

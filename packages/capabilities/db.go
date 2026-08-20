@@ -16,6 +16,21 @@ import (
 // string into a CREATE DATABASE/USER statement.
 var identifierRe = regexp.MustCompile(`^[a-z][a-z0-9_]{0,30}$`)
 
+// IdentifierPattern is identifierRe's source pattern, exposed so callers
+// building a human-readable validation error message don't have to
+// duplicate the regex text and risk it drifting out of sync.
+var IdentifierPattern = identifierRe.String()
+
+// ValidIdentifier reports whether name is a safe MySQL/MariaDB database or
+// user identifier per identifierRe. Exported so the control plane can
+// reject an obviously-invalid database/owner_user name before ever
+// dispatching to an agent — defense in depth beyond this file's own check,
+// and it avoids a wasted round trip for input that was always going to be
+// rejected.
+func ValidIdentifier(name string) bool {
+	return identifierRe.MatchString(name)
+}
+
 func mariaDBConn() (*sql.DB, error) {
 	// Connects as root over the local Unix socket, matching MariaDB's
 	// default Debian/Ubuntu package configuration (unix_socket auth

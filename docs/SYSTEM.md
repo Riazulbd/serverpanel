@@ -73,7 +73,8 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | PHP-FPM, multiple PHP versions | 🚧 php-fpm pool-per-site works; only 8.3 is
   installed by `stack.install` today, though `site.set_php_version` and pool paths are
   already version-parameterized |
-| MariaDB/MySQL | ✅ install + per-DB least-privilege grants |
+| MariaDB/MySQL | ✅ install + per-DB least-privilege grants; control-plane persistence
+  + dashboard UI for create/list/delete (see Database Management row below) |
 | Redis, Git, Composer, WP-CLI | ✅ installed by `stack.install` |
 | Node.js | ⬜ Phase 3 |
 | UFW firewall, Fail2Ban | 🚧 installed with safe defaults; no rule-editing UI |
@@ -113,6 +114,22 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | Archive creation/extraction | ⬜ not implemented |
 | Application logs / advanced log viewer | 🚧 `logs.tail` (redacted) exists; no
   filtering/search UI yet |
+
+### Database management
+| Feature | Status |
+|---|---|
+| Create/delete MariaDB database with a least-privilege owner user | ✅ `db.create`/
+  `db.delete` (identifier allow-list, single-database-scoped grants) dispatched via a
+  dedicated per-site endpoint, not just generic task dispatch |
+| Control-plane persistence + dashboard UI | ✅ `databases` table, per-site "Databases"
+  panel (create modal with a one-time password reveal, list, delete) — mirrors the
+  pattern `backups` already has |
+| Owner password handling | ✅ generated server-side with `crypto/rand`, never accepted
+  from the caller, never persisted (not even hashed) — shown exactly once in the create
+  response, same as the server bootstrap-token pattern |
+| MongoDB support | ⬜ not implemented |
+| phpMyAdmin / DB admin UI integration | ⬜ not implemented |
+| Database process/query monitoring | ⬜ not implemented |
 
 ### Git deployment
 All ⬜ — explicitly scoped to Phase 2 (`product-plan.md` §9). No Git deployment,
@@ -253,6 +270,8 @@ EXISTS`, applied on every `openDB` call — idempotent, no separate migration to
 | `audit_log` | append-only: seq, timestamp, server, actor, action, detail |
 | `sites` | id, server, domain, system user, docroot, app type, PHP version, status |
 | `backups` | id, server, site, scope, path, size, sha256, status, created_at |
+| `databases` | id, server, site, name, owner user, status, created_at (owner password is
+  never persisted — see Database management above) |
 
 No ORM — every query is a small, explicit SQL statement in `store.go`. All secrets
 (session tokens, bootstrap tokens) are stored only as SHA-256 hashes; passwords use
@@ -262,8 +281,9 @@ bcrypt (cost 12); nothing is stored in plaintext.
 
 Full list with request/response shapes in `API.md`. Summary: `/api/v1/auth/*`
 (signup/login/logout/TOTP enroll+verify/MFA challenge/me), `/api/v1/servers*` (CRUD,
-revoke, task dispatch, sites, audit), `/agents/register` (the one unauthenticated
-agent-facing endpoint, secured by the bootstrap token itself), `/healthz`.
+revoke, task dispatch, sites, per-site backups + databases, audit), `/agents/register`
+(the one unauthenticated agent-facing endpoint, secured by the bootstrap token itself),
+`/healthz`.
 
 ## 10. Background jobs
 

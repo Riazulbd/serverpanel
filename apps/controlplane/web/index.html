@@ -189,6 +189,12 @@
         </div>
         <div id="backupResult" class="task-result hidden"></div>
         <div id="backupsList" class="muted">No backups yet.</div>
+
+        <div class="section-title" style="display:flex;justify-content:space-between;align-items:center">
+          <span>Databases</span>
+          <button class="primary" onclick="openNewDatabaseModal()">+ Create database</button>
+        </div>
+        <div id="databasesList" class="muted">No databases yet.</div>
       </div>
     </div>
 
@@ -476,6 +482,80 @@ async function openSiteDetail(siteId) {
       site.AppType + (site.PHPVersion ? (' · PHP ' + site.PHPVersion) : '') + ' · ' + site.Status;
   }
   await refreshBackups();
+  await refreshDatabases();
+}
+
+async function refreshDatabases() {
+  try {
+    const databases = await api(API + '/servers/' + state.selectedServerId + '/sites/' + state.selectedSiteId + '/databases') || [];
+    renderDatabases(databases);
+  } catch (e) {}
+}
+
+function renderDatabases(databases) {
+  const el = document.getElementById('databasesList');
+  if (!databases.length) { el.textContent = 'No databases yet.'; return; }
+  el.innerHTML = '<table><thead><tr><th>Name</th><th>Owner user</th><th>Created</th><th></th></tr></thead><tbody>' +
+    databases.map(d => `
+      <tr>
+        <td>${escapeHtml(d.Name)}</td>
+        <td class="muted">${escapeHtml(d.OwnerUser)}</td>
+        <td class="muted">${new Date(d.CreatedAt).toLocaleString()}</td>
+        <td><button class="danger" onclick="deleteDatabase('${d.ID}')">Delete</button></td>
+      </tr>`).join('') +
+    '</tbody></table>';
+}
+
+function openNewDatabaseModal() {
+  const root = document.getElementById('modalRoot');
+  root.innerHTML = `
+    <div class="modal-backdrop" onclick="if(event.target===this) closeModalNoRefresh()">
+      <div class="modal">
+        <h2>Create database</h2>
+        <div class="field"><label>Database name</label><input id="newDatabaseName" placeholder="e.g. wp_example"></div>
+        <div class="field"><label>Owner user (optional, defaults to database name)</label><input id="newDatabaseOwner" placeholder="e.g. wp_example"></div>
+        <p class="muted">A random password is generated and shown once — it is never stored, so copy it now.</p>
+        <button class="primary" style="width:100%" onclick="createDatabase()">Create database</button>
+        <div class="error" id="newDatabaseError"></div>
+        <p class="muted" id="newDatabaseStatus"></p>
+        <div id="newDatabasePasswordBox" class="hidden">
+          <p class="section-title" style="margin-top:20px">Owner password (shown once — copy it now):</p>
+          <pre class="code" id="newDatabasePasswordText"></pre>
+          <button style="width:100%" onclick="closeModal()">Done</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+async function createDatabase() {
+  const name = document.getElementById('newDatabaseName').value.trim();
+  const ownerUser = document.getElementById('newDatabaseOwner').value.trim();
+  const err = document.getElementById('newDatabaseError');
+  const status = document.getElementById('newDatabaseStatus');
+  err.textContent = '';
+  status.textContent = 'Creating database and a least-privilege owner user...';
+  try {
+    const res = await api(API + '/servers/' + state.selectedServerId + '/sites/' + state.selectedSiteId + '/databases', {
+      method: 'POST', body: JSON.stringify({name, owner_user: ownerUser})
+    });
+    status.textContent = '';
+    document.getElementById('newDatabasePasswordText').textContent = res.owner_password;
+    document.getElementById('newDatabasePasswordBox').classList.remove('hidden');
+    await refreshDatabases();
+  } catch (e) {
+    status.textContent = '';
+    err.textContent = e.message;
+  }
+}
+
+async function deleteDatabase(databaseId) {
+  if (!confirm('Delete this database and its owner user? This cannot be undone.')) return;
+  try {
+    await api(API + '/servers/' + state.selectedServerId + '/databases/' + databaseId, {method: 'DELETE'});
+    await refreshDatabases();
+  } catch (e) {
+    alert('Delete failed: ' + e.message);
+  }
 }
 
 async function refreshBackups() {
