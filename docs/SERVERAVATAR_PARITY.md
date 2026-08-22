@@ -51,8 +51,27 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Test coverage**: `apps/controlplane/http_test.go` (`TestServerCreateListRevokeFlow`, `TestRegisterEndpointRejectsBadToken`), `apps/controlplane/store_test.go`.
 - **Current status**: `COMPLETE`
 - **Completion date**: 2026-08-14
-- **Known differences**: no agent certificate auto-renewal before 30-day expiry yet.
-- **Reason**: scoped out of the initial secure-foundation pass; tracked in `SYSTEM.md` §21.
+- **Known differences**: none.
+- **Reason**: n/a — see SRV-003 for the certificate-lifecycle capability (auto-renewal) that was originally tracked as a gap here.
+
+### SRV-003 — Agent certificate auto-renewal (mTLS cert rotation)
+- **Category**: Server Management (security/trust model)
+- **Documentation page**: n/a — ServerAvatar does not document its internal agent transport; this is an implementation-level trust-model capability that SRV-001's "secure enrollment" functional requirement (task brief §14) implies regardless.
+- **Short description**: Before an agent's 30-day mTLS client certificate expires, it obtains a fresh one automatically, without any human action or re-running the installer.
+- **Expected behavior**: an agent connected continuously (or reconnecting periodically) never needs manual re-registration; a cert that does fully expire (agent offline through its entire renewal window) still fails closed — reconnecting then requires a fresh bootstrap token, never silent re-trust.
+- **Our implementation**: a `renew_request`/`renew_response`/`renew_ack` exchange over the agent's existing mTLS session. The agent (`apps/agent/renew.go`) checks its cert's `NotAfter` on connect and hourly; within 7 days of expiry it sends a CSR for a freshly generated keypair. The gateway (`apps/controlplane/gateway.go` `handleConn`) re-verifies the session's own certificate isn't already revoked, signs a new one via the same `agentCA.signAgentCSR` used at registration (CommonName is server-assigned, never taken from the CSR), and records it as current — but leaves the old certificate valid. Only after the agent confirms (via `renew_ack`) that it durably persisted the new cert/key to disk (atomic temp-file-then-rename) does the gateway revoke the old certificate. This bounds "two valid certs exist for one server" to a single round trip, and means a dropped connection or crash mid-renewal never locks the agent out — it just retries on the next hourly check with its still-valid current certificate.
+- **Frontend**: none (transport-level, not user-facing); the dashboard's server-detail view already surfaces `cert_not_after` via the existing `GET /api/v1/servers/{id}` response for future display.
+- **Backend service**: `apps/controlplane/gateway.go` (`handleConn`'s `renew_request`/`renew_ack` cases), `apps/controlplane/ca.go` (`signAgentCSR`, shared `agentCertTTL` constant), `apps/controlplane/store.go` (`renewAgentCert`, `revokeCertSerial`).
+- **API endpoint(s)**: none over HTTP — carried entirely on the agent gateway wire protocol (`renew_request`/`renew_response`/`renew_ack` in `packages/proto`), documented in `API.md` §3.
+- **Agent command**: n/a (protocol-level, not a dispatched capability — it is not in `packages/capabilities`'s allow-list because it isn't something the control plane asks the agent to do; the agent initiates it).
+- **DB tables**: `servers` (new `cert_not_after` column, migrated via `addColumnIfMissing`), `revoked_certs`, `audit_log` (`agent.cert_renewed`, `agent.cert_rotated_out`, `agent.cert_renewal_failed`/`agent.cert_renewal_rejected` entries).
+- **Required permission**: n/a — authenticated by the agent's existing client certificate, the same trust boundary as every other gateway message.
+- **Security considerations**: CSR subject is always ignored server-side (CommonName comes only from the already-validated session identity); a session whose certificate was revoked mid-connection is rejected rather than renewed; the old certificate is never revoked until the new one is confirmed persisted, so a lost response can't create a lockout; renewal reuses the same CA/TTL path as initial registration rather than a parallel one, so there is exactly one code path to audit for "how does an agent get a certificate."
+- **Test coverage**: `apps/controlplane/gateway_test.go` (`TestAgentCertRenewalIssuesNewCertAndRevokesOldOnAck`, `TestReconnectWithRenewedCertSucceedsAndOldCertIsRejected` — real mTLS listener, real client certs, asserts old-cert-still-valid-before-ack and revoked-after); `apps/agent/renew_test.go` (renewal-threshold logic, atomic persistence, unsolicited/rejected-response handling). All pass under `go test -race`.
+- **Current status**: `COMPLETE`
+- **Completion date**: 2026-08-22
+- **Known differences**: none from the design in `SECURITY.md` §2.
+- **Reason**: n/a.
 
 ### SRV-002 — Hosting stack installation (LEMP)
 - **Category**: Server Management

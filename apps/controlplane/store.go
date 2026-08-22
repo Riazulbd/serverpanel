@@ -36,6 +36,7 @@ type serverRecord struct {
 	Tags          []string
 	Status        serverStatus
 	CertSerial    string
+	CertNotAfter  time.Time
 	CreatedAt     time.Time
 	LastSeen      time.Time
 	AgentVer      string
@@ -167,9 +168,38 @@ func (s *store) revokeToken(serverID, actor string) {
 	s.log(serverID, actor, "bootstrap_token.revoked", "")
 }
 
-func (s *store) markIssuedCert(serverID, serial string) {
-	s.db.Exec(`UPDATE servers SET cert_serial = ?, status = ? WHERE id = ?`, serial, string(statusOffline), serverID)
-	s.log(serverID, "", "agent.registered", fmt.Sprintf("cert_serial=%s", serial))
+func (s *store) markIssuedCert(serverID, serial string, notAfter time.Time) {
+	s.db.Exec(`UPDATE servers SET cert_serial = ?, cert_not_after = ?, status = ? WHERE id = ?`,
+		serial, notAfter.UTC().Format(time.RFC3339Nano), string(statusOffline), serverID)
+	s.log(serverID, "", "agent.registered", fmt.Sprintf("cert_serial=%s not_after=%s", serial, notAfter.UTC().Format(time.RFC3339)))
+}
+
+// renewAgentCert records a newly issued certificate for an already-registered
+// server (see apps/controlplane/gateway.go's renew_request handling). Unlike
+// markIssuedCert it does not touch status/revocation — the certificate that
+// authenticated the renewal request stays valid and unrevoked until the
+// agent confirms it persisted the new one (revokeCertSerial, called on
+// renew_ack), so a lost response never locks the agent out.
+func (s *store) renewAgentCert(serverID, newSerial string, notAfter time.Time) error {
+	if _, err := s.db.Exec(`UPDATE servers SET cert_serial = ?, cert_not_after = ? WHERE id = ?`,
+		newSerial, notAfter.UTC().Format(time.RFC3339Nano), serverID); err != nil {
+		return err
+	}
+	s.log(serverID, "", "agent.cert_renewed", fmt.Sprintf("new_cert_serial=%s not_after=%s", newSerial, notAfter.UTC().Format(time.RFC3339)))
+	return nil
+}
+
+// revokeCertSerial revokes a single certificate serial without touching the
+// server's status or current cert_serial — used to retire the old
+// certificate once a renewal has been confirmed persisted by the agent
+// (renew_ack), as opposed to revokeServer which revokes trust entirely.
+func (s *store) revokeCertSerial(serverID, serial, actor string) {
+	if serial == "" {
+		return
+	}
+	s.db.Exec(`INSERT OR REPLACE INTO revoked_certs (serial, server_id, revoked_at) VALUES (?, ?, ?)`,
+		serial, serverID, time.Now().UTC().Format(time.RFC3339Nano))
+	s.log(serverID, actor, "agent.cert_rotated_out", fmt.Sprintf("cert_serial=%s", serial))
 }
 
 func (s *store) isRevoked(serial string) bool {
@@ -229,7 +259,7 @@ func (s *store) recordHeartbeat(serverID string, hb heartbeatSnapshot) {
 
 func (s *store) get(serverID string) (*serverRecord, bool) {
 	row := s.db.QueryRow(
-		`SELECT id, name, grp, tags_json, status, cert_serial, created_at, last_seen, agent_version, heartbeat_json
+		`SELECT id, name, grp, tags_json, status, cert_serial, cert_not_after, created_at, last_seen, agent_version, heartbeat_json
 		 FROM servers WHERE id = ?`, serverID)
 	rec, err := scanServer(row)
 	if err != nil {
@@ -240,7 +270,7 @@ func (s *store) get(serverID string) (*serverRecord, bool) {
 
 func (s *store) list() []*serverRecord {
 	rows, err := s.db.Query(
-		`SELECT id, name, grp, tags_json, status, cert_serial, created_at, last_seen, agent_version, heartbeat_json
+		`SELECT id, name, grp, tags_json, status, cert_serial, cert_not_after, created_at, last_seen, agent_version, heartbeat_json
 		 FROM servers ORDER BY created_at DESC`)
 	if err != nil {
 		return nil
@@ -268,15 +298,18 @@ func scanServer(row rowScanner) (*serverRecord, error) {
 	var rec serverRecord
 	var tagsJSON string
 	var lastSeen, heartbeatJSON sql.NullString
-	var createdAt string
+	var createdAt, certNotAfter string
 
-	if err := row.Scan(&rec.ID, &rec.Name, &rec.Group, &tagsJSON, &rec.Status, &rec.CertSerial,
+	if err := row.Scan(&rec.ID, &rec.Name, &rec.Group, &tagsJSON, &rec.Status, &rec.CertSerial, &certNotAfter,
 		&createdAt, &lastSeen, &rec.AgentVer, &heartbeatJSON); err != nil {
 		return nil, err
 	}
 
 	json.Unmarshal([]byte(tagsJSON), &rec.Tags)
 	rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+	if certNotAfter != "" {
+		rec.CertNotAfter, _ = time.Parse(time.RFC3339Nano, certNotAfter)
+	}
 	if lastSeen.Valid {
 		rec.LastSeen, _ = time.Parse(time.RFC3339Nano, lastSeen.String)
 	}

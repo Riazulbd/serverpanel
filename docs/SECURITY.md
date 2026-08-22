@@ -47,24 +47,44 @@ Properties this guarantees:
 - **Revocable**: an unused token can be revoked from the dashboard (e.g., user made a
   mistake, wants to reissue); an already-exchanged identity is revoked separately (§3).
 
-## 2. Ongoing authentication: mutual TLS — **partially implemented**
+## 2. Ongoing authentication: mutual TLS — **implemented** (CA isolation as its own trust
+boundary remains a production-deployment step, not a code gap — see below)
 
 - All agent ↔ control-plane traffic (registration excluded, which is TLS + token) uses
   **mTLS**: the gateway only accepts connections presenting a valid, non-revoked
   certificate issued by the internal Agent CA, and the agent verifies the gateway's
   certificate/pinned CA to prevent MITM or connecting to a spoofed endpoint.
   **Implemented as described** — see `apps/controlplane/gateway.go` `handleConn`.
-- Client certs are **short-lived** (e.g. 30–90 days) and **auto-rotated**: before
-  expiry, the agent requests renewal authenticated by its current still-valid cert (no
-  shared long-lived secret is ever reused for renewal). If a renewal window is missed
-  (agent offline past expiry), the agent falls back to a manual re-registration flow
-  requiring a fresh bootstrap token from the dashboard — this is an intentional
-  fail-closed behavior, not silent re-trust.
-  **Not yet implemented**: certs are issued with a fixed 30-day TTL
-  (`apps/controlplane/http.go` `handleRegister`) and there is no renewal
-  capability/endpoint yet — an agent whose cert expires must be manually
-  re-registered with a fresh bootstrap token today. Auto-rotation before expiry is
-  tracked as a known gap in `SYSTEM.md`.
+- Client certs are **short-lived** (30 days, `apps/controlplane/ca.go`'s `agentCertTTL`)
+  and **auto-rotated**: before expiry, the agent requests renewal authenticated by its
+  current still-valid cert (no shared long-lived secret is ever reused for renewal). If
+  a renewal window is missed (agent offline past expiry), the agent falls back to a
+  manual re-registration flow requiring a fresh bootstrap token from the dashboard —
+  this is an intentional fail-closed behavior, not silent re-trust.
+  **Implemented** — a new `renew_request`/`renew_response`/`renew_ack` exchange
+  (`packages/proto`) runs over the agent's already-established mTLS session
+  (`apps/agent/renew.go`, `apps/controlplane/gateway.go` `handleConn`):
+  1. The agent checks its current cert's `NotAfter` once on connect and hourly
+     thereafter (`certRenewalLoop`); once within `defaultRenewBefore` (7 days) of
+     expiry it generates a fresh ECDSA keypair + CSR and sends `renew_request`.
+  2. The gateway re-checks the *session's own* certificate isn't already revoked
+     (closes the connection instead of renewing if it is — a session that outlived a
+     revocation must never walk away with a longer-lived credential), signs a new
+     certificate via the same `signAgentCSR` used at registration (CommonName is
+     server-assigned from the validated session identity, never taken from the CSR),
+     and records it as the server's current cert — but does **not** revoke the old one
+     yet.
+  3. The agent writes the new cert/key to disk (temp file + atomic rename — a crash
+     mid-write never leaves a truncated identity) and only then replies `renew_ack`.
+  4. Only on receiving that ack does the gateway revoke the certificate that
+     authenticated the session. A lost `renew_response` or `renew_ack` — network drop,
+     process crash — leaves the *old* certificate valid and unrevoked, so the agent
+     simply retries on its next hourly check; nothing is ever locked out by a failed
+     renewal attempt. Covered end-to-end (real mTLS listener, real client certs) by
+     `TestAgentCertRenewalIssuesNewCertAndRevokesOldOnAck` and
+     `TestReconnectWithRenewedCertSucceedsAndOldCertIsRejected` in
+     `apps/controlplane/gateway_test.go`, plus the agent-side threshold/persistence
+     logic in `apps/agent/renew_test.go`.
 - The Agent CA's private key is held in a dedicated, tightly access-controlled service
   (e.g. `step-ca` or HSM-backed KMS in later stages), separate from the general
   application database, so a control-plane app-tier compromise doesn't automatically

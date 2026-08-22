@@ -31,6 +31,12 @@ type agentCA struct {
 	nextSN   int64
 }
 
+// agentCertTTL is the lifetime of every certificate this CA issues to an
+// agent, at both initial registration and renewal (§2 security-trust-model).
+// Kept deliberately short so a leaked cert has a bounded blast radius; see
+// apps/agent/renew.go for the proactive-renewal side of this trade-off.
+const agentCertTTL = 30 * 24 * time.Hour
+
 func newAgentCA() (*agentCA, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -184,17 +190,17 @@ func (ca *agentCA) signServerCert(hosts []string) (certPEM, keyPEM []byte, err e
 // without a second lookup. TTL is intentionally short (see
 // docs/security-trust-model.md §2) so a leaked cert has a bounded blast
 // radius and rotation is routine rather than exceptional.
-func (ca *agentCA) signAgentCSR(csrPEM []byte, serverID string, ttl time.Duration) (certPEM []byte, serial *big.Int, err error) {
+func (ca *agentCA) signAgentCSR(csrPEM []byte, serverID string, ttl time.Duration) (certPEM []byte, serial *big.Int, notAfter time.Time, err error) {
 	block, _ := pem.Decode(csrPEM)
 	if block == nil {
-		return nil, nil, fmt.Errorf("invalid CSR PEM")
+		return nil, nil, time.Time{}, fmt.Errorf("invalid CSR PEM")
 	}
 	csr, err := x509.ParseCertificateRequest(block.Bytes)
 	if err != nil {
-		return nil, nil, fmt.Errorf("parse CSR: %w", err)
+		return nil, nil, time.Time{}, fmt.Errorf("parse CSR: %w", err)
 	}
 	if err := csr.CheckSignature(); err != nil {
-		return nil, nil, fmt.Errorf("CSR signature invalid: %w", err)
+		return nil, nil, time.Time{}, fmt.Errorf("CSR signature invalid: %w", err)
 	}
 
 	ca.mu.Lock()
@@ -202,22 +208,24 @@ func (ca *agentCA) signAgentCSR(csrPEM []byte, serverID string, ttl time.Duratio
 	ca.nextSN++
 	ca.mu.Unlock()
 
+	notAfter = time.Now().Add(ttl)
 	tmpl := &x509.Certificate{
 		SerialNumber: sn,
 		// CommonName is set by the CA from the validated server_id, not
 		// taken from the CSR's requested subject, so an agent cannot claim
-		// a different server's identity by crafting its CSR.
+		// a different server's identity by crafting its CSR (this applies
+		// equally to a renewal CSR — see apps/controlplane/gateway.go).
 		Subject:     pkix.Name{CommonName: serverID},
 		NotBefore:   time.Now().Add(-5 * time.Minute),
-		NotAfter:    time.Now().Add(ttl),
+		NotAfter:    notAfter,
 		KeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
 		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.rootCert, csr.PublicKey, ca.rootKey)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, time.Time{}, err
 	}
-	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), sn, nil
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), sn, notAfter, nil
 }
 
 // certPool returns an x509.CertPool containing just the root, for verifying

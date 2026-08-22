@@ -2,6 +2,43 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-22 — Agent certificate auto-renewal
+
+- **Implemented proactive mTLS certificate renewal** (`SRV-003` in
+  `docs/SERVERAVATAR_PARITY.md`), closing the last remaining gap in the agent
+  identity/trust-model documented in `SECURITY.md` §2 and `SYSTEM.md`'s known
+  limitations. Previously, an agent's 30-day client certificate expiring meant manual
+  re-registration with a fresh bootstrap token — now the agent renews itself over its
+  existing mTLS session before that ever happens.
+  - New wire messages (`packages/proto`): `renew_request`/`renew_response`/`renew_ack`.
+  - Agent side (`apps/agent/renew.go`): checks its current cert's `NotAfter` on connect
+    and hourly; within 7 days of expiry, generates a fresh keypair/CSR, sends
+    `renew_request`, and on a successful `renew_response` persists the new cert/key to
+    disk via write-to-temp-then-rename before acknowledging.
+  - Control-plane side (`apps/controlplane/gateway.go`): signs the renewal through the
+    same `agentCA.signAgentCSR` path used at registration (CommonName is always
+    server-assigned, never taken from the CSR), re-checks the session's own certificate
+    isn't already revoked before renewing, and — critically — does not revoke the old
+    certificate until the agent's `renew_ack` confirms the new one is durably on disk,
+    so a dropped connection or crash mid-renewal can never lock an agent out.
+  - New `servers.cert_not_after` column (migrated via the existing
+    `addColumnIfMissing` pattern) and `store.renewAgentCert`/`revokeCertSerial`
+    methods, audited as `agent.cert_renewed`/`agent.cert_rotated_out`.
+  - Refactored `gateway.listenAndServe` into `newTLSListener` + `serve` (no behavior
+    change) so tests can bind an OS-assigned port and drive a real mTLS session instead
+    of calling internal handlers directly.
+  - Fixed a latent goroutine-leak/data-race: `runConnection`'s background loops
+    (heartbeat, and now cert-renewal) were scoped to the agent process's lifetime
+    context instead of the individual connection's, so a dropped-and-retried
+    connection would leak the previous attempt's goroutines running forever against a
+    dead socket — harmless on their own, but a real data race once cert-renewal started
+    mutating the shared `*identity` from what could be multiple overlapping
+    generations. Now scoped to a per-connection `context.WithCancel`.
+  - New tests: `apps/controlplane/gateway_test.go` (2 end-to-end tests against a real
+    mTLS listener with real client certificates) and `apps/agent/renew_test.go` (8 unit
+    tests for the renewal-threshold decision, atomic persistence, and
+    unsolicited/rejected-response handling). Full suite passes under `go test -race`.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

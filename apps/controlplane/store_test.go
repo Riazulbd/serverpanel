@@ -132,7 +132,7 @@ func TestRevokeServerBlocksReuseOfCertSerial(t *testing.T) {
 	if err != nil {
 		t.Fatalf("createServer: %v", err)
 	}
-	st.markIssuedCert(id, "42")
+	st.markIssuedCert(id, "42", time.Now().Add(30*24*time.Hour))
 
 	if st.isRevoked("42") {
 		t.Fatal("cert should not be revoked yet")
@@ -165,7 +165,7 @@ func TestSetConnectedPreservesRevokedStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("createServer: %v", err)
 	}
-	st.markIssuedCert(id, "7")
+	st.markIssuedCert(id, "7", time.Now().Add(30*24*time.Hour))
 	if err := st.revokeServer(id, "admin@example.com"); err != nil {
 		t.Fatalf("revokeServer: %v", err)
 	}

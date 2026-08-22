@@ -26,7 +26,18 @@ const agentVersion = "0.1.0-dev"
 // manages (nginx, php-fpm, mariadb, ...) run under systemd independent of
 // this connection — see docs/architecture.md §2 — so a dropped connection
 // here degrades orchestration/observability only, never site serving.
-func runConnection(ctx context.Context, id *identity, reg capabilities.Registry) error {
+func runConnection(ctx context.Context, id *identity, dataDir string, reg capabilities.Registry) error {
+	// connCtx scopes this connection's background goroutines (heartbeat,
+	// cert-renewal check) to this connection attempt: main.go's retry loop
+	// reuses the same *identity across reconnects, so without an explicit
+	// per-connection cancellation a dropped connection would leak the
+	// previous attempt's goroutines running forever against a dead conn —
+	// and, since renewal mutates id.CertPEM/id.KeyPEM, overlapping
+	// generations of that goroutine across reconnects would be a real data
+	// race, not just a leak.
+	connCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	cert, err := tls.X509KeyPair(id.CertPEM, id.KeyPEM)
 	if err != nil {
 		return err
@@ -70,17 +81,26 @@ func runConnection(ctx context.Context, id *identity, reg capabilities.Registry)
 	}
 	log.Printf("connected to gateway %s as %s", id.GatewayAddr, id.ServerID)
 
-	go heartbeatLoop(ctx, enc)
+	go heartbeatLoop(connCtx, enc)
+
+	pending := &pendingRenewal{}
+	go certRenewalLoop(connCtx, enc, id, defaultRenewBefore, pending)
 
 	for {
 		var env proto.Envelope
 		if err := dec.Decode(&env); err != nil {
 			return err
 		}
-		if env.Type != proto.MsgTask || env.Task == nil {
-			continue
+		switch env.Type {
+		case proto.MsgTask:
+			if env.Task != nil {
+				go handleTask(ctx, enc, reg, *env.Task)
+			}
+		case proto.MsgRenewResponse:
+			if env.RenewResponse != nil {
+				handleRenewResponse(dataDir, id, enc, *env.RenewResponse, pending)
+			}
 		}
-		go handleTask(ctx, enc, reg, *env.Task)
 	}
 }
 

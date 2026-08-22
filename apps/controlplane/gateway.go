@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -32,8 +33,15 @@ type agentSession struct {
 	serverID string
 	conn     net.Conn
 	enc      *json.Encoder
-	mu       sync.Mutex // guards writes to enc
+	mu       sync.Mutex // guards writes to enc and pendingRenewSerial
 	pending  map[string]chan proto.TaskEvent
+
+	// pendingRenewSerial is set to the serial of a certificate just issued
+	// in response to a renew_request, and cleared once either a matching
+	// renew_ack arrives (the old serial is revoked, see handleConn) or
+	// another renew_request supersedes it. Empty means no renewal is
+	// awaiting confirmation.
+	pendingRenewSerial string
 }
 
 func newGateway(ca *agentCA, st *store) *gateway {
@@ -41,13 +49,25 @@ func newGateway(ca *agentCA, st *store) *gateway {
 }
 
 func (g *gateway) listenAndServe(addr string) error {
-	certPEM, keyPEM, err := g.ca.signServerCert([]string{"localhost", "127.0.0.1", "serverpanel-gateway"})
+	ln, err := g.newTLSListener(addr)
 	if err != nil {
 		return err
 	}
+	log.Printf("agent gateway (mTLS) listening on %s", addr)
+	return g.serve(ln)
+}
+
+// newTLSListener binds the mTLS listener without blocking in Accept, so
+// tests can bind to "127.0.0.1:0" and read back the actual chosen port from
+// ln.Addr() before starting serve in a goroutine.
+func (g *gateway) newTLSListener(addr string) (net.Listener, error) {
+	certPEM, keyPEM, err := g.ca.signServerCert([]string{"localhost", "127.0.0.1", "serverpanel-gateway"})
+	if err != nil {
+		return nil, err
+	}
 	cert, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	cfg := &tls.Config{
@@ -57,15 +77,16 @@ func (g *gateway) listenAndServe(addr string) error {
 		MinVersion:   tls.VersionTLS13,
 	}
 
-	ln, err := tls.Listen("tcp", addr, cfg)
-	if err != nil {
-		return err
-	}
-	log.Printf("agent gateway (mTLS) listening on %s", addr)
+	return tls.Listen("tcp", addr, cfg)
+}
 
+func (g *gateway) serve(ln net.Listener) error {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				return err
+			}
 			log.Printf("gateway accept error: %v", err)
 			continue
 		}
@@ -93,6 +114,11 @@ func (g *gateway) handleConn(conn net.Conn) {
 	clientCert := state.PeerCertificates[0]
 	serverID := clientCert.Subject.CommonName
 	serial := clientCert.SerialNumber.String()
+	// currentSerial tracks whichever certificate is actively authenticating
+	// this session; it advances past serial if the agent successfully
+	// renews mid-connection (rare — a session rarely outlives agentCertTTL
+	// — but handled correctly rather than assumed away).
+	currentSerial := serial
 
 	if g.store.isRevoked(serial) {
 		log.Printf("rejecting connection from revoked cert serial=%s server=%s", serial, serverID)
@@ -173,6 +199,50 @@ func (g *gateway) handleConn(conn net.Conn) {
 					}
 				}
 			}
+		case proto.MsgRenewRequest:
+			if env.RenewRequest == nil || env.RenewRequest.CSRPEM == "" {
+				continue
+			}
+			// Re-check revocation on every renewal: a session opened before
+			// a revocation happened (setConnected/forceDisconnect race)
+			// must never walk away with a fresh, longer-lived credential.
+			if g.store.isRevoked(currentSerial) {
+				g.store.log(serverID, "", "agent.cert_renewal_rejected", "session certificate already revoked")
+				return
+			}
+			resp := proto.RenewResponse{}
+			newCertPEM, newSerial, notAfter, err := g.ca.signAgentCSR([]byte(env.RenewRequest.CSRPEM), serverID, agentCertTTL)
+			if err != nil {
+				resp.Error = err.Error()
+				g.store.log(serverID, "", "agent.cert_renewal_failed", err.Error())
+			} else if err := g.store.renewAgentCert(serverID, newSerial.String(), notAfter); err != nil {
+				resp.Error = fmt.Sprintf("persist renewed certificate: %v", err)
+			} else {
+				resp.CertPEM = string(newCertPEM)
+				resp.NotAfter = notAfter
+				sess.mu.Lock()
+				sess.pendingRenewSerial = newSerial.String()
+				sess.mu.Unlock()
+			}
+			sess.mu.Lock()
+			werr := sess.enc.Encode(proto.Envelope{Type: proto.MsgRenewResponse, RenewResponse: &resp})
+			sess.mu.Unlock()
+			if werr != nil {
+				return
+			}
+		case proto.MsgRenewAck:
+			if env.RenewAck == nil || !env.RenewAck.OK {
+				continue
+			}
+			sess.mu.Lock()
+			newSerial := sess.pendingRenewSerial
+			sess.pendingRenewSerial = ""
+			sess.mu.Unlock()
+			if newSerial == "" {
+				continue // stray/duplicate ack with nothing pending; ignore
+			}
+			g.store.revokeCertSerial(serverID, currentSerial, "")
+			currentSerial = newSerial
 		}
 	}
 }

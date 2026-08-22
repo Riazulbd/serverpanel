@@ -160,6 +160,9 @@ connection carries newline-delimited JSON `Envelope`s in both directions
 {"type": "task", "task": {"id": "...", "capability": "...", "params": {}, "issued_at": "..."}}
 {"type": "task_event", "task_event": {"task_id": "...", "status": "queued|running|succeeded|failed|rejected", "message": "...", "detail": "...", "at": "..."}}
 {"type": "ack"}
+{"type": "renew_request", "renew_request": {"csr_pem": "..."}}
+{"type": "renew_response", "renew_response": {"cert_pem": "...", "not_after": "...", "error": ""}}
+{"type": "renew_ack", "renew_ack": {"ok": true}}
 ```
 
 Flow: gateway accepts → verifies cert → sends `ack` → agent sends `hello`, then
@@ -170,6 +173,18 @@ HTTP handler) until it sees a terminal event for the task ID it sent, or its con
 deadline expires. There is no message type for a free-form command — `capability` must
 be a name in `packages/capabilities`'s fixed registry, or the agent returns `rejected`
 without executing anything.
+
+**Certificate renewal** (`apps/agent/renew.go`, `gateway.handleConn`'s
+`renew_request`/`renew_ack` cases): once within 7 days of its current cert's
+`NotAfter`, the agent generates a fresh keypair, sends `renew_request` with a CSR for
+it, and the gateway signs a new cert for the same server identity (the CSR's requested
+subject is ignored — see `SECURITY.md` §2) and replies `renew_response`. The gateway
+records the new cert as current but does **not** revoke the old one yet. The agent
+writes the new cert/key to disk (atomic rename) and only then sends `renew_ack`, which
+is what actually triggers revocation of the old certificate. `renew_response.error` is
+set instead of `cert_pem` if the gateway declines (e.g. the session's own certificate
+was revoked between connect and renewal) — the agent logs it and retries on its next
+hourly check, leaving the current (still valid) certificate untouched either way.
 
 ## 4. Capability reference
 
