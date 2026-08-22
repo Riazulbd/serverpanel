@@ -287,6 +287,78 @@ func TestCreateBackupRejectsInvalidScope(t *testing.T) {
 	}
 }
 
+func TestCreateDatabaseValidatesNameAndDispatchesBeforePersisting(t *testing.T) {
+	secureCookies = false
+	defer func() { secureCookies = true }()
+
+	a := newTestAPIServer(t)
+	h := a.routes()
+
+	doJSON(t, h, "POST", "/api/v1/auth/signup", map[string]string{
+		"Email": "ops3@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	rec := doJSON(t, h, "POST", "/api/v1/auth/login", map[string]string{
+		"Email": "ops3@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	cookie := sessionCookie(rec)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers", map[string]any{"Name": "web-14"}, cookie)
+	var created struct {
+		ServerID string `json:"server_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/databases",
+		map[string]any{"name": "Not-Valid!"}, cookie)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("create database with invalid name: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// A well-formed name against a server with no connected agent must fail
+	// as a gateway/dispatch error, not a validation error — proving
+	// validation happens before dispatch — and must never persist a
+	// database record for a database that was never actually created.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/databases",
+		map[string]any{"name": "wp_example"}, cookie)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("create database with no agent connected: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	rec = doJSON(t, h, "GET", "/api/v1/servers/"+created.ServerID+"/databases", nil, cookie)
+	var list []map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &list)
+	if len(list) != 0 {
+		t.Fatalf("listDatabases after a failed create = %+v, want empty", list)
+	}
+}
+
+func TestDeleteDatabaseRequiresARealDatabase(t *testing.T) {
+	secureCookies = false
+	defer func() { secureCookies = true }()
+
+	a := newTestAPIServer(t)
+	h := a.routes()
+
+	doJSON(t, h, "POST", "/api/v1/auth/signup", map[string]string{
+		"Email": "ops4@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	rec := doJSON(t, h, "POST", "/api/v1/auth/login", map[string]string{
+		"Email": "ops4@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	cookie := sessionCookie(rec)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers", map[string]any{"Name": "web-15"}, cookie)
+	var created struct {
+		ServerID string `json:"server_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+
+	rec = doJSON(t, h, "DELETE", "/api/v1/servers/"+created.ServerID+"/databases/db_nonexistent", nil, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("delete nonexistent database: status = %d, want 404", rec.Code)
+	}
+}
+
 func TestRegisterEndpointRejectsBadToken(t *testing.T) {
 	a := newTestAPIServer(t)
 	h := a.routes()

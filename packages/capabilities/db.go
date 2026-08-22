@@ -3,11 +3,25 @@ package capabilities
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"regexp"
 
 	_ "github.com/go-sql-driver/mysql"
 )
+
+type dbCreateResult struct {
+	Name      string `json:"name"`
+	OwnerUser string `json:"owner_user"`
+}
+
+type dbDeleteResult struct {
+	Name string `json:"name"`
+}
+
+type dbListResult struct {
+	Names []string `json:"names"`
+}
 
 // identifierRe is the allow-list for database/user names. MySQL has no
 // placeholder syntax for identifiers (only for values), so the standard
@@ -75,7 +89,11 @@ func handleDBCreate(ctx context.Context, params map[string]any, progress Progres
 		return "", fmt.Errorf("flush privileges: %w", err)
 	}
 
-	return fmt.Sprintf("database %q created, owned by user %q with grants scoped to that database only", name, owner), nil
+	out, err := json.Marshal(dbCreateResult{Name: name, OwnerUser: owner})
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
 }
 
 func handleDBDelete(ctx context.Context, params map[string]any, progress Progress) (string, error) {
@@ -83,6 +101,9 @@ func handleDBDelete(ctx context.Context, params map[string]any, progress Progres
 	owner, _ := params["owner_user"].(string)
 	if !identifierRe.MatchString(name) {
 		return "", fmt.Errorf("invalid database name %q", name)
+	}
+	if owner != "" && !identifierRe.MatchString(owner) {
+		return "", fmt.Errorf("invalid owner_user %q", owner)
 	}
 
 	db, err := mariaDBConn()
@@ -95,12 +116,13 @@ func handleDBDelete(ctx context.Context, params map[string]any, progress Progres
 		return "", fmt.Errorf("drop database: %w", err)
 	}
 	if owner != "" {
-		if !identifierRe.MatchString(owner) {
-			return "", fmt.Errorf("invalid owner_user %q", owner)
-		}
 		db.ExecContext(ctx, fmt.Sprintf("DROP USER IF EXISTS `%s`@'localhost'", owner))
 	}
-	return fmt.Sprintf("database %q deleted", name), nil
+	out, err := json.Marshal(dbDeleteResult{Name: name})
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
 }
 
 func handleDBList(ctx context.Context, params map[string]any, progress Progress) (string, error) {
@@ -127,5 +149,9 @@ func handleDBList(ctx context.Context, params map[string]any, progress Progress)
 			names = append(names, n)
 		}
 	}
-	return fmt.Sprintf("%v", names), nil
+	out, err := json.Marshal(dbListResult{Names: names})
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
 }
