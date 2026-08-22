@@ -2,6 +2,34 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-22 — Database control-plane persistence and dashboard UI
+
+- **Closed the DB-005 parity gap** flagged in the previous entry ("capability-layer
+  work landed before the control-plane persistence/UI layer that backups just got"):
+  `db.create`/`db.delete` are now dispatched through new endpoints
+  (`GET`/`POST /api/v1/servers/{id}/databases`,
+  `DELETE /api/v1/servers/{id}/databases/{databaseId}`) that persist a `databases`
+  row only after the agent confirms success — the same dispatch-then-persist pattern
+  already used for sites and backups.
+- Added a `databases` table (`id`, `server_id`, `site_id` optional, `name`,
+  `owner_user`, `status`, `created_at`) with **no password column by design**: the
+  owner password is generated once by the control plane (32 hex characters), sent to
+  the agent for `db.create`, and returned to the caller exactly once in the creation
+  response — never stored or logged afterward, mirroring how bootstrap tokens are
+  already handled.
+- Added a "Databases" panel to the server-detail dashboard view: a table of existing
+  databases, a "+ New database" modal with a one-time password reveal, and a per-row
+  delete button with a destructive-action confirmation dialog.
+- Both control-plane- and agent-side identifier validation (`^[a-z][a-z0-9_]{0,30}$`)
+  now run before a task is ever dispatched, so an invalid name is a `400` instead of
+  an opaque agent-side failure.
+- Added 2 new test functions covering the new surface: `TestDatabaseCreateListGetDeleteRoundTrip`
+  (store round trip + cross-server-scoping rejection) and `TestDatabaseEndpoints`
+  (404/400/502 boundary validation with no live agent required). Full suite passes,
+  `go vet` clean.
+- Updated `SYSTEM.md`, `API.md`, and `SERVERAVATAR_PARITY.md` (DB-001 refined, new
+  DB-005 detail entry added as `COMPLETE`).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

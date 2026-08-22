@@ -239,6 +239,65 @@ func TestBackupEndpointsRequireARealSite(t *testing.T) {
 	}
 }
 
+func TestDatabaseEndpoints(t *testing.T) {
+	secureCookies = false
+	defer func() { secureCookies = true }()
+
+	a := newTestAPIServer(t)
+	h := a.routes()
+
+	doJSON(t, h, "POST", "/api/v1/auth/signup", map[string]string{
+		"Email": "ops3@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	rec := doJSON(t, h, "POST", "/api/v1/auth/login", map[string]string{
+		"Email": "ops3@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	cookie := sessionCookie(rec)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers", map[string]any{"Name": "web-11"}, cookie)
+	var created struct {
+		ServerID string `json:"server_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+
+	// Listing databases for an unknown server is a 404, not an empty list.
+	rec = doJSON(t, h, "GET", "/api/v1/servers/srv_nonexistent/databases", nil, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("list databases for nonexistent server: status = %d, want 404", rec.Code)
+	}
+
+	// An invalid database name is rejected before any task is ever
+	// dispatched to an agent (no agent is connected in this test at all).
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/databases",
+		map[string]any{"name": "Not-Valid!"}, cookie)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("create database with invalid name: status = %d, want 400", rec.Code)
+	}
+
+	// A create request scoped to a site that doesn't exist on this server
+	// is rejected before dispatch too.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/databases",
+		map[string]any{"name": "wp_example", "site_id": "site_nonexistent"}, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("create database for nonexistent site: status = %d, want 404", rec.Code)
+	}
+
+	// Deleting a database that was never recorded is a 404.
+	rec = doJSON(t, h, "DELETE", "/api/v1/servers/"+created.ServerID+"/databases/db_nonexistent", nil, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("delete nonexistent database: status = %d, want 404", rec.Code)
+	}
+
+	// A validly-shaped request against a real server, with no agent
+	// connected, fails at dispatch (no live agent to talk to) rather than
+	// silently succeeding — this is the "never fake success" boundary.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/databases",
+		map[string]any{"name": "wp_example"}, cookie)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("create database with no agent connected: status = %d, want 502", rec.Code)
+	}
+}
+
 func TestCreateBackupRejectsInvalidScope(t *testing.T) {
 	secureCookies = false
 	defer func() { secureCookies = true }()
