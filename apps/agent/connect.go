@@ -70,17 +70,93 @@ func runConnection(ctx context.Context, id *identity, reg capabilities.Registry)
 	}
 	log.Printf("connected to gateway %s as %s", id.GatewayAddr, id.ServerID)
 
+	certRenewed := make(chan proto.RenewCertResult, 1)
 	go heartbeatLoop(ctx, enc)
+	go certRenewalLoop(ctx, id, enc, certRenewed, conn)
 
 	for {
 		var env proto.Envelope
 		if err := dec.Decode(&env); err != nil {
 			return err
 		}
-		if env.Type != proto.MsgTask || env.Task == nil {
+		switch env.Type {
+		case proto.MsgTask:
+			if env.Task != nil {
+				go handleTask(ctx, enc, reg, *env.Task)
+			}
+		case proto.MsgCertRenewed:
+			if env.CertRenewed != nil {
+				select {
+				case certRenewed <- *env.CertRenewed:
+				default:
+				}
+			}
+		}
+	}
+}
+
+// certRenewalLoop periodically checks the connection's client certificate
+// against certRenewalThreshold and, once it's due, requests a fresh one over
+// this already-authenticated mTLS session. On success it persists the new
+// cert/key (both to disk and into id, so a subsequent reconnect on this same
+// process picks it up) and then deliberately closes conn: this forces the
+// reconnect loop in main.go to redial with the new certificate immediately,
+// proving end-to-end that the rotation actually works rather than assuming
+// it and finding out at the next natural disconnect.
+func certRenewalLoop(ctx context.Context, id *identity, enc *json.Encoder, results <-chan proto.RenewCertResult, conn net.Conn) {
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		notAfter, err := certExpiry(id.CertPEM)
+		if err != nil {
+			log.Printf("cert renewal: could not parse current certificate: %v", err)
 			continue
 		}
-		go handleTask(ctx, enc, reg, *env.Task)
+		if !shouldRenewCert(notAfter, time.Now(), certRenewalThreshold) {
+			continue
+		}
+		log.Printf("client certificate expires %s, requesting renewal", notAfter.Format(time.RFC3339))
+
+		csrPEM, keyPEM, err := generateRenewalCSR(id.ServerID)
+		if err != nil {
+			log.Printf("cert renewal: %v", err)
+			continue
+		}
+		if err := enc.Encode(proto.Envelope{Type: proto.MsgRenewCert, RenewCert: &proto.RenewCertRequest{CSRPEM: string(csrPEM)}}); err != nil {
+			log.Printf("cert renewal: send request: %v", err)
+			continue
+		}
+
+		select {
+		case res := <-results:
+			if res.Error != "" {
+				log.Printf("cert renewal rejected by control plane: %s", res.Error)
+				continue
+			}
+			if res.CertPEM == "" {
+				log.Printf("cert renewal: control plane returned no error but no certificate either")
+				continue
+			}
+			if err := persistRenewedCert(id.DataDir, []byte(res.CertPEM), keyPEM); err != nil {
+				log.Printf("cert renewal: %v", err)
+				continue
+			}
+			id.CertPEM = []byte(res.CertPEM)
+			id.KeyPEM = keyPEM
+			log.Printf("client certificate renewed, reconnecting to activate it")
+			conn.Close()
+			return
+		case <-ctx.Done():
+			return
+		case <-time.After(30 * time.Second):
+			log.Printf("cert renewal: no response from control plane within 30s, will retry")
+		}
 	}
 }
 

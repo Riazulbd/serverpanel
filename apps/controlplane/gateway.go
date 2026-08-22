@@ -173,6 +173,31 @@ func (g *gateway) handleConn(conn net.Conn) {
 					}
 				}
 			}
+		case proto.MsgRenewCert:
+			if env.RenewCert == nil {
+				continue
+			}
+			// Identity for the renewed certificate comes from serverID —
+			// derived above from the *current* connection's already-verified
+			// client certificate — never from the CSR's requested Subject
+			// (signAgentCSR enforces this too; belt and suspenders). An
+			// agent cannot use renewal to mint a certificate for a
+			// different server_id.
+			certPEM, serial, err := g.ca.signAgentCSR([]byte(env.RenewCert.CSRPEM), serverID, agentCertTTL)
+			result := proto.RenewCertResult{}
+			if err != nil {
+				result.Error = err.Error()
+				g.store.log(serverID, "", "agent.cert_renewal_failed", err.Error())
+			} else {
+				result.CertPEM = string(certPEM)
+				g.store.recordCertRenewal(serverID, serial.String())
+			}
+			sess.mu.Lock()
+			sendErr := sess.enc.Encode(proto.Envelope{Type: proto.MsgCertRenewed, CertRenewed: &result})
+			sess.mu.Unlock()
+			if sendErr != nil {
+				return
+			}
 		}
 	}
 }

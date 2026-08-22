@@ -48,11 +48,11 @@ actually exists — expand a row into a full block the moment work on it begins
 - **DB tables**: `servers`, `bootstrap_tokens`, `revoked_certs`.
 - **Required permission**: authenticated session (single-user model today — see ORG-001).
 - **Security considerations**: single-use/short-lived hashed bootstrap tokens; certificate identity independently derived from the mTLS handshake, never trusted from agent-asserted data; revocation checked every handshake.
-- **Test coverage**: `apps/controlplane/http_test.go` (`TestServerCreateListRevokeFlow`, `TestRegisterEndpointRejectsBadToken`), `apps/controlplane/store_test.go`.
+- **Test coverage**: `apps/controlplane/http_test.go` (`TestServerCreateListRevokeFlow`, `TestRegisterEndpointRejectsBadToken`), `apps/controlplane/store_test.go`, `apps/controlplane/gateway_test.go` (`TestGatewayRenewCertOverExistingSession`, `TestGatewayRenewCertRejectsMalformedCSR` — real mTLS handshake, real CA-signed certs), `apps/agent/renew_test.go`.
 - **Current status**: `COMPLETE`
-- **Completion date**: 2026-08-14
-- **Known differences**: no agent certificate auto-renewal before 30-day expiry yet.
-- **Reason**: scoped out of the initial secure-foundation pass; tracked in `SYSTEM.md` §21.
+- **Completion date**: 2026-08-22
+- **Known differences**: agent certificate auto-renewal before 30-day expiry is now implemented (`renew_cert` protocol message over the live mTLS session — see `SECURITY.md` §2); a superseded (pre-renewal) certificate serial is not proactively revoked, only naturally expires on its own original timer.
+- **Reason**: overlap-window trade-off documented in `SYSTEM.md` §21, not an oversight — "Revoke agent" always revokes whichever serial is currently on record.
 
 ### SRV-002 — Hosting stack installation (LEMP)
 - **Category**: Server Management

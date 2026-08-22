@@ -23,6 +23,12 @@ import (
 // application tier — see docs/security-trust-model.md §2. This in-process
 // implementation is a functional skeleton for Phase 1 development, not the
 // production CA deployment.
+// agentCertTTL is how long an issued agent client certificate is valid for,
+// both at initial registration (http.go handleRegister) and at every
+// subsequent renewal (gateway.go's renew_cert handling) — a single constant
+// so the two issuance paths can never drift apart.
+const agentCertTTL = 30 * 24 * time.Hour
+
 type agentCA struct {
 	mu       sync.Mutex
 	rootCert *x509.Certificate

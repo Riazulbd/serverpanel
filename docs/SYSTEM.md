@@ -52,8 +52,10 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | User/organization management | 🚧 single-user model only; no orgs/teams yet |
 | Multiple-server management | ✅ create/list/get/revoke, search/filter in UI |
 | Secure agent install/registration | ✅ bootstrap token → mTLS cert exchange |
-| Agent identity, cert rotation, revocation | 🚧 issuance + revocation done; no
-  auto-renewal before expiry yet (see `SECURITY.md` §2) |
+| Agent identity, cert rotation, revocation | ✅ issuance, revocation, and
+  auto-renewal-before-expiry (`renew_cert` over the live mTLS session, see
+  `SECURITY.md` §2) all implemented; superseded (pre-renewal) serials aren't
+  auto-revoked, only naturally expire — known trade-off, `SYSTEM.md` §21 |
 | Server health monitoring | ✅ heartbeat: uptime, load, mem%, disk% |
 | Server groups/tags/metadata | ✅ `group`, `tags[]` on server records |
 | Background job queue | ⬜ task dispatch is synchronous request/response today,
@@ -279,7 +281,11 @@ See `SECURITY.md` in full. Summary: single-use, short-lived (15 min default),
 hashed-at-rest bootstrap tokens exchanged exactly once for a 30-day mTLS client
 certificate bound (by `CommonName`) to the server's ID; the gateway independently
 derives identity from the certificate on every connection (never trusts anything the
-agent asserts in-band) and checks a revocation list on every handshake.
+agent asserts in-band) and checks a revocation list on every handshake. Before that
+30-day certificate expires, the agent auto-renews it over the live session (a fresh
+keypair + CSR sent as a `renew_cert` protocol message; the gateway signs it back to
+the *connection's own* already-verified identity, never to anything the CSR
+requests) — see `SECURITY.md` §2.
 
 ## 12. Privileged operations and allow-list
 
@@ -384,7 +390,12 @@ all ⬜, scoped to Phase 2 per `product-plan.md` §9.
 - No backup scheduling/retention policy — backups are on-demand only.
 - No on-disk agent task journal — a task in flight when the agent process restarts is
   lost, not resumed (see `ARCHITECTURE.md` §4 "As built").
-- No agent certificate auto-renewal before its 30-day expiry (see `SECURITY.md` §2).
+- Agent certificate auto-renewal is implemented (see `SECURITY.md` §2), but a
+  superseded (pre-renewal) certificate serial is not proactively revoked — it simply
+  goes unused and expires naturally on its own original 30-day timer, so there's a
+  window (up to 30 days) where an old-but-superseded cert would still complete a
+  handshake if presented. "Revoke agent" always revokes whichever serial is currently
+  on record (the latest one after any renewal).
 - No agent self-update mechanism (see `SECURITY.md` §3).
 - No background job queue — task dispatch is synchronous and bounded by a 120s HTTP
   timeout; this will not scale past a moderate number of concurrent long-running tasks

@@ -178,6 +178,32 @@ func TestSetConnectedPreservesRevokedStatus(t *testing.T) {
 	}
 }
 
+func TestRecordCertRenewalUpdatesSerialWithoutTouchingStatus(t *testing.T) {
+	st := newTestStore(t)
+	id, _, err := st.createServer("web-renew", "", nil, time.Hour, "admin@example.com")
+	if err != nil {
+		t.Fatalf("createServer: %v", err)
+	}
+	st.markIssuedCert(id, "100")
+	// Simulate the agent actually being connected at renewal time — unlike
+	// initial registration (markIssuedCert), a renewal happens over an
+	// already-live session, so status must stay "connected" throughout.
+	st.setConnected(id, true)
+
+	st.recordCertRenewal(id, "101")
+
+	rec, ok := st.get(id)
+	if !ok {
+		t.Fatal("server should still exist")
+	}
+	if rec.CertSerial != "101" {
+		t.Fatalf("cert_serial = %q, want %q", rec.CertSerial, "101")
+	}
+	if rec.Status != statusConnected {
+		t.Fatalf("status after recordCertRenewal = %q, want %q (renewal must not reset connection status)", rec.Status, statusConnected)
+	}
+}
+
 func TestRecordHeartbeatAndList(t *testing.T) {
 	st := newTestStore(t)
 	id, _, err := st.createServer("web-5", "staging", []string{"a", "b"}, time.Hour, "admin@example.com")

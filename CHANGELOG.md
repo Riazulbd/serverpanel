@@ -2,6 +2,51 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-22 — Agent certificate auto-renewal
+
+- **Implemented agent client-certificate auto-renewal**, closing the top gap flagged
+  in `SECURITY.md` §2 and `SYSTEM.md` §21 since the initial secure-foundation pass:
+  agent client certificates were issued with a fixed 30-day TTL and, until now, had no
+  renewal path — an expired cert meant a hard, manual re-registration with a fresh
+  bootstrap token, for every server, on a fixed calendar regardless of whether anyone
+  was watching for it.
+- New protocol messages (`packages/proto/proto.go`): `renew_cert` (agent → gateway,
+  carries a freshly generated CSR) and `cert_renewed` (gateway → agent, the signed
+  certificate or an error), sent over the **existing, already-authenticated mTLS
+  session** — no new listener, endpoint, or shared secret.
+- Gateway side (`apps/controlplane/gateway.go`): signs the CSR using
+  `agentCA.signAgentCSR` (now shared via a single `agentCertTTL` constant in `ca.go`,
+  used identically at initial registration and at every renewal) bound to the
+  `server_id` the gateway already derived from the connection's verified client
+  certificate — **never** to anything the CSR itself requests, so a connected agent
+  cannot use renewal to mint a certificate for a different server. A rejected renewal
+  (malformed CSR) reports an error without tearing down the session. New
+  `store.recordCertRenewal` updates the on-record serial without disturbing connection
+  status (unlike `markIssuedCert`, which is only ever correct pre-connection).
+- Agent side (`apps/agent/renew.go`, wired into `connect.go`'s `certRenewalLoop`):
+  checks its own certificate's expiry roughly hourly; once within a 7-day
+  (`certRenewalThreshold`) window, generates a **brand new keypair** (never reuses the
+  expiring key), requests renewal, persists the result atomically (temp-file-then-
+  rename) to disk, and deliberately closes its own connection so the existing
+  reconnect/backoff loop in `main.go` redials with the new certificate immediately —
+  proving the rotation actually works end-to-end in the same run, not just that a
+  response was received.
+- Known, documented trade-off (not a bug): a superseded pre-renewal certificate serial
+  is not proactively revoked — it goes unused once the agent reconnects with the new
+  one, and simply expires naturally on its own original timer. "Revoke agent" from the
+  dashboard still correctly revokes whichever serial is currently on record.
+- Added 10 new tests: 2 real-mTLS gateway integration tests
+  (`apps/controlplane/gateway_test.go`, dialing a live `tls.Listen`er with a CA-signed
+  client cert) proving a legitimate renewal is bound to the connection's own identity
+  even when the CSR requests a different CommonName, and that a malformed CSR is
+  rejected cleanly without disturbing the on-record serial or the session; 1 store test
+  (`recordCertRenewal` leaves connection status untouched); 7 unit tests for the
+  agent's renewal logic (`apps/agent/renew_test.go`) covering the threshold boundary,
+  cert-expiry parsing, CSR generation/key-freshness, and atomic persistence. Full
+  suite: 71 test functions across three packages, `go vet`/`gofmt`/`-race` clean.
+- Updated `SECURITY.md`, `SYSTEM.md`, `API.md`, `TESTING.md`, and
+  `SERVERAVATAR_PARITY.md` (SRV-001) to reflect renewal as implemented.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

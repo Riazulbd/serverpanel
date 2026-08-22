@@ -54,17 +54,41 @@ Properties this guarantees:
   certificate issued by the internal Agent CA, and the agent verifies the gateway's
   certificate/pinned CA to prevent MITM or connecting to a spoofed endpoint.
   **Implemented as described** — see `apps/controlplane/gateway.go` `handleConn`.
-- Client certs are **short-lived** (e.g. 30–90 days) and **auto-rotated**: before
-  expiry, the agent requests renewal authenticated by its current still-valid cert (no
-  shared long-lived secret is ever reused for renewal). If a renewal window is missed
-  (agent offline past expiry), the agent falls back to a manual re-registration flow
-  requiring a fresh bootstrap token from the dashboard — this is an intentional
-  fail-closed behavior, not silent re-trust.
-  **Not yet implemented**: certs are issued with a fixed 30-day TTL
-  (`apps/controlplane/http.go` `handleRegister`) and there is no renewal
-  capability/endpoint yet — an agent whose cert expires must be manually
-  re-registered with a fresh bootstrap token today. Auto-rotation before expiry is
-  tracked as a known gap in `SYSTEM.md`.
+- Client certs are **short-lived** (30 days, `agentCertTTL` in
+  `apps/controlplane/ca.go`) and **auto-rotated**: before expiry, the agent requests
+  renewal authenticated by its current still-valid cert over the already-open mTLS
+  session (no shared long-lived secret is ever reused for renewal, and no new inbound
+  port or endpoint is needed). If a renewal window is missed (agent offline for the
+  full week-long renewal window and its cert actually expires), the agent falls back to
+  a manual re-registration flow requiring a fresh bootstrap token from the dashboard —
+  this is an intentional fail-closed behavior, not silent re-trust.
+  **Implemented**: the agent (`apps/agent/connect.go` `certRenewalLoop`, checked hourly
+  against `apps/agent/renew.go`'s `certRenewalThreshold` of 7 days) generates a brand
+  new keypair and CSR for every renewal — never reusing the expiring cert's key — and
+  sends it as a `renew_cert` protocol message over the live mTLS connection. The
+  gateway (`apps/controlplane/gateway.go`'s `MsgRenewCert` handling) signs the CSR with
+  the identity **already bound to that connection** (the `server_id` derived from its
+  current, just-verified client certificate), never from anything in the CSR itself —
+  so a connected agent cannot use renewal to mint a certificate claiming a different
+  server's identity, and this is covered by an integration test
+  (`TestGatewayRenewCertOverExistingSession`) that deliberately sends a CSR with a
+  forged CommonName and asserts the issued certificate ignores it. On success, the
+  agent persists the new cert/key pair to disk (atomic temp-file-then-rename) and
+  deliberately closes its own connection to force an immediate reconnect with the new
+  certificate — proving the rotation works end-to-end in the same run, rather than
+  discovering a problem only at the next natural disconnect. The previous certificate's serial
+  is **not** proactively revoked on renewal — it simply goes unused once the agent
+  reconnects with the new one — and keeps working (its handshake still succeeds) until
+  its own original 30-day expiry, even after a newer cert has superseded it. This is a
+  known, documented trade-off (an overlap window, not indefinite validity), not an
+  oversight: implementing "revoke every prior serial for a server_id on each renewal"
+  is a small further change (tracked in `SYSTEM.md` §21) that only the `servers` table's
+  *current* `cert_serial` is checked/updated by `recordCertRenewal` today — prior
+  serials issued to the same `server_id` are not enumerated or auto-revoked. "Revoke
+  agent" from the dashboard still immediately and correctly revokes whichever serial is
+  currently on record (the latest one after any renewal) and force-disconnects the live
+  session, which is the operationally common case (an operator revoking a server they
+  can see is currently connected).
 - The Agent CA's private key is held in a dedicated, tightly access-controlled service
   (e.g. `step-ca` or HSM-backed KMS in later stages), separate from the general
   application database, so a control-plane app-tier compromise doesn't automatically

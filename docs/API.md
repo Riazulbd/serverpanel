@@ -160,6 +160,8 @@ connection carries newline-delimited JSON `Envelope`s in both directions
 {"type": "task", "task": {"id": "...", "capability": "...", "params": {}, "issued_at": "..."}}
 {"type": "task_event", "task_event": {"task_id": "...", "status": "queued|running|succeeded|failed|rejected", "message": "...", "detail": "...", "at": "..."}}
 {"type": "ack"}
+{"type": "renew_cert", "renew_cert": {"csr_pem": "<PEM-encoded CSR>"}}
+{"type": "cert_renewed", "cert_renewed": {"cert_pem": "...", "error": ""}}
 ```
 
 Flow: gateway accepts → verifies cert → sends `ack` → agent sends `hello`, then
@@ -170,6 +172,19 @@ HTTP handler) until it sees a terminal event for the task ID it sent, or its con
 deadline expires. There is no message type for a free-form command — `capability` must
 be a name in `packages/capabilities`'s fixed registry, or the agent returns `rejected`
 without executing anything.
+
+Independently of task dispatch, the agent checks its own client certificate's expiry
+roughly hourly (`apps/agent/connect.go` `certRenewalLoop`); once within
+`certRenewalThreshold` (7 days) of expiry, it generates a fresh keypair, sends
+`renew_cert` with a new CSR over this same connection, and the gateway signs it back to
+the identity **already bound to this connection** — the `server_id` the gateway derived
+from the client certificate at handshake time, never from anything in the CSR (see
+`SECURITY.md` §2). A malformed/invalid CSR gets `cert_renewed` with a non-empty `error`
+and an empty `cert_pem`; the session itself is left open (a rejected renewal is not a
+handshake failure). On a successful renewal, the agent persists the new cert/key pair
+to disk and deliberately closes this connection so the next reconnect (handled by the
+agent's normal exponential-backoff reconnect loop) proves the new certificate actually
+works.
 
 ## 4. Capability reference
 
