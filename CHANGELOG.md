@@ -2,6 +2,52 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-22 — Database control-plane persistence, dashboard UI, and secret encryption at rest
+
+- **Closed DB-001's flagged gap** (`docs/SERVERAVATAR_PARITY.md`'s 2026-08-17 entry
+  explicitly named this "a good candidate for the next iteration"): the pre-existing
+  agent-side `db.create`/`db.delete`/`db.list` capabilities now have a control-plane
+  persistence and dashboard layer, mirroring the pattern `backups` got in the previous
+  session. New `databases` table (`server_id`, `name`, `owner_user`,
+  `owner_password_enc`, `status`, `created_at`; `UNIQUE(server_id, name)`); four new
+  endpoints (`GET`/`POST /api/v1/servers/{id}/databases`,
+  `POST .../databases/{dbId}/reveal`, `DELETE .../databases/{dbId}`), each following
+  the existing dispatch-then-persist-only-on-success pattern; a "Databases" panel per
+  server in the dashboard (create modal, table with show-password/delete actions).
+- **Added AES-256-GCM encryption at rest** (`apps/controlplane/secret.go`) — the first
+  reversible-secret storage this project needed. Database owner passwords are always
+  control-plane-generated (24 random bytes, never client-supplied — `db.create`'s own
+  16-character minimum exists precisely to keep a weak password from ever reaching a
+  grant), and are encrypted before being persisted; a dedicated, audit-logged reveal
+  endpoint decrypts one on demand. The 32-byte key is persisted to disk next to the
+  agent CA (`<ca-dir>/secret-key.bin`, mode 0600), reusing `loadOrCreateAgentCA`'s
+  restart-durability rationale so a control-plane restart never orphans previously
+  encrypted secrets. Documented in a new `SECURITY.md` §7.
+- Found and closed a real (if minor) pre-existing test-coverage gap while writing this
+  session's parity update for DB-001: `packages/capabilities`'s `db.create`/`db.delete`
+  identifier/password validation had no unit tests at all (only registry-presence was
+  checked). Added `packages/capabilities/db_test.go` — five tests covering invalid
+  name/owner_user, oversized name, short password, a SQL-injection-shaped name, and a
+  direct table-driven check of `identifierRe` against both injection-shaped and
+  legitimate inputs, all of which run without a live MariaDB since they exercise only
+  the validation path before either handler ever opens a database connection.
+- 16 new test functions in total: `apps/controlplane/store_test.go` (database
+  create/list/get/delete round trip, cross-server scoping, duplicate-name rejection),
+  `apps/controlplane/secret_test.go` (encrypt/decrypt round trip, tamper detection,
+  wrong-key rejection, key persistence across reloads, corrupt-key-file rejection),
+  `apps/controlplane/http_test.go` (`TestDatabaseEndpointsValidateAndScope` — the
+  validate-before-dispatch ordering, not-found/cross-server-scoping boundaries, and a
+  real encrypt→store→reveal round trip through the HTTP layer), and the five
+  `packages/capabilities/db_test.go` tests above. Full suite: 77 test functions (up
+  from 61), `go vet`/`gofmt` clean; the control plane binary was also smoke-tested
+  manually end-to-end (real HTTP requests through a running instance: signup, login,
+  server creation, database validation errors, and the expected `502` with no agent
+  connected).
+- Updated `SYSTEM.md`, `API.md`, `SECURITY.md`, `TESTING.md`, and
+  `docs/SERVERAVATAR_PARITY.md` (DB-001's detail block and the progress-summary counts,
+  including a pre-existing miscount in the `PARTIAL` row fixed along the way) to
+  reflect all of the above.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

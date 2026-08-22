@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"path/filepath"
 	"testing"
 	"time"
@@ -33,5 +34,9 @@ func newTestAPIServer(t *testing.T) *apiServer {
 		t.Fatalf("loadOrCreateAgentCA: %v", err)
 	}
 	gw := newGateway(ca, st)
-	return &apiServer{store: st, ca: ca, gw: gw, gatewayAddr: "127.0.0.1:0", tokenTTL: 15 * time.Minute}
+	secrets, err := newSecretBox(bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		t.Fatalf("newSecretBox: %v", err)
+	}
+	return &apiServer{store: st, ca: ca, gw: gw, secrets: secrets, gatewayAddr: "127.0.0.1:0", tokenTTL: 15 * time.Minute}
 }

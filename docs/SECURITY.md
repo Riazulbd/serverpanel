@@ -181,3 +181,37 @@ one-click-apply-fix flow yet; a human reading the diagnostic output and dispatch
 explicit capability (e.g. `service.control` restart) is the current repair path, which
 already satisfies "never automatic" — the plain-language suggestion layer on top is
 unbuilt.
+
+## 7. Secret storage at rest — **implemented**
+
+The control plane stores three categories of secret, handled differently by category
+rather than with one generic "encrypt everything" rule, because they have different
+requirements:
+
+- **Session/bootstrap tokens**: only ever stored as a SHA-256 hash of the random
+  token value. The plaintext is shown to the caller exactly once (at issuance) and is
+  never persisted anywhere, so there is nothing to decrypt or leak from the database —
+  even a full database compromise cannot recover a usable token, only its hash.
+- **User account passwords**: bcrypt (cost 12), one-way, same reasoning.
+- **Generated database owner passwords** (`db.create`, see `databases.go`): the one
+  secret class the control plane must be able to read back — an operator retrieving
+  connection info for a database it created weeks ago is a real, supported workflow
+  (`POST /api/v1/servers/{id}/databases/{dbId}/reveal`), so a one-way hash isn't
+  sufficient here the way it is for tokens/passwords. These are encrypted with
+  AES-256-GCM (`secret.go`), keyed by a 32-byte value generated once and persisted to
+  disk (`<ca-dir>/secret-key.bin`, mode 0600) — the same persist-across-restarts
+  rationale as the agent CA's key in §2/§3 (`loadOrCreateAgentCA`): without
+  persistence, a control-plane restart would silently make every previously encrypted
+  password permanently undecryptable. GCM's authentication tag means a tampered
+  ciphertext (e.g. someone editing the SQLite file directly) is detected and rejected
+  on decrypt, never silently returned as garbage plaintext. Every reveal is
+  audit-logged (`database.password_revealed`) since it's the one read endpoint in this
+  codebase that exposes a live, currently-valid credential rather than metadata.
+
+**Known limitation**: the secret key currently lives on the same disk as the SQLite
+database it protects — an attacker with full filesystem read access gets both the
+ciphertext and the key. This matches the CA key's existing threat model (§2's "this
+in-process implementation is a functional skeleton ... not the production CA
+deployment") and has the same intended fix: move both to a dedicated KMS/HSM-backed
+secret store, out of the general application host's filesystem, before this is
+production infrastructure for real customer credentials.

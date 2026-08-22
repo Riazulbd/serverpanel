@@ -297,3 +297,75 @@ func TestBackupCreateListGetRoundTrip(t *testing.T) {
 		t.Fatal("expected getBackup to refuse a backup ID under the wrong server")
 	}
 }
+
+func TestDatabaseCreateListGetDeleteRoundTrip(t *testing.T) {
+	st := newTestStore(t)
+	serverID, _, _ := st.createServer("web-11", "", nil, time.Hour, "admin@example.com")
+
+	db, err := st.createDatabase(serverID, "wp_myapp", "wp_myapp_user", "ciphertext-not-plaintext")
+	if err != nil {
+		t.Fatalf("createDatabase: %v", err)
+	}
+	if db.ID == "" || db.Status != "active" {
+		t.Fatalf("unexpected database record: %+v", db)
+	}
+
+	list := st.listDatabases(serverID)
+	if len(list) != 1 || list[0].Name != "wp_myapp" || list[0].OwnerUser != "wp_myapp_user" {
+		t.Fatalf("listDatabases = %+v, want one entry matching the created database", list)
+	}
+
+	got, ok := st.getDatabase(serverID, db.ID)
+	if !ok {
+		t.Fatal("expected getDatabase to find the created database")
+	}
+	if got.OwnerPasswordEnc != "ciphertext-not-plaintext" {
+		t.Fatalf("getDatabase.OwnerPasswordEnc = %q, want the stored ciphertext round-tripped verbatim", got.OwnerPasswordEnc)
+	}
+
+	if err := st.deleteDatabaseRecord(serverID, db.ID); err != nil {
+		t.Fatalf("deleteDatabaseRecord: %v", err)
+	}
+	if _, ok := st.getDatabase(serverID, db.ID); ok {
+		t.Fatal("expected getDatabase to find nothing after deleteDatabaseRecord")
+	}
+	if err := st.deleteDatabaseRecord(serverID, db.ID); err == nil {
+		t.Fatal("expected deleteDatabaseRecord to error on an already-deleted database")
+	}
+}
+
+func TestGetDatabaseIsScopedToServerID(t *testing.T) {
+	st := newTestStore(t)
+	serverA, _, _ := st.createServer("web-c", "", nil, time.Hour, "admin@example.com")
+	serverB, _, _ := st.createServer("web-d", "", nil, time.Hour, "admin@example.com")
+
+	db, err := st.createDatabase(serverA, "app_db", "app_db_user", "ciphertext")
+	if err != nil {
+		t.Fatalf("createDatabase: %v", err)
+	}
+
+	if _, ok := st.getDatabase(serverA, db.ID); !ok {
+		t.Fatal("expected getDatabase to find the database under its real server")
+	}
+	if _, ok := st.getDatabase(serverB, db.ID); ok {
+		t.Fatal("expected getDatabase to refuse a database ID under the wrong server")
+	}
+	if err := st.deleteDatabaseRecord(serverB, db.ID); err == nil {
+		t.Fatal("expected deleteDatabaseRecord to refuse deleting a database under the wrong server")
+	}
+	if _, ok := st.getDatabase(serverA, db.ID); !ok {
+		t.Fatal("cross-server deleteDatabaseRecord attempt must not have deleted the record")
+	}
+}
+
+func TestCreateDatabaseRejectsDuplicateNamePerServer(t *testing.T) {
+	st := newTestStore(t)
+	serverID, _, _ := st.createServer("web-e", "", nil, time.Hour, "admin@example.com")
+
+	if _, err := st.createDatabase(serverID, "dup_db", "dup_owner", "ciphertext"); err != nil {
+		t.Fatalf("createDatabase: %v", err)
+	}
+	if _, err := st.createDatabase(serverID, "dup_db", "another_owner", "ciphertext"); err == nil {
+		t.Fatal("expected createDatabase to reject a duplicate name on the same server")
+	}
+}

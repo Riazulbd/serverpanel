@@ -287,6 +287,115 @@ func TestCreateBackupRejectsInvalidScope(t *testing.T) {
 	}
 }
 
+func TestDatabaseEndpointsValidateAndScope(t *testing.T) {
+	secureCookies = false
+	defer func() { secureCookies = true }()
+
+	a := newTestAPIServer(t)
+	h := a.routes()
+
+	doJSON(t, h, "POST", "/api/v1/auth/signup", map[string]string{
+		"Email": "ops3@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	rec := doJSON(t, h, "POST", "/api/v1/auth/login", map[string]string{
+		"Email": "ops3@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	cookie := sessionCookie(rec)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers", map[string]any{"Name": "web-11"}, cookie)
+	var created struct {
+		ServerID string `json:"server_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+
+	// Invalid identifiers must be rejected before any agent dispatch.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/databases",
+		map[string]any{"name": "Not-Valid!", "owner_user": "ok_user"}, cookie)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("create database with invalid name: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/databases",
+		map[string]any{"name": "ok_name", "owner_user": ""}, cookie)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("create database with missing owner_user: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// A well-formed request against a server with no connected agent must
+	// fail as a gateway/dispatch error, not a validation error — proving
+	// validation happens before dispatch, same as backups.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/databases",
+		map[string]any{"name": "ok_name", "owner_user": "ok_user"}, cookie)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("create database with no agent connected: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// Reveal/delete against a database that doesn't exist must 404, never
+	// dispatch to the agent.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/databases/db_nonexistent/reveal", nil, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("reveal nonexistent database: status = %d, want 404", rec.Code)
+	}
+	rec = doJSON(t, h, "DELETE", "/api/v1/servers/"+created.ServerID+"/databases/db_nonexistent", nil, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("delete nonexistent database: status = %d, want 404", rec.Code)
+	}
+
+	// A database created directly in the store (bypassing dispatch, as a
+	// prior successful create would have) must reveal its real password and
+	// be scoped to its own server — not visible/deletable via another one.
+	db, err := a.store.createDatabase(created.ServerID, "existing_db", "existing_owner", mustEncrypt(t, a.secrets, "s3cret-pass"))
+	if err != nil {
+		t.Fatalf("createDatabase: %v", err)
+	}
+	rec = doJSON(t, h, "GET", "/api/v1/servers/"+created.ServerID+"/databases", nil, cookie)
+	if rec.Code != http.StatusOK || !bytes.Contains(rec.Body.Bytes(), []byte("existing_db")) {
+		t.Fatalf("list databases: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/databases/"+db.ID+"/reveal", nil, cookie)
+	var revealed struct {
+		OwnerPassword string `json:"owner_password"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &revealed)
+	if rec.Code != http.StatusOK || revealed.OwnerPassword != "s3cret-pass" {
+		t.Fatalf("reveal database password: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers", map[string]any{"Name": "web-12"}, cookie)
+	var otherServer struct {
+		ServerID string `json:"server_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &otherServer)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+otherServer.ServerID+"/databases/"+db.ID+"/reveal", nil, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("reveal database under wrong server: status = %d, want 404", rec.Code)
+	}
+	rec = doJSON(t, h, "DELETE", "/api/v1/servers/"+otherServer.ServerID+"/databases/"+db.ID, nil, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("delete database under wrong server: status = %d, want 404", rec.Code)
+	}
+
+	// No agent is connected, so a real delete attempt against the correct
+	// server must fail at dispatch, and the record must survive.
+	rec = doJSON(t, h, "DELETE", "/api/v1/servers/"+created.ServerID+"/databases/"+db.ID, nil, cookie)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("delete database with no agent connected: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if _, ok := a.store.getDatabase(created.ServerID, db.ID); !ok {
+		t.Fatal("database record must survive a delete attempt that never reached the agent")
+	}
+}
+
+func mustEncrypt(t *testing.T, box *secretBox, plaintext string) string {
+	t.Helper()
+	ct, err := box.Encrypt(plaintext)
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	return ct
+}
+
 func TestRegisterEndpointRejectsBadToken(t *testing.T) {
 	a := newTestAPIServer(t)
 	h := a.routes()

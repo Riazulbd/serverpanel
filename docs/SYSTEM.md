@@ -113,6 +113,12 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | Archive creation/extraction | ⬜ not implemented |
 | Application logs / advanced log viewer | 🚧 `logs.tail` (redacted) exists; no
   filtering/search UI yet |
+| Database create/delete/list with scoped owner user | ✅ `db.create`/`db.delete`/
+  `db.list` (Unix-socket root auth, single-database-scoped grants, identifier
+  allow-list), persisted as a `databases` row and surfaced in a per-server
+  "Databases" dashboard panel — generated owner passwords are AES-256-GCM-encrypted
+  at rest and retrievable via an audited reveal endpoint, never stored in plaintext |
+| MongoDB support, phpMyAdmin/DB-admin UI, DB process/query monitoring | ⬜ Phase 2/3 |
 
 ### Git deployment
 All ⬜ — explicitly scoped to Phase 2 (`product-plan.md` §9). No Git deployment,
@@ -253,17 +259,23 @@ EXISTS`, applied on every `openDB` call — idempotent, no separate migration to
 | `audit_log` | append-only: seq, timestamp, server, actor, action, detail |
 | `sites` | id, server, domain, system user, docroot, app type, PHP version, status |
 | `backups` | id, server, site, scope, path, size, sha256, status, created_at |
+| `databases` | id, server, name, owner user, AES-256-GCM-encrypted owner password,
+  status, created_at (unique on `(server_id, name)`) |
 
-No ORM — every query is a small, explicit SQL statement in `store.go`. All secrets
-(session tokens, bootstrap tokens) are stored only as SHA-256 hashes; passwords use
-bcrypt (cost 12); nothing is stored in plaintext.
+No ORM — every query is a small, explicit SQL statement in `store.go`. All one-way
+secrets (session tokens, bootstrap tokens) are stored only as SHA-256 hashes;
+passwords use bcrypt (cost 12). The one secret the control plane must be able to read
+back — a generated database owner password, so an operator can retrieve connection
+info later — is AES-256-GCM-encrypted with a 32-byte key persisted next to the agent
+CA (`secret.go`, `loadOrCreateSecretKey`); nothing is stored in plaintext.
 
 ## 9. API endpoints
 
 Full list with request/response shapes in `API.md`. Summary: `/api/v1/auth/*`
 (signup/login/logout/TOTP enroll+verify/MFA challenge/me), `/api/v1/servers*` (CRUD,
-revoke, task dispatch, sites, audit), `/agents/register` (the one unauthenticated
-agent-facing endpoint, secured by the bootstrap token itself), `/healthz`.
+revoke, task dispatch, sites, backups, databases, audit), `/agents/register` (the one
+unauthenticated agent-facing endpoint, secured by the bootstrap token itself),
+`/healthz`.
 
 ## 10. Background jobs
 
@@ -324,7 +336,10 @@ is structured so adding a new stack profile or app type is additive (a new capab
 
 Control plane (`apps/controlplane`, all flags, no env vars read directly):
 `-api-addr`, `-gateway-addr`, `-gateway-public-addr`, `-bootstrap-token-ttl`, `-db`,
-`-ca-dir`, `-public-dir`, `-insecure-cookies`. See `main.go` for defaults.
+`-ca-dir`, `-public-dir`, `-insecure-cookies`. See `main.go` for defaults. `-ca-dir`
+also determines where the AES-256 secret-encryption key (`secret-key.bin`, mode 0600)
+is persisted, alongside the agent CA's cert/key — same reuse-across-restarts rationale
+as the CA (see §18).
 
 Agent (`apps/agent`): `-api`, `-token`, `-data-dir`, `-register-only`. `run()`
 (`packages/capabilities/exec_helpers.go`) sets `DEBIAN_FRONTEND=noninteractive` and
@@ -357,7 +372,9 @@ See `SECURITY.md`. One-line summary: capability allow-list (no shell-exec RPC), 
 with short-lived certs and immediate revocation, per-app OS-level isolation
 (system user + php-fpm pool + `open_basedir` + disabled functions + scoped DB grants),
 bcrypt + TOTP for dashboard auth, append-only audit log, path-traversal/symlink-escape
-defenses on the file manager (`resolveScopedPath`).
+defenses on the file manager (`resolveScopedPath`), AES-256-GCM encryption at rest for
+the one class of secret the control plane must be able to read back (generated
+database owner passwords — `secret.go`).
 
 ## 19. Backup and restore model
 

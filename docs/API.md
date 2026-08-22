@@ -46,6 +46,10 @@ protected route; there is no route that skips it by omission.
 | `GET` | `/api/v1/servers/{id}/sites/{siteId}/backups` | List backups for a site, newest first |
 | `POST` | `/api/v1/servers/{id}/sites/{siteId}/backups` | Dispatch `backup.run` and persist the resulting backup record |
 | `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a previously recorded backup |
+| `GET` | `/api/v1/servers/{id}/databases` | List databases on a server, newest first |
+| `POST` | `/api/v1/servers/{id}/databases` | Dispatch `db.create` and persist the resulting database record |
+| `POST` | `/api/v1/servers/{id}/databases/{dbId}/reveal` | Decrypt and return a database's owner password (audit-logged) |
+| `DELETE` | `/api/v1/servers/{id}/databases/{dbId}` | Dispatch `db.delete` and, only on success, remove the record |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -136,6 +140,42 @@ pre-restore safety backups taken automatically before anything was overwritten,
 isn't connected; `422` if `backup.restore` itself failed on the agent (the agent-side
 error message explains why, and any checkpoint already taken is named in it so it's
 never a silent loss).
+
+### `POST /api/v1/servers/{id}/databases`
+```json
+{"name": "wp_myapp", "owner_user": "wp_myapp_user"}
+```
+Both fields must match `^[a-z][a-z0-9_]{0,30}$` (validated here, before dispatch, as
+well as agent-side — defense in depth against SQL-identifier injection; see
+`SECURITY.md`). The owner password is never accepted from the caller — the control
+plane generates a random 24-byte (48 hex char) password, well above `db.create`'s own
+16-character minimum, and sends it to the agent. Only on the agent reporting success
+is the password AES-256-GCM-encrypted (`secret.go`) and a `databases` row persisted.
+→ `201 {"database": {...databaseRecord, "OwnerPasswordEnc" omitted}, "owner_password": "<plaintext, shown once>"}`.
+`400` for an invalid name/owner_user; `502` if the agent isn't connected; `422` if
+`db.create` itself failed on the agent; `500` (with the database left uncreated on the
+control-plane side, though it does exist on the agent — see the handler's error
+message) if the create succeeded on the agent but the name collides with an existing
+record for that server (`UNIQUE(server_id, name)`) or the result couldn't be persisted.
+
+### `GET /api/v1/servers/{id}/databases`
+→ `200` with an array of `databaseRecord` (`ID`, `ServerID`, `Name`, `OwnerUser`,
+`Status`, `CreatedAt`) — the encrypted password field is tagged `json:"-"` and is
+never included in this or any other list/get response.
+
+### `POST /api/v1/servers/{id}/databases/{dbId}/reveal`
+No request body. Decrypts the database's stored owner password and returns it. →
+`200 {"owner_password": "..."}`. `404` if the database doesn't exist on that server.
+Every call is recorded in the audit log (`database.password_revealed`) since, unlike
+most reads, this one exposes a live credential.
+
+### `DELETE /api/v1/servers/{id}/databases/{dbId}`
+No request body. Dispatches `db.delete` with the database's own recorded `name`/
+`owner_user`; only on the agent reporting success is the record removed — a failed
+delete leaves the record in place rather than silently forgetting a database that
+still exists. → `200 {"status": "deleted"}`. `404` if the database doesn't exist on
+that server; `502` if the agent isn't connected; `422` if `db.delete` itself failed on
+the agent.
 
 ### `POST /agents/register`
 ```json

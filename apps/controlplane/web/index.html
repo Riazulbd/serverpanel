@@ -174,6 +174,12 @@
           <button onclick="openNewSiteModal()">+ New site</button>
         </div>
         <div id="sitesList" class="muted">No sites yet.</div>
+
+        <div class="section-title" style="display:flex;justify-content:space-between;align-items:center">
+          <span>Databases</span>
+          <button onclick="openNewDatabaseModal()">+ New database</button>
+        </div>
+        <div id="databasesList" class="muted">No databases yet.</div>
       </div>
     </div>
 
@@ -226,7 +232,7 @@
 
 <script>
 const API = '/api/v1';
-let state = { me: null, servers: [], selectedServerId: null, sites: [], selectedSiteId: null, pollTimer: null };
+let state = { me: null, servers: [], selectedServerId: null, sites: [], databases: [], selectedSiteId: null, pollTimer: null };
 
 async function api(path, opts) {
   opts = opts || {};
@@ -447,6 +453,10 @@ async function openServerDetail(id) {
     const sites = await api(API + '/servers/' + id + '/sites');
     renderSites(sites || []);
   } catch (e) {}
+  try {
+    const databases = await api(API + '/servers/' + id + '/databases');
+    renderDatabases(databases || []);
+  } catch (e) {}
 }
 
 function renderSites(sites) {
@@ -456,6 +466,86 @@ function renderSites(sites) {
   el.innerHTML = '<table><thead><tr><th>Domain</th><th>Type</th><th>PHP</th><th>Status</th></tr></thead><tbody>' +
     sites.map(s => `<tr class="clickable" onclick="openSiteDetail('${s.ID}')"><td>${escapeHtml(s.Domain)}</td><td>${escapeHtml(s.AppType)}</td><td>${escapeHtml(s.PHPVersion||'—')}</td><td>${escapeHtml(s.Status)}</td></tr>`).join('') +
     '</tbody></table>';
+}
+
+function openNewDatabaseModal() {
+  const root = document.getElementById('modalRoot');
+  root.innerHTML = `
+    <div class="modal-backdrop" onclick="if(event.target===this) closeModalNoRefresh()">
+      <div class="modal">
+        <h2>New database</h2>
+        <div class="field"><label>Database name</label><input id="newDbName" placeholder="e.g. wp_myapp"></div>
+        <div class="field"><label>Owner user</label><input id="newDbOwnerUser" placeholder="e.g. wp_myapp_user"></div>
+        <p class="muted">Lowercase letters, digits, and underscores only; must start with a letter (max 31 characters). A strong owner password is generated automatically and shown once below.</p>
+        <button class="primary" style="width:100%" onclick="createDatabase()">Create database</button>
+        <div class="error" id="newDbError"></div>
+        <p class="muted" id="newDbStatus"></p>
+        <div id="newDbCredentials" class="hidden"></div>
+      </div>
+    </div>`;
+}
+
+async function createDatabase() {
+  const name = document.getElementById('newDbName').value.trim();
+  const ownerUser = document.getElementById('newDbOwnerUser').value.trim();
+  const err = document.getElementById('newDbError');
+  const status = document.getElementById('newDbStatus');
+  err.textContent = '';
+  status.textContent = 'Creating database and a least-privilege owner user...';
+  try {
+    const res = await api(API + '/servers/' + state.selectedServerId + '/databases', {
+      method: 'POST', body: JSON.stringify({name, owner_user: ownerUser})
+    });
+    status.textContent = 'Database created.';
+    const box = document.getElementById('newDbCredentials');
+    box.classList.remove('hidden');
+    box.innerHTML = '<p class="muted">Owner password (shown once — save it now; it can be revealed again later from the database row):</p><pre class="code">' + escapeHtml(res.owner_password) + '</pre>';
+    const databases = await api(API + '/servers/' + state.selectedServerId + '/databases');
+    renderDatabases(databases || []);
+  } catch (e) {
+    status.textContent = '';
+    err.textContent = e.message;
+  }
+}
+
+function renderDatabases(databases) {
+  state.databases = databases;
+  const el = document.getElementById('databasesList');
+  if (!databases.length) { el.textContent = 'No databases yet.'; return; }
+  el.innerHTML = '<table><thead><tr><th>Name</th><th>Owner user</th><th>Created</th><th></th></tr></thead><tbody>' +
+    databases.map(d => `
+      <tr>
+        <td>${escapeHtml(d.Name)}</td>
+        <td class="muted">${escapeHtml(d.OwnerUser)}</td>
+        <td class="muted">${new Date(d.CreatedAt).toLocaleString()}</td>
+        <td>
+          <button onclick="revealDatabasePassword('${d.ID}')">Show password</button>
+          <button class="danger" onclick="deleteDatabase('${d.ID}')">Delete</button>
+        </td>
+      </tr>`).join('') +
+    '</tbody></table>';
+}
+
+async function revealDatabasePassword(dbId) {
+  try {
+    const res = await api(API + '/servers/' + state.selectedServerId + '/databases/' + dbId + '/reveal', {method: 'POST'});
+    alert('Owner password: ' + res.owner_password);
+  } catch (e) {
+    alert('Could not reveal password: ' + e.message);
+  }
+}
+
+async function deleteDatabase(dbId) {
+  const db = (state.databases || []).find(d => d.ID === dbId);
+  const label = db ? db.Name : 'this database';
+  if (!confirm('Delete database "' + label + '"? This drops the database and its owner user on the server. This cannot be undone.')) return;
+  try {
+    await api(API + '/servers/' + state.selectedServerId + '/databases/' + dbId, {method: 'DELETE'});
+    const databases = await api(API + '/servers/' + state.selectedServerId + '/databases');
+    renderDatabases(databases || []);
+  } catch (e) {
+    alert('Could not delete database: ' + e.message);
+  }
 }
 
 function backToServerDetail() {

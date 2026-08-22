@@ -113,19 +113,19 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Category**: Database Management
 - **Documentation page**: Database Management → "Understanding Database Management"
 - **Short description**: Create a MySQL/MariaDB database with a least-privilege owner user.
-- **Our implementation**: `db.create`/`db.delete`/`db.list` — identifier allow-list regex, `CREATE USER`/`GRANT` scoped to exactly one database (never global), Unix-socket root auth (no stored MySQL root password on disk for this path).
-- **Frontend**: not yet surfaced as its own dashboard panel (capability exists and is dispatchable via generic task dispatch; no dedicated "Databases" tab yet).
-- **Backend service**: `gateway.dispatch` → `packages/capabilities.handleDBCreate/Delete/List`.
-- **API endpoint(s)**: `POST /api/v1/servers/{id}/tasks`.
-- **Agent command**: `db.create`, `db.delete`, `db.list`.
-- **DB tables**: none on the control-plane side yet (no `databases` table — see Known differences).
+- **Our implementation**: `db.create`/`db.delete`/`db.list` (agent) — identifier allow-list regex, `CREATE USER`/`GRANT` scoped to exactly one database (never global), Unix-socket root auth (no stored MySQL root password on disk for this path). Control plane (this session's work): `apiServer.handleCreateDatabase/List/Reveal/Delete` (`apps/controlplane/databases.go`) dispatch-then-persist the same way `handleCreateBackup` does — a `databases` row is written only after the agent confirms success, and removed only after a `db.delete` dispatch also confirms success. The owner password is always control-plane-generated (24 random bytes, never caller-supplied), and stored AES-256-GCM-encrypted (`secret.go`) rather than in plaintext; a dedicated reveal endpoint decrypts it on demand and audit-logs every call.
+- **Frontend**: server-detail "Databases" panel — "New database" modal (name + owner user, password shown once on creation), databases table with "Show password" (calls the reveal endpoint) and "Delete" (confirmation dialog) actions.
+- **Backend service**: `gateway.dispatch` → `packages/capabilities.handleDBCreate/Delete/List`; `apiServer.handleCreateDatabase/handleListDatabases/handleRevealDatabasePassword/handleDeleteDatabase`.
+- **API endpoint(s)**: `GET/POST /api/v1/servers/{id}/databases`, `POST /api/v1/servers/{id}/databases/{dbId}/reveal`, `DELETE /api/v1/servers/{id}/databases/{dbId}`.
+- **Agent command**: `db.create`, `db.delete`, `db.list` (`db.list` is not yet wired to a control-plane endpoint — the dashboard relies on its own `databases` table as the source of truth, same as sites/backups; `db.list` remains dispatchable via the generic task endpoint for out-of-band reconciliation).
+- **DB tables**: `databases` (`id`, `server_id`, `name`, `owner_user`, `owner_password_enc`, `status`, `created_at`; `UNIQUE(server_id, name)`).
 - **Required permission**: authenticated session.
-- **Security considerations**: identifier allow-list (`^[a-z][a-z0-9_]{0,30}$`) prevents SQL-identifier injection where placeholders can't be used; grants are always single-database-scoped.
-- **Test coverage**: manually verified in a prior session against a real MariaDB; not covered by `go test` (requires a running MariaDB — this environment has none).
-- **Current status**: `PARTIAL`
-- **Completion date**: n/a
-- **Known differences**: MongoDB support, a dedicated dashboard UI, and control-plane persistence of database records (so they show up per-site the way backups now do) don't exist yet.
-- **Reason**: capability-layer work landed before the control-plane persistence/UI layer that backups just got (see BAK-001) — same pattern, not yet applied here. Good candidate for the next iteration.
+- **Security considerations**: identifier allow-list (`^[a-z][a-z0-9_]{0,30}$`) enforced both control-plane-side (before dispatch) and agent-side (defense in depth) prevents SQL-identifier injection where placeholders can't be used; grants are always single-database-scoped; owner passwords are generated server-side (never client-supplied, so never weak/reused/attacker-chosen) and encrypted at rest (AES-256-GCM, `SECURITY.md` §7); every password reveal is audit-logged.
+- **Test coverage**: `packages/capabilities/db_test.go` (new this session) — agent-side identifier/password-length validation (invalid name, invalid owner_user, oversized name, short password, a SQL-injection-shaped name, and a direct table-driven check of `identifierRe`); the real `CREATE DATABASE`/`CREATE USER`/`GRANT` SQL past validation remains manually-verified-only, no MariaDB in this environment. `apps/controlplane/store_test.go` — database create/list/get/delete round trip, cross-server scoping (including that a wrong-server delete attempt cannot remove another server's record), duplicate-name rejection. `apps/controlplane/secret_test.go` — `secretBox` encrypt/decrypt round trip, tamper detection, wrong-key rejection, key-persistence-across-reloads, corrupt-key-file rejection. `apps/controlplane/http_test.go` (`TestDatabaseEndpointsValidateAndScope`) — validation-before-dispatch ordering, not-found boundaries, cross-server scoping at the HTTP layer, and a real encrypt→store→reveal round trip through the API.
+- **Current status**: `COMPLETE` (control-plane persistence/encryption/UI layer, and agent-side identifier validation, all automated-tested); `PARTIAL` overall (the agent's real MariaDB `CREATE DATABASE`/`CREATE USER`/`GRANT`/`DROP` SQL is `BLOCKED_EXTERNAL` for automated verification in this environment — same pre-existing gap as before this session, manually verified against a real MariaDB in a prior session)
+- **Completion date**: 2026-08-22 (control-plane persistence/UI/encryption layer); agent SQL's real-MariaDB automated verification remains `BLOCKED_EXTERNAL`.
+- **Known differences**: MongoDB support and a dedicated phpMyAdmin-equivalent DB admin UI don't exist yet; `db.list` (reconciling the control plane's `databases` table against what actually exists on the agent) isn't wired into the dashboard.
+- **Reason**: MongoDB/DB-admin-UI/reconciliation are separate, larger pieces of work (see the Database Management summary table) — landing the persistence/UI/encryption layer first (this session, following the exact pattern BAK-001 established) was the smaller, immediately valuable increment.
 
 ### BAK-001 — On-demand backup (files/db/full)
 - **Category**: Backups
@@ -296,7 +296,7 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | Status | Count (detailed entries) | Count (summary-table rows) |
 |---|---|---|
 | `COMPLETE` | 3 (SRV-001, BAK-002, ACC-001) | 1 (PROV-006) |
-| `PARTIAL` | 3 (SRV-002, APP-001, APP-002, DB-001, BAK-001 — 5 total, see note) | 6 |
+| `PARTIAL` | 5 (SRV-002, APP-001, APP-002, DB-001, BAK-001) | 6 |
 | `NOT_STARTED` | 0 | ~55 |
 | `BLOCKED_EXTERNAL` | 0 (sub-scoped within BAK-001/BAK-002's db/full-scope MariaDB verification) | 0 |
 | `INTENTIONALLY_NOT_APPLICABLE` | 0 | 1 |
@@ -359,3 +359,12 @@ establish the tracking process and close the single highest-priority gap
   BAK-001/BAK-002 reflecting this session's backup-restore implementation. ~60
   capabilities enumerated overall (detailed + summary), the large majority honestly
   `NOT_STARTED`.
+- **2026-08-22**: DB-001 updated per §7's workflow — picked as the highest-priority
+  `PARTIAL` row per the prioritization order (databases ranks above SSL/backups, and
+  DB-001's own "Reason" field from the 2026-08-17 pass explicitly flagged it as "the
+  next iteration"). Closed the gap it named: control-plane persistence (`databases`
+  table), a dashboard "Databases" panel, and — new relative to BAK-001's pattern —
+  AES-256-GCM encryption at rest for the one class of secret this project stores
+  reversibly (generated DB owner passwords), plus an audited reveal endpoint and 4
+  new agent-side validation tests closing a real (if minor) pre-existing gap in
+  `packages/capabilities`. 16 new test functions total (61 → 77 passing).
