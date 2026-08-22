@@ -2,6 +2,41 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-22 — SSL: fix custom certificate install, add status/renewal wiring
+
+- **Fixed `ssl.install_custom`** (`packages/capabilities/ssl.go`), which previously wrote
+  a certificate/key pair to disk and reloaded nginx without anything in nginx's config
+  ever referencing those files — a fake-success gap: the capability reported success but
+  HTTPS would not actually have served the new certificate. It now validates the
+  certificate/key form a matching, currently-valid pair issued for the exact domain
+  (`crypto/tls.X509KeyPair` + `x509.Certificate.VerifyHostname`, standard library only)
+  *before* writing anything, regenerates the site's nginx vhost with a real
+  `listen 443 ssl` server block plus an HTTP→HTTPS redirect that still serves ACME
+  HTTP-01 challenges, and atomically rolls the vhost file back to its previous contents
+  if the new config fails `nginx -t` — a bad upload can no longer take a working site
+  offline.
+- Added `ssl.status` (agent), which reads the certificate straight off disk (Let's
+  Encrypt or custom path) as the source of truth, independent of whatever the control
+  plane last recorded.
+- Added a "certbot renewal timer" step to `stack.install` (`systemctl enable --now
+  certbot.timer`) — a separate idempotent step, not folded into the certbot package
+  install step, so it still runs on a server whose certbot package an older agent
+  version already installed.
+- Wired SSL into the control plane end-to-end: `sites.ssl_type`/`ssl_expires_at`
+  migration-added columns, `store.updateSiteSSL` (scoped by server ID like `getSite`),
+  three new endpoints (`GET /api/v1/servers/{id}/sites/{siteId}/ssl`,
+  `POST .../ssl/letsencrypt`, `POST .../ssl/custom`), and a dashboard "SSL" panel per
+  site (status badge with expiry, a Let's Encrypt modal, and a custom-certificate upload
+  modal).
+- Added 11 new capability-layer tests (cert/key pair matching, expiry, hostname
+  mismatch, pre-write validation ordering, `ssl.status` none/found cases, generated-vhost
+  content) plus 3 new control-plane tests (SSL persistence scoping, endpoint
+  not-found/validation-before-dispatch boundaries).
+- Updated `docs/SERVERAVATAR_PARITY.md`: APP-015/APP-016 moved from summary-table
+  `PARTIAL` rows to a full detail entry, `PARTIAL` overall (custom-certificate path
+  complete and tested; Let's Encrypt path's real-domain ACME issuance recorded as
+  `BLOCKED_EXTERNAL` — no publicly-resolvable test domain in this environment).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

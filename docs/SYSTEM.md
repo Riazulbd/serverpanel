@@ -102,9 +102,12 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | Site cloning, cross-server migration | ⬜ Phase 2 |
 | Maintenance mode | ⬜ not implemented |
 | Basic auth on a site | ⬜ not implemented |
-| Custom + Let's Encrypt SSL | ✅ `ssl.issue_letsencrypt` (certbot), `ssl.install_custom` |
-| Automatic SSL renewal | ⬜ not implemented (certbot's own renewal timer is not
-  wired up by `stack.install` yet) |
+| Custom + Let's Encrypt SSL | ✅ `ssl.issue_letsencrypt` (certbot), `ssl.install_custom`
+  (validates cert/key match + domain + expiry, real HTTPS vhost, atomic rollback on a
+  bad config), `ssl.status`; dashboard "SSL" panel per site |
+| Automatic SSL renewal | ✅ `stack.install` enables `certbot.timer`; real-domain ACME
+  issuance itself is `BLOCKED_EXTERNAL` in this sandboxed environment (see
+  `SERVERAVATAR_PARITY.md` APP-015/APP-016) |
 | WordPress auto-login/auto-update | ⬜ not implemented |
 | Application enable/disable | ✅ `site.set_status` |
 | Secure file manager | ✅ `file.list/read/write/delete`, scoped + symlink-safe |
@@ -164,11 +167,13 @@ Phase boundaries and full milestone/estimate tables are in `product-plan.md` §6
 is the condensed status:
 
 - **Phase 1 — secure working foundation:** ~90% of the *capability* surface exists and
-  is tested per-capability (see the tables above); the biggest real gaps are backup
-  **restore**, an automated test suite (now added, see `TESTING.md`), SSL auto-renewal,
-  and agent cert auto-rotation. Not "GA-ready" yet, but the architecture and security
-  primitives it depends on (mTLS, allow-listed capabilities, per-app isolation, audit
-  log) are real and proven, not stubs.
+  is tested per-capability (see the tables above); backup **restore** and SSL
+  (custom-certificate validation/wiring + renewal-timer setup) are now closed. The
+  biggest remaining real gaps are agent cert auto-rotation and a real-domain
+  Let's-Encrypt-issuance verification (`BLOCKED_EXTERNAL` — needs a publicly resolvable
+  test domain, see `SERVERAVATAR_PARITY.md` APP-015/APP-016). Not "GA-ready" yet, but the
+  architecture and security primitives it depends on (mTLS, allow-listed capabilities,
+  per-app isolation, audit log) are real and proven, not stubs.
 - **Phase 2 — professional server management:** not started. Git deployment,
   cron/process management, SSH/firewall management UI, remote backups, cross-server
   migration all remain ⬜.
@@ -295,7 +300,7 @@ in `packages/capabilities/capabilities_test.go`), not just convention.
 
 Current capability list: `system.ping`, `service.control`, `diagnostics.basic`,
 `stack.install`, `site.create`, `site.set_php_version`, `site.set_status`,
-`app.wordpress_install`, `ssl.issue_letsencrypt`, `ssl.install_custom`, `db.create`,
+`app.wordpress_install`, `ssl.issue_letsencrypt`, `ssl.install_custom`, `ssl.status`, `db.create`,
 `db.delete`, `db.list`, `file.list`, `file.read`, `file.write`, `file.delete`,
 `backup.run`, `backup.restore`, `logs.tail`. Notably absent (by design, until reviewed
 and added): `git.deploy`, `cron.upsert`, `ssh.*`, `firewall.*`, `agent.self_update`.

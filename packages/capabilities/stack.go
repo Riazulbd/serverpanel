@@ -140,6 +140,26 @@ func phase1LEMPSteps() []installStep {
 			},
 		},
 		{
+			Name: "certbot renewal timer",
+			// A separate step (rather than folded into the certbot install
+			// step above) so a server whose certbot package was already
+			// installed by an older agent version — which would make the
+			// install step's Check short-circuit and skip its Run — still
+			// gets the timer enabled on the next stack.install. Ubuntu's
+			// certbot package usually enables this timer itself, but that's
+			// an assumption the docs' "renewal monitoring" requirement (see
+			// docs/SERVERAVATAR_PARITY.md APP-016) shouldn't rely on
+			// silently holding true.
+			Check: func(ctx context.Context) bool {
+				out, _ := run(ctx, "systemctl", "is-enabled", "certbot.timer")
+				return strings.TrimSpace(out) == "enabled"
+			},
+			Run: func(ctx context.Context) error {
+				_, err := run(ctx, "systemctl", "enable", "--now", "certbot.timer")
+				return err
+			},
+		},
+		{
 			Name:  "ufw",
 			Check: func(ctx context.Context) bool { return isPackageInstalled(ctx, "ufw") },
 			Run:   func(ctx context.Context) error { _, err := aptInstall(ctx, "ufw"); return err },

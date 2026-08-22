@@ -244,6 +244,34 @@ func TestCreateAndListSites(t *testing.T) {
 	if sites[0].Domain != "example.sslip.io" {
 		t.Fatalf("domain = %q, want example.sslip.io", sites[0].Domain)
 	}
+	if sites[0].SSLType != "none" {
+		t.Fatalf("SSLType = %q, want %q for a newly created site", sites[0].SSLType, "none")
+	}
+}
+
+func TestUpdateSiteSSLPersistsAndIsScopedToServerID(t *testing.T) {
+	st := newTestStore(t)
+	serverA, _, _ := st.createServer("web-ssl-a", "", nil, time.Hour, "admin@example.com")
+	serverB, _, _ := st.createServer("web-ssl-b", "", nil, time.Hour, "admin@example.com")
+	site, err := st.createSite(serverA, "ssl.example.com", "sp_ssl", "/home/sites/sp_ssl", "static", "")
+	if err != nil {
+		t.Fatalf("createSite: %v", err)
+	}
+
+	if err := st.updateSiteSSL(serverB, site.ID, "custom", "2030-01-01T00:00:00Z"); err == nil {
+		t.Fatal("expected updateSiteSSL to refuse a site ID under the wrong server")
+	}
+
+	if err := st.updateSiteSSL(serverA, site.ID, "letsencrypt", "2030-01-01T00:00:00Z"); err != nil {
+		t.Fatalf("updateSiteSSL: %v", err)
+	}
+	got, ok := st.getSite(serverA, site.ID)
+	if !ok {
+		t.Fatal("getSite: site not found")
+	}
+	if got.SSLType != "letsencrypt" || got.SSLExpiresAt != "2030-01-01T00:00:00Z" {
+		t.Fatalf("got SSLType=%q SSLExpiresAt=%q, want letsencrypt/2030-01-01T00:00:00Z", got.SSLType, got.SSLExpiresAt)
+	}
 }
 
 func TestGetSiteIsScopedToServerID(t *testing.T) {

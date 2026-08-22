@@ -46,6 +46,9 @@ protected route; there is no route that skips it by omission.
 | `GET` | `/api/v1/servers/{id}/sites/{siteId}/backups` | List backups for a site, newest first |
 | `POST` | `/api/v1/servers/{id}/sites/{siteId}/backups` | Dispatch `backup.run` and persist the resulting backup record |
 | `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a previously recorded backup |
+| `GET` | `/api/v1/servers/{id}/sites/{siteId}/ssl` | Re-read certificate status straight from the agent (`ssl.status`) and persist it |
+| `POST` | `/api/v1/servers/{id}/sites/{siteId}/ssl/letsencrypt` | Dispatch `ssl.issue_letsencrypt` and persist the resulting certificate type/expiry |
+| `POST` | `/api/v1/servers/{id}/sites/{siteId}/ssl/custom` | Dispatch `ssl.install_custom` and persist the resulting certificate type/expiry |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -137,6 +140,37 @@ isn't connected; `422` if `backup.restore` itself failed on the agent (the agent
 error message explains why, and any checkpoint already taken is named in it so it's
 never a silent loss).
 
+### `POST /api/v1/servers/{id}/sites/{siteId}/ssl/letsencrypt`
+```json
+{"email": "admin@example.com"}
+```
+Dispatches `ssl.issue_letsencrypt` with the site's own recorded `domain` (never
+caller-supplied) and the given contact email, 5-minute dispatch timeout (real ACME
+issuance is a network round trip). Only on success is `sites.ssl_type`/`ssl_expires_at`
+updated. → `200` with the updated `siteRecord`. `404` if the site doesn't exist on that
+server; `400` if `email` is missing; `502` if the agent isn't connected; `422` if
+`ssl.issue_letsencrypt` itself failed on the agent.
+
+### `POST /api/v1/servers/{id}/sites/{siteId}/ssl/custom`
+```json
+{"cert_pem": "-----BEGIN CERTIFICATE-----...", "key_pem": "-----BEGIN PRIVATE KEY-----..."}
+```
+Dispatches `ssl.install_custom` with `system_user`/`docroot`/`app_type`/`php_version`
+filled in from the site's own recorded fields (never caller-supplied). The agent
+validates the cert/key pair matches and was issued for the site's exact domain, and is
+currently valid, *before* writing anything to disk or touching nginx's config — a
+mismatched or expired pair is rejected with `422` and nothing changes. → `200` with the
+updated `siteRecord` on success. `404` if the site doesn't exist on that server; `400` if
+either PEM field is missing; `502` if the agent isn't connected.
+
+### `GET /api/v1/servers/{id}/sites/{siteId}/ssl`
+Dispatches `ssl.status`, which re-reads the certificate straight off the agent's disk
+(the same source of truth nginx itself serves from) rather than trusting only what was
+last recorded, and persists the refreshed value. If the agent is unreachable, falls back
+to the last known `siteRecord` rather than failing the request outright (SSL status is
+informational, not authorization-critical). → `200` with the `siteRecord`. `404` if the
+site doesn't exist on that server.
+
 ### `POST /agents/register`
 ```json
 {"token": "<bootstrap token>", "csr_pem": "<PEM-encoded CSR>"}
@@ -177,8 +211,34 @@ The full allow-listed capability names `packages/capabilities.Default()` registe
 (see `SYSTEM.md` §12 for the allow-list rationale): `system.ping`, `service.control`,
 `diagnostics.basic`, `stack.install`, `site.create`, `site.set_php_version`,
 `site.set_status`, `app.wordpress_install`, `ssl.issue_letsencrypt`,
-`ssl.install_custom`, `db.create`, `db.delete`, `db.list`, `file.list`, `file.read`,
-`file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`.
+`ssl.install_custom`, `ssl.status`, `db.create`, `db.delete`, `db.list`, `file.list`,
+`file.read`, `file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`.
+
+### `ssl.install_custom`
+```json
+{"domain": "example.com", "system_user": "site_example_com", "docroot": "/home/sites/site_example_com/public",
+ "app_type": "wordpress", "php_version": "8.3", "temp_domain": "site_example_com.203-0-113-5.sslip.io",
+ "cert_pem": "-----BEGIN CERTIFICATE-----...", "key_pem": "-----BEGIN PRIVATE KEY-----..."}
+```
+Validates `cert_pem`/`key_pem` form a matching, currently-valid pair issued for `domain`
+(`crypto/tls.X509KeyPair` + `x509.Certificate.VerifyHostname` — standard library only,
+no certificate cryptography reimplemented here) *before* writing anything to disk.
+Writes the cert/key under a fixed per-domain directory, regenerates the site's nginx
+vhost with a real `listen 443 ssl` server block referencing them plus an HTTP→HTTPS
+redirect (still serving `/.well-known/acme-challenge/` so a later `ssl.issue_letsencrypt`
+or certbot renewal keeps working), and atomically restores the vhost's previous contents
+if the new config fails `nginx -t` — the site is never left with a config nginx can't
+load. Returns `{"domain", "type": "custom", "issuer", "issued_at", "expires_at"}`.
+
+### `ssl.status`
+```json
+{"domain": "example.com"}
+```
+Reads the certificate currently active for `domain` straight off disk — checking the
+Let's Encrypt live path first, then the custom-certificate path — rather than trusting
+a cached value. Returns `{"domain", "type": "letsencrypt"|"custom"|"none", "issuer",
+"issued_at", "expires_at"}` (`type: "none"` and no other fields when nothing is
+installed).
 
 ### `backup.restore`
 ```json

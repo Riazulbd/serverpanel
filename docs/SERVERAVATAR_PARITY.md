@@ -181,6 +181,24 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Known differences**: no backup/recovery codes for 2FA, no login-history UI, no IP allowlisting, no API token management yet.
 - **Reason**: those are listed Phase 2 account-security items (`product-plan.md` §9) not yet built.
 
+### APP-015/APP-016 — SSL management (Let's Encrypt + custom certificates)
+- **Category**: Application management
+- **Documentation page**: Application Management → "SSL"
+- **Short description**: Issue/renew a Let's Encrypt certificate for a site's domain, or install a customer-supplied certificate/key pair; show current certificate status and expiry.
+- **Our implementation**: `ssl.issue_letsencrypt` (agent) dispatches certbot's own `--nginx` plugin, which edits the site's live vhost in place to add the HTTPS server block and HTTP→HTTPS redirect — certbot is the battle-tested tool for that edit, not reimplemented here. `ssl.install_custom` (agent) is a real, previously-broken capability fixed this pass: it now (1) validates the certificate/key form a matching, currently-valid pair *for the exact domain* via `crypto/tls.X509KeyPair` + `x509.Certificate.VerifyHostname` before writing anything to disk, (2) regenerates the site's nginx vhost with a real `listen 443 ssl` server block referencing the installed cert/key (previously the files were written but nothing in nginx's config ever pointed at them — a fake-success gap flagged during this pass), and (3) atomically rolls the vhost file back to its previous contents if the new config fails `nginx -t`, so a bad upload can never take a working site offline. `ssl.status` (new capability) reads the certificate straight off disk (LE path or our custom path) as the source of truth for what's actually active, independent of whatever the control plane last recorded. `stack.install` gained a dedicated "certbot renewal timer" step (`systemctl enable --now certbot.timer`) that runs even when certbot itself was already installed by an older agent version, closing the "renewal not wired up" gap.
+- **Frontend**: site-detail "SSL" panel — status badge + expiry, "Let's Encrypt" modal (email), "Upload custom certificate" modal (cert/key PEM textareas).
+- **Backend service**: `apiServer.handleIssueLetsEncryptSSL`, `handleInstallCustomSSL`, `handleGetSSLStatus` (`apps/controlplane/ssl.go`) — fill in `system_user`/`docroot`/`app_type`/`php_version` from the stored site record rather than trusting the browser with them, and persist only what the agent actually confirmed (`updateSiteSSL`), the same dispatch-then-persist-on-success pattern as backups/sites.
+- **API endpoint(s)**: `GET /api/v1/servers/{id}/sites/{siteId}/ssl`, `POST .../ssl/letsencrypt`, `POST .../ssl/custom`.
+- **Agent command**: `ssl.issue_letsencrypt`, `ssl.install_custom`, `ssl.status`.
+- **DB tables**: `sites.ssl_type`, `sites.ssl_expires_at` (migration-added columns).
+- **Required permission**: authenticated session.
+- **Security considerations**: private key material is never logged (only its fixed on-disk path ever appears in progress/error messages); a certificate is rejected before any file write if it doesn't match its key, has expired, isn't yet valid, or wasn't issued for the domain being configured; the vhost rewrite for a custom cert can never leave nginx in a broken state (validated + rolled back, not just validated-then-hope).
+- **Test coverage**: `packages/capabilities/ssl_test.go` (cert/key pair matching, expiry, hostname-mismatch, and domain/system_user/docroot/app_type rejection — all before any filesystem write; `ssl.status` none/custom-found cases; generated-vhost content assertions); `apps/controlplane/store_test.go` (`TestUpdateSiteSSLPersistsAndIsScopedToServerID`); `apps/controlplane/http_test.go` (`TestSSLEndpointsRequireARealSite`, `TestSSLEndpointsValidateBeforeDispatch`). A real certbot/Let's-Encrypt HTTP-01 challenge round trip needs a publicly resolvable domain and is not exercised by `go test` — `BLOCKED_EXTERNAL`.
+- **Current status**: `PARTIAL` — the custom-certificate path and `ssl.status` are fully implemented and tested end-to-end (including the rollback-on-bad-config path); the Let's Encrypt path's actual ACME issuance is `BLOCKED_EXTERNAL` for real-domain verification in this environment.
+- **Completion date**: custom-SSL path and status endpoint complete 2026-08-22; LE path's real-domain verification still pending.
+- **Known differences**: no multi-domain (SAN) certificate support yet (one domain per site); no dashboard indicator wired to an alerting system for "expiring soon" beyond the badge's own 14-day highlight; no wildcard-certificate/DNS-01 support (HTTP-01 only, via certbot's nginx plugin).
+- **Reason**: SAN/wildcard/DNS-01 support and expiry alerting are natural next passes but weren't the blocking gap this pass targeted — the blocking gap was `ssl.install_custom` silently doing nothing real, which is now fixed.
+
 ---
 
 ## 2. Summary tables — not yet started
@@ -252,8 +270,7 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | APP-012 | Additional one-click installers (Laravel, Joomla, Mautic, Moodle, PrestaShop, Akaunting, Nextcloud, Statamic, Craft CMS, n8n, Node-RED, Uptime Kuma, NodeBB) | `NOT_STARTED` | WordPress is the only one-click installer today |
 | APP-013 | Log Monitoring Suite (traffic analytics) | `NOT_STARTED` | |
 | APP-014 | Application-level WAF / AI-bot blocker | `NOT_STARTED` | |
-| APP-015 | Custom SSL upload | `PARTIAL` | `ssl.install_custom` capability exists agent-side; no dedicated dashboard UI |
-| APP-016 | Let's Encrypt SSL + auto-renewal | `PARTIAL` | `ssl.issue_letsencrypt` implemented; certbot's own renewal timer not yet wired up by `stack.install` |
+| APP-015/APP-016 | Custom SSL upload / Let's Encrypt SSL + auto-renewal | `PARTIAL` | See detailed entry in §1 — dashboard UI, real vhost wiring, and renewal timer now implemented; LE path's real-domain ACME issuance is `BLOCKED_EXTERNAL` |
 
 ### Database management — not yet started (DB-*)
 | ID | Feature | Status | Notes |
@@ -296,15 +313,16 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | Status | Count (detailed entries) | Count (summary-table rows) |
 |---|---|---|
 | `COMPLETE` | 3 (SRV-001, BAK-002, ACC-001) | 1 (PROV-006) |
-| `PARTIAL` | 3 (SRV-002, APP-001, APP-002, DB-001, BAK-001 — 5 total, see note) | 6 |
-| `NOT_STARTED` | 0 | ~55 |
-| `BLOCKED_EXTERNAL` | 0 (sub-scoped within BAK-001/BAK-002's db/full-scope MariaDB verification) | 0 |
+| `PARTIAL` | 4 (SRV-002, APP-001, APP-002, DB-001, BAK-001, APP-015/APP-016 — 6 total, see note) | 5 |
+| `NOT_STARTED` | 0 | ~54 |
+| `BLOCKED_EXTERNAL` | 0 (sub-scoped within BAK-001/BAK-002's db/full-scope MariaDB verification, and APP-015/APP-016's LE real-domain issuance) | 0 |
 | `INTENTIONALLY_NOT_APPLICABLE` | 0 | 1 |
 
 *Note: BAK-001 and BAK-002 are each simultaneously `COMPLETE` for their files-scope path
 and effectively `PARTIAL`/`BLOCKED_EXTERNAL` for their db/full-scope path pending a real
-MariaDB environment to verify against — see their detail blocks above rather than a
-single flattened status.*
+MariaDB environment to verify against; APP-015/APP-016 is `COMPLETE`-quality for the
+custom-certificate path and `BLOCKED_EXTERNAL` for the Let's Encrypt path's real-domain
+ACME issuance — see their detail blocks above rather than a single flattened status.*
 
 This is an honest, small-fraction-covered snapshot, not a claim of broad parity. The
 overwhelming majority of ServerAvatar's documented capability surface remains
@@ -313,11 +331,21 @@ and `product-plan.md` for the estimates behind it.
 
 ## 4. BLOCKED_EXTERNAL detail
 
-No feature is currently blocked *purely* on missing external credentials in a way that
-would justify a top-level `BLOCKED_EXTERNAL` status (the sub-scoped MariaDB gap in
+- **APP-015/APP-016 (Let's Encrypt issuance)**: `ssl.issue_letsencrypt` dispatches a real
+  `certbot --nginx` invocation and `stack.install` now enables `certbot.timer` for
+  renewal — both implemented and unit-tested at the validation/vhost-generation layer.
+  What's missing is an actual end-to-end run: certbot's ACME HTTP-01 challenge requires a
+  domain that publicly resolves to the test server's IP, which this sandboxed environment
+  doesn't have. Exact test still required: point a real domain's A record at a live
+  Ubuntu 24.04 host running this agent, run `stack.install` then dispatch
+  `ssl.issue_letsencrypt`, and confirm `certbot.timer` performs a renewal at its next
+  scheduled run.
+
+No other feature is currently blocked *purely* on missing external credentials in a way
+that would justify a top-level `BLOCKED_EXTERNAL` status (the sub-scoped MariaDB gap in
 BAK-001/BAK-002 is an environment limitation of *this* session, not a missing
 credential — a real Ubuntu host with MariaDB installed, per `INSTALLATION.md`, resolves
-it without any external account). This section will be populated as provider
+it without any external account). This section will be further populated as provider
 integrations (Cloudflare, cloud storage, cloud compute, payment processors) are
 implemented and reach the point where only real credentials stand between "implemented"
 and "verified end-to-end."
@@ -359,3 +387,12 @@ establish the tracking process and close the single highest-priority gap
   BAK-001/BAK-002 reflecting this session's backup-restore implementation. ~60
   capabilities enumerated overall (detailed + summary), the large majority honestly
   `NOT_STARTED`.
+- **2026-08-22**: closed the next highest-priority documented gap per the workflow above
+  (SSL, priority #8) — APP-015/APP-016. `ssl.install_custom` was previously writing
+  certificate files nothing in nginx's config ever referenced (a fake-success gap: the
+  API call reported success but HTTPS would not actually have worked); it now validates
+  the cert/key pair and domain match before writing anything, regenerates a real HTTPS
+  vhost, and rolls back atomically if `nginx -t` rejects the result. Added `ssl.status`,
+  a dashboard SSL panel, `sites.ssl_type`/`ssl_expires_at` persistence, and a dedicated
+  `stack.install` step that enables certbot's renewal timer even on servers that already
+  had certbot installed by an older agent version.

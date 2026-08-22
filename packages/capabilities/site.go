@@ -185,15 +185,19 @@ func nginxVhostPath(sysUser string) string {
 	return "/etc/nginx/sites-available/" + sysUser + ".conf"
 }
 
-func writeNginxVhost(sysUser, domain, tempDomain, docroot, appType, phpVersion string) error {
-	var locationBlock string
+// vhostLocationBlock returns the app-type-specific `location` directives
+// shared by every vhost this agent generates for a site — the plain
+// HTTP-only vhost site.create writes, and the HTTPS server block
+// ssl.install_custom adds later both serve the same document root the same
+// way, so there is exactly one place that mapping is defined.
+func vhostLocationBlock(sysUser, appType, phpVersion string) string {
 	switch appType {
 	case "static":
-		locationBlock = `    location / {
+		return `    location / {
         try_files $uri $uri/ =404;
     }`
 	default:
-		locationBlock = fmt.Sprintf(`    index index.php index.html;
+		return fmt.Sprintf(`    index index.php index.html;
     location / {
         try_files $uri $uri/ /index.php?$args;
     }
@@ -205,6 +209,10 @@ func writeNginxVhost(sysUser, domain, tempDomain, docroot, appType, phpVersion s
         deny all;
     }`, phpFPMSocketPath(sysUser, phpVersion))
 	}
+}
+
+func writeNginxVhost(sysUser, domain, tempDomain, docroot, appType, phpVersion string) error {
+	locationBlock := vhostLocationBlock(sysUser, appType, phpVersion)
 
 	ipv6Listen := ""
 	if ipv6Available() {

@@ -334,20 +334,22 @@ func (s *store) auditLog() []auditEntry {
 }
 
 type siteRecord struct {
-	ID         string
-	ServerID   string
-	Domain     string
-	SystemUser string
-	Docroot    string
-	AppType    string
-	PHPVersion string
-	Status     string
-	CreatedAt  time.Time
+	ID           string
+	ServerID     string
+	Domain       string
+	SystemUser   string
+	Docroot      string
+	AppType      string
+	PHPVersion   string
+	Status       string
+	SSLType      string // "none", "letsencrypt", or "custom"
+	SSLExpiresAt string
+	CreatedAt    time.Time
 }
 
 func (s *store) listSites(serverID string) []*siteRecord {
 	rows, err := s.db.Query(
-		`SELECT id, server_id, domain, system_user, docroot, app_type, php_version, status, created_at
+		`SELECT id, server_id, domain, system_user, docroot, app_type, php_version, status, ssl_type, ssl_expires_at, created_at
 		 FROM sites WHERE server_id = ? ORDER BY created_at DESC`, serverID)
 	if err != nil {
 		return nil
@@ -356,14 +358,11 @@ func (s *store) listSites(serverID string) []*siteRecord {
 
 	var out []*siteRecord
 	for rows.Next() {
-		var rec siteRecord
-		var createdAt string
-		if err := rows.Scan(&rec.ID, &rec.ServerID, &rec.Domain, &rec.SystemUser, &rec.Docroot,
-			&rec.AppType, &rec.PHPVersion, &rec.Status, &createdAt); err != nil {
+		rec, err := scanSite(rows)
+		if err != nil {
 			continue
 		}
-		rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
-		out = append(out, &rec)
+		out = append(out, rec)
 	}
 	return out
 }
@@ -371,13 +370,14 @@ func (s *store) listSites(serverID string) []*siteRecord {
 func (s *store) createSite(serverID, domain, systemUser, docroot, appType, phpVersion string) (*siteRecord, error) {
 	rec := &siteRecord{
 		ID: randID("site"), ServerID: serverID, Domain: domain, SystemUser: systemUser,
-		Docroot: docroot, AppType: appType, PHPVersion: phpVersion, Status: "active", CreatedAt: time.Now().UTC(),
+		Docroot: docroot, AppType: appType, PHPVersion: phpVersion, Status: "active", SSLType: "none",
+		CreatedAt: time.Now().UTC(),
 	}
 	_, err := s.db.Exec(
-		`INSERT INTO sites (id, server_id, domain, system_user, docroot, app_type, php_version, status, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO sites (id, server_id, domain, system_user, docroot, app_type, php_version, status, ssl_type, ssl_expires_at, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		rec.ID, rec.ServerID, rec.Domain, rec.SystemUser, rec.Docroot, rec.AppType, rec.PHPVersion, rec.Status,
-		rec.CreatedAt.Format(time.RFC3339Nano),
+		rec.SSLType, rec.SSLExpiresAt, rec.CreatedAt.Format(time.RFC3339Nano),
 	)
 	if err != nil {
 		return nil, err
@@ -391,16 +391,41 @@ func (s *store) createSite(serverID, domain, systemUser, docroot, appType, phpVe
 // site X's docroot if X actually belongs to server B).
 func (s *store) getSite(serverID, siteID string) (*siteRecord, bool) {
 	row := s.db.QueryRow(
-		`SELECT id, server_id, domain, system_user, docroot, app_type, php_version, status, created_at
+		`SELECT id, server_id, domain, system_user, docroot, app_type, php_version, status, ssl_type, ssl_expires_at, created_at
 		 FROM sites WHERE id = ? AND server_id = ?`, siteID, serverID)
+	rec, err := scanSite(row)
+	if err != nil {
+		return nil, false
+	}
+	return rec, true
+}
+
+// updateSiteSSL persists the certificate type/expiry ssl.issue_letsencrypt,
+// ssl.install_custom or ssl.status most recently reported for this site —
+// the same "only persist what the agent actually confirmed" pattern
+// createBackup follows, scoped to serverID for the same cross-tenant reason
+// getSite is.
+func (s *store) updateSiteSSL(serverID, siteID, sslType, expiresAt string) error {
+	res, err := s.db.Exec(`UPDATE sites SET ssl_type = ?, ssl_expires_at = ? WHERE id = ? AND server_id = ?`,
+		sslType, expiresAt, siteID, serverID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("site not found")
+	}
+	return nil
+}
+
+func scanSite(row rowScanner) (*siteRecord, error) {
 	var rec siteRecord
 	var createdAt string
 	if err := row.Scan(&rec.ID, &rec.ServerID, &rec.Domain, &rec.SystemUser, &rec.Docroot,
-		&rec.AppType, &rec.PHPVersion, &rec.Status, &createdAt); err != nil {
-		return nil, false
+		&rec.AppType, &rec.PHPVersion, &rec.Status, &rec.SSLType, &rec.SSLExpiresAt, &createdAt); err != nil {
+		return nil, err
 	}
 	rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
-	return &rec, true
+	return &rec, nil
 }
 
 type backupRecord struct {
