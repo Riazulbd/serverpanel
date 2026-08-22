@@ -90,6 +90,14 @@
   .muted { color: var(--muted); }
   .section-title { font-size: 15px; font-weight: 700; margin: 28px 0 10px; }
   footer.hint { color: var(--muted); font-size: 12px; margin-top: 24px; }
+  .chart-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .range-picker { display: flex; gap: 4px; }
+  .range-picker button { padding: 5px 10px; font-size: 12px; }
+  .range-picker button.active { background: var(--primary); border-color: var(--primary); color: #fff; }
+  .chart-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px,1fr)); gap: 16px; margin-top: 12px; }
+  .chart-box { background: var(--gray-bg); border-radius: 8px; padding: 12px; }
+  .chart-box .chart-label { font-size: 12px; color: var(--muted); font-weight: 600; display: flex; justify-content: space-between; }
+  .chart-box canvas { width: 100%; height: 90px; display: block; margin-top: 6px; }
 </style>
 </head>
 <body>
@@ -160,6 +168,22 @@
         </div>
         <div class="stat-grid" id="detailStats"></div>
 
+        <div class="section-title chart-toolbar" style="justify-content:space-between">
+          <span>Monitoring</span>
+          <div class="range-picker" id="metricsRangePicker">
+            <button data-range="1h" onclick="setMetricsRange('1h')">1h</button>
+            <button data-range="6h" onclick="setMetricsRange('6h')">6h</button>
+            <button data-range="24h" class="active" onclick="setMetricsRange('24h')">24h</button>
+            <button data-range="7d" onclick="setMetricsRange('7d')">7d</button>
+          </div>
+        </div>
+        <div class="chart-grid" id="metricsCharts">
+          <div class="chart-box"><div class="chart-label"><span>Load average (1m)</span><span id="metricsLatestLoad">—</span></div><canvas id="chartLoad" height="90"></canvas></div>
+          <div class="chart-box"><div class="chart-label"><span>Memory used</span><span id="metricsLatestMem">—</span></div><canvas id="chartMem" height="90"></canvas></div>
+          <div class="chart-box"><div class="chart-label"><span>Disk used</span><span id="metricsLatestDisk">—</span></div><canvas id="chartDisk" height="90"></canvas></div>
+        </div>
+        <p class="muted" id="metricsEmptyState" style="margin-top:8px"></p>
+
         <div class="section-title">Actions</div>
         <div class="actions-grid">
           <button onclick="dispatchQuick('system.ping', {})">Ping</button>
@@ -226,7 +250,7 @@
 
 <script>
 const API = '/api/v1';
-let state = { me: null, servers: [], selectedServerId: null, sites: [], selectedSiteId: null, pollTimer: null };
+let state = { me: null, servers: [], selectedServerId: null, sites: [], selectedSiteId: null, pollTimer: null, metricsRange: '24h' };
 
 async function api(path, opts) {
   opts = opts || {};
@@ -586,6 +610,85 @@ async function renderServerDetail(id) {
   ];
   document.getElementById('detailStats').innerHTML = stats.map(([label,value]) =>
     `<div class="stat"><div class="label">${label}</div><div class="value">${value}</div></div>`).join('');
+
+  loadMetrics(id);
+}
+
+function setMetricsRange(range) {
+  state.metricsRange = range;
+  document.querySelectorAll('#metricsRangePicker button').forEach(b => b.classList.toggle('active', b.dataset.range === range));
+  if (state.selectedServerId) loadMetrics(state.selectedServerId);
+}
+
+// loadMetrics fetches the server's monitoring history (SYSTEM.md §monitoring)
+// for the currently selected range and redraws the three sparkline charts.
+// Called both on server-detail entry and by the 10s server-list poll (see
+// refreshServers), matching the same cadence the stat tiles already use.
+async function loadMetrics(id) {
+  let resp;
+  try { resp = await api(API + '/servers/' + id + '/metrics?range=' + state.metricsRange); } catch (e) { return; }
+  const samples = resp.samples || [];
+  document.getElementById('metricsEmptyState').textContent = samples.length
+    ? ''
+    : 'No monitoring data yet for this range — the agent reports a heartbeat every 30s once connected.';
+
+  const series = {
+    chartLoad: { key: 'LoadAvg1', color: '#4f46e5', fmt: v => v.toFixed(2), latestEl: 'metricsLatestLoad' },
+    chartMem:  { key: 'MemUsedPct', color: '#16a34a', fmt: v => v.toFixed(0) + '%', latestEl: 'metricsLatestMem' },
+    chartDisk: { key: 'DiskUsedPct', color: '#d97706', fmt: v => v.toFixed(0) + '%', latestEl: 'metricsLatestDisk' },
+  };
+  for (const canvasId in series) {
+    const cfg = series[canvasId];
+    const points = samples.map(s => s[cfg.key]);
+    drawSparkline(canvasId, points, cfg.color);
+    document.getElementById(cfg.latestEl).textContent = points.length ? cfg.fmt(points[points.length - 1]) : '—';
+  }
+}
+
+// drawSparkline renders a minimal line+area chart on a <canvas> with no
+// external charting library, matching this dashboard's no-build-step,
+// single-static-page design (see dashboard.go). Scaled to the canvas
+// element's own CSS size so it stays responsive across the mobile
+// breakpoints without any per-breakpoint chart config.
+function drawSparkline(canvasId, points, color) {
+  const canvas = document.getElementById(canvasId);
+  const dpr = window.devicePixelRatio || 1;
+  const cssWidth = canvas.clientWidth || 240;
+  const cssHeight = canvas.clientHeight || 90;
+  canvas.width = cssWidth * dpr;
+  canvas.height = cssHeight * dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cssWidth, cssHeight);
+
+  if (!points.length) {
+    ctx.fillStyle = '#9ca3af';
+    ctx.font = '12px sans-serif';
+    ctx.fillText('No data', 8, cssHeight / 2);
+    return;
+  }
+
+  const pad = 4;
+  const min = Math.min(...points);
+  const max = Math.max(...points);
+  const range = (max - min) || 1;
+  const stepX = points.length > 1 ? (cssWidth - pad * 2) / (points.length - 1) : 0;
+
+  ctx.beginPath();
+  points.forEach((v, i) => {
+    const x = pad + i * stepX;
+    const y = cssHeight - pad - ((v - min) / range) * (cssHeight - pad * 2);
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  });
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  ctx.lineTo(pad + (points.length - 1) * stepX, cssHeight - pad);
+  ctx.lineTo(pad, cssHeight - pad);
+  ctx.closePath();
+  ctx.fillStyle = color + '1a';
+  ctx.fill();
 }
 
 function formatUptime(secs) {

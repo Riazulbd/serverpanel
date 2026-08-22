@@ -201,6 +201,67 @@ func TestServerCreateListRevokeFlow(t *testing.T) {
 	}
 }
 
+func TestMetricsEndpointReturnsRecordedSamples(t *testing.T) {
+	secureCookies = false
+	defer func() { secureCookies = true }()
+
+	a := newTestAPIServer(t)
+	h := a.routes()
+
+	doJSON(t, h, "POST", "/api/v1/auth/signup", map[string]string{
+		"Email": "monitor@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	rec := doJSON(t, h, "POST", "/api/v1/auth/login", map[string]string{
+		"Email": "monitor@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	cookie := sessionCookie(rec)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers", map[string]any{"Name": "web-metrics"}, cookie)
+	var created struct {
+		ServerID string `json:"server_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+
+	// An unknown range must be rejected rather than silently defaulting.
+	rec = doJSON(t, h, "GET", "/api/v1/servers/"+created.ServerID+"/metrics?range=bogus", nil, cookie)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("bogus range status = %d, want 400", rec.Code)
+	}
+
+	// A server with no heartbeats yet must return an empty (not error) list.
+	rec = doJSON(t, h, "GET", "/api/v1/servers/"+created.ServerID+"/metrics", nil, cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("metrics status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Range   string         `json:"range"`
+		Samples []metricSample `json:"samples"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp.Range != "24h" {
+		t.Fatalf("default range = %q, want 24h", resp.Range)
+	}
+	if len(resp.Samples) != 0 {
+		t.Fatalf("expected no samples yet, got %d", len(resp.Samples))
+	}
+
+	a.store.recordHeartbeat(created.ServerID, heartbeatSnapshot{
+		UptimeSecs: 42, LoadAvg1: 0.4, MemUsedPct: 33, DiskUsedPct: 21, At: time.Now().UTC(),
+	})
+
+	rec = doJSON(t, h, "GET", "/api/v1/servers/"+created.ServerID+"/metrics?range=1h", nil, cookie)
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	if len(resp.Samples) != 1 || resp.Samples[0].MemUsedPct != 33 {
+		t.Fatalf("expected 1 sample with MemUsedPct=33, got %+v", resp.Samples)
+	}
+
+	// Metrics for a server that doesn't exist must 404, not return an empty list.
+	rec = doJSON(t, h, "GET", "/api/v1/servers/srv_nonexistent/metrics", nil, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("metrics for unknown server status = %d, want 404", rec.Code)
+	}
+}
+
 func TestBackupEndpointsRequireARealSite(t *testing.T) {
 	secureCookies = false
 	defer func() { secureCookies = true }()

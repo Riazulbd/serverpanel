@@ -150,4 +150,19 @@ CREATE TABLE IF NOT EXISTS backups (
 	status     TEXT NOT NULL,
 	created_at TEXT NOT NULL
 );
+
+-- metric_samples is the historical time series behind the server monitoring
+-- graphs (SYSTEM.md §monitoring). One row per heartbeat received, pruned to a
+-- bounded retention window at insert time (see store.recordMetricSample) so
+-- this table cannot grow unboundedly on a long-lived control plane.
+CREATE TABLE IF NOT EXISTS metric_samples (
+	id            INTEGER PRIMARY KEY AUTOINCREMENT,
+	server_id     TEXT NOT NULL REFERENCES servers(id),
+	at            TEXT NOT NULL,
+	uptime_secs   INTEGER NOT NULL DEFAULT 0,
+	load_avg_1    REAL NOT NULL DEFAULT 0,
+	mem_used_pct  REAL NOT NULL DEFAULT 0,
+	disk_used_pct REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_metric_samples_server_at ON metric_samples (server_id, at);
 `

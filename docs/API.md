@@ -46,6 +46,7 @@ protected route; there is no route that skips it by omission.
 | `GET` | `/api/v1/servers/{id}/sites/{siteId}/backups` | List backups for a site, newest first |
 | `POST` | `/api/v1/servers/{id}/sites/{siteId}/backups` | Dispatch `backup.run` and persist the resulting backup record |
 | `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a previously recorded backup |
+| `GET` | `/api/v1/servers/{id}/metrics` | Historical load/mem/disk samples for a range (see §2) |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -136,6 +137,15 @@ pre-restore safety backups taken automatically before anything was overwritten,
 isn't connected; `422` if `backup.restore` itself failed on the agent (the agent-side
 error message explains why, and any checkpoint already taken is named in it so it's
 never a silent loss).
+
+### `GET /api/v1/servers/{id}/metrics`
+Query param `range` — one of `1h`, `6h`, `24h`, `7d` (defaults to `24h`); any other
+value → `400`. → `200 {"range": "24h", "samples": [{"At": "...", "UptimeSecs": 0,
+"LoadAvg1": 0, "MemUsedPct": 0, "DiskUsedPct": 0}, ...]}`, oldest first. Samples come
+from `metric_samples`, populated from every heartbeat and pruned to a rolling 7-day
+window per server (`store.recordMetricSample`) — a `7d` request against a
+freshly-connected server simply returns however many samples have accumulated so far,
+never an error. `404` if the server doesn't exist.
 
 ### `POST /agents/register`
 ```json

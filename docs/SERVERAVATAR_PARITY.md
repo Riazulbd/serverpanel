@@ -181,6 +181,25 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Known differences**: no backup/recovery codes for 2FA, no login-history UI, no IP allowlisting, no API token management yet.
 - **Reason**: those are listed Phase 2 account-security items (`product-plan.md` §9) not yet built.
 
+### SRV-008 — Historical server monitoring
+- **Category**: Server Management → Monitoring
+- **Documentation page**: Server Management (Server Load Monitor / Server Health Monitor)
+- **Short description**: Time-series graphs of a server's CPU load, memory, and disk usage, not just its current snapshot.
+- **Expected behavior**: every connected server's resource usage is retained over time and rendered as browsable graphs (1h/6h/24h/7d), not just a live "right now" value.
+- **Our implementation**: every agent heartbeat (`packages/proto.Heartbeat`, every 30s) is now persisted as a row in a new `metric_samples` table (`store.recordMetricSample`), in addition to updating the server's live snapshot as before. A new `GET /api/v1/servers/{id}/metrics?range=1h|6h|24h|7d` endpoint returns the samples for a range (`store.listMetricSamples`), and the dashboard's server-detail view renders three dependency-free `<canvas>` sparkline charts (load average, memory %, disk %) with a range picker, redrawn on the existing 10s poll.
+- **Frontend**: server-detail "Monitoring" section (`web/index.html` — `#metricsCharts`, `setMetricsRange`, `loadMetrics`, `drawSparkline`).
+- **Backend service**: `store.recordMetricSample`/`listMetricSamples` (`store.go`); `gateway.handleConn`'s `MsgHeartbeat` case now also feeds the history table, not just the live snapshot.
+- **API endpoint(s)**: `GET /api/v1/servers/{id}/metrics`.
+- **Agent command**: n/a — reuses the existing heartbeat message, no new agent capability.
+- **DB tables**: `metric_samples` (indexed on `(server_id, at)`).
+- **Required permission**: authenticated session (scoped to servers the session can already see — same boundary as `GET /api/v1/servers/{id}`).
+- **Security considerations**: read-only, no new privileged surface; retention (see below) bounds the data any session can pull back, and the endpoint 404s for a nonexistent server rather than returning an empty list (avoids distinguishing "no data" from "no such server" being a discovery mechanism — see `TestMetricsEndpointReturnsRecordedSamples`).
+- **Test coverage**: `apps/controlplane/store_test.go` (`TestRecordMetricSampleAndList` — retention pruning, ascending order); `apps/controlplane/http_test.go` (`TestMetricsEndpointReturnsRecordedSamples` — range validation, 404 on unknown server, empty vs. populated responses). End-to-end verified manually in this session: real control plane + real agent registered and heartbeating, `curl` confirmed samples accumulating, and a headless-Chromium (Playwright) screenshot confirmed the charts render live data with zero console/page errors.
+- **Current status**: `PARTIAL`
+- **Completion date**: n/a
+- **Known differences**: no alert thresholds/notifications yet (CPU/mem/disk/load-average alerting, SSL-expiry alerts, service-failure alerts — still `NOT_STARTED`, see INT-004 for the notification-channel dependency); no network I/O or disk I/O history (heartbeat doesn't carry those yet); retention is a fixed 7 days server-side, not user-configurable.
+- **Reason**: alerting requires notification channels (INT-004, `NOT_STARTED`) to be useful — building threshold config with no delivery mechanism would be a half-finished feature; sequenced as the next monitoring increment rather than bundled here.
+
 ---
 
 ## 2. Summary tables — not yet started
@@ -232,7 +251,7 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | SRV-005 | Cron job management | `NOT_STARTED` | |
 | SRV-006 | Supervisor/PM2 worker management | `NOT_STARTED` | |
 | SRV-007 | Process list / kill | `NOT_STARTED` | |
-| SRV-008 | Historical monitoring (CPU/RAM/disk/network graphs, alerts) | `PARTIAL` | Heartbeat carries current uptime/load/mem%/disk%; no history retention or alerting yet |
+| SRV-008 | Historical monitoring | see §1 | Moved to a full detail block — history retention + charts now implemented; alerting still `NOT_STARTED` |
 | SRV-009 | Disk cleaner | `NOT_STARTED` | |
 | SRV-010 | Apache / OpenLiteSpeed stack adapters | `NOT_STARTED` | nginx-only today |
 | SRV-011 | Node.js runtime support | `NOT_STARTED` | |
@@ -296,8 +315,8 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | Status | Count (detailed entries) | Count (summary-table rows) |
 |---|---|---|
 | `COMPLETE` | 3 (SRV-001, BAK-002, ACC-001) | 1 (PROV-006) |
-| `PARTIAL` | 3 (SRV-002, APP-001, APP-002, DB-001, BAK-001 — 5 total, see note) | 6 |
-| `NOT_STARTED` | 0 | ~55 |
+| `PARTIAL` | 6 (SRV-002, APP-001, APP-002, DB-001, BAK-001, SRV-008 — see note) | 5 |
+| `NOT_STARTED` | 0 | ~54 |
 | `BLOCKED_EXTERNAL` | 0 (sub-scoped within BAK-001/BAK-002's db/full-scope MariaDB verification) | 0 |
 | `INTENTIONALLY_NOT_APPLICABLE` | 0 | 1 |
 
@@ -359,3 +378,11 @@ establish the tracking process and close the single highest-priority gap
   BAK-001/BAK-002 reflecting this session's backup-restore implementation. ~60
   capabilities enumerated overall (detailed + summary), the large majority honestly
   `NOT_STARTED`.
+- **2026-08-22**: SRV-008 (historical server monitoring) expanded from a one-line
+  summary row into a full detail block. Heartbeats are now persisted to a new
+  `metric_samples` table (7-day retention), exposed via
+  `GET /api/v1/servers/{id}/metrics`, and rendered as dependency-free canvas sparkline
+  charts (load/mem/disk, 1h/6h/24h/7d range picker) on the server-detail dashboard.
+  Verified end-to-end against a real running control plane + real agent (not just
+  `go test`) — see SRV-008's Test coverage note. Alerting remains `NOT_STARTED`,
+  explicitly not bundled into this change (see SRV-008's Reason field).

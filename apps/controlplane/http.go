@@ -49,6 +49,7 @@ func (a *apiServer) routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/servers", a.requireAuth(a.handleCreateServer))
 	mux.HandleFunc("GET /api/v1/servers", a.requireAuth(a.handleListServers))
 	mux.HandleFunc("GET /api/v1/servers/{id}", a.requireAuth(a.handleGetServer))
+	mux.HandleFunc("GET /api/v1/servers/{id}/metrics", a.requireAuth(a.handleListMetrics))
 	mux.HandleFunc("POST /api/v1/servers/{id}/revoke", a.requireAuth(a.handleRevokeServer))
 	mux.HandleFunc("POST /api/v1/servers/{id}/tasks", a.requireAuth(a.handleDispatchTask))
 	mux.HandleFunc("GET /api/v1/servers/{id}/sites", a.requireAuth(a.handleListSites))
@@ -159,6 +160,42 @@ func (a *apiServer) handleGetServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, rec)
+}
+
+// metricRanges maps the dashboard's range picker values to a lookback
+// window and a point-count cap. The agent heartbeats every 30s (see
+// apps/agent/connect.go), so each cap is set comfortably above the maximum
+// number of samples that window can actually contain — the cap exists to
+// bound worst-case response size, not to downsample, so it must never be
+// lower than lookback/heartbeatInterval or listMetricSamples's ORDER BY
+// at ASC LIMIT would silently drop the most recent points.
+var metricRanges = map[string]struct {
+	lookback time.Duration
+	limit    int
+}{
+	"1h":  {time.Hour, 200},
+	"6h":  {6 * time.Hour, 900},
+	"24h": {24 * time.Hour, 3200},
+	"7d":  {7 * 24 * time.Hour, 21500},
+}
+
+func (a *apiServer) handleListMetrics(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, ok := a.store.get(id); !ok {
+		writeErr(w, http.StatusNotFound, "server not found")
+		return
+	}
+	rangeKey := r.URL.Query().Get("range")
+	if rangeKey == "" {
+		rangeKey = "24h"
+	}
+	rng, ok := metricRanges[rangeKey]
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "range must be one of: 1h, 6h, 24h, 7d")
+		return
+	}
+	samples := a.store.listMetricSamples(id, time.Now().UTC().Add(-rng.lookback), rng.limit)
+	writeJSON(w, http.StatusOK, map[string]any{"range": rangeKey, "samples": samples})
 }
 
 func (a *apiServer) handleRevokeServer(w http.ResponseWriter, r *http.Request) {

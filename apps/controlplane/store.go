@@ -225,6 +225,71 @@ func (s *store) recordHeartbeat(serverID string, hb heartbeatSnapshot) {
 	hbJSON, _ := json.Marshal(hb)
 	s.db.Exec(`UPDATE servers SET heartbeat_json = ?, last_seen = ? WHERE id = ?`,
 		string(hbJSON), hb.At.Format(time.RFC3339Nano), serverID)
+	s.recordMetricSample(serverID, hb)
+}
+
+// metricRetention bounds how long historical monitoring samples are kept.
+// At the agent's 30s heartbeat interval this is ~20k rows/server at most —
+// small enough that pruning on every insert (an indexed delete) is cheap,
+// so no separate cleanup job is needed.
+const metricRetention = 7 * 24 * time.Hour
+
+type metricSample struct {
+	At          time.Time
+	UptimeSecs  int64
+	LoadAvg1    float64
+	MemUsedPct  float64
+	DiskUsedPct float64
+}
+
+// recordMetricSample appends one point to the server's monitoring history
+// and prunes anything older than metricRetention for that server, keeping
+// the table's steady-state size bounded regardless of how long the control
+// plane has been running (see SYSTEM.md §22 performance decisions).
+func (s *store) recordMetricSample(serverID string, hb heartbeatSnapshot) {
+	at := hb.At
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	s.db.Exec(
+		`INSERT INTO metric_samples (server_id, at, uptime_secs, load_avg_1, mem_used_pct, disk_used_pct)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		serverID, at.Format(time.RFC3339Nano), hb.UptimeSecs, hb.LoadAvg1, hb.MemUsedPct, hb.DiskUsedPct,
+	)
+	cutoff := time.Now().UTC().Add(-metricRetention).Format(time.RFC3339Nano)
+	s.db.Exec(`DELETE FROM metric_samples WHERE server_id = ? AND at < ?`, serverID, cutoff)
+}
+
+// listMetricSamples returns samples for one server at or after since,
+// oldest first (the order a chart wants to draw them in). limit caps the
+// number of rows returned so a very wide range query can't hand the API
+// layer an unbounded response; callers should pick limit based on the
+// requested range and desired point density.
+func (s *store) listMetricSamples(serverID string, since time.Time, limit int) []metricSample {
+	if limit <= 0 || limit > 25000 {
+		limit = 25000
+	}
+	rows, err := s.db.Query(
+		`SELECT at, uptime_secs, load_avg_1, mem_used_pct, disk_used_pct
+		 FROM metric_samples WHERE server_id = ? AND at >= ? ORDER BY at ASC LIMIT ?`,
+		serverID, since.UTC().Format(time.RFC3339Nano), limit,
+	)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var out []metricSample
+	for rows.Next() {
+		var m metricSample
+		var at string
+		if err := rows.Scan(&at, &m.UptimeSecs, &m.LoadAvg1, &m.MemUsedPct, &m.DiskUsedPct); err != nil {
+			continue
+		}
+		m.At, _ = time.Parse(time.RFC3339Nano, at)
+		out = append(out, m)
+	}
+	return out
 }
 
 func (s *store) get(serverID string) (*serverRecord, bool) {

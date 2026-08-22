@@ -213,6 +213,37 @@ func TestRecordHeartbeatAndList(t *testing.T) {
 	}
 }
 
+func TestRecordMetricSampleAndList(t *testing.T) {
+	st := newTestStore(t)
+	id, _, err := st.createServer("web-6", "prod", nil, time.Hour, "admin@example.com")
+	if err != nil {
+		t.Fatalf("createServer: %v", err)
+	}
+
+	now := time.Now().UTC()
+	old := now.Add(-10 * 24 * time.Hour) // outside metricRetention (7d)
+	st.recordHeartbeat(id, heartbeatSnapshot{UptimeSecs: 1, LoadAvg1: 0.1, MemUsedPct: 10, DiskUsedPct: 20, At: old})
+	st.recordHeartbeat(id, heartbeatSnapshot{UptimeSecs: 2, LoadAvg1: 0.2, MemUsedPct: 11, DiskUsedPct: 21, At: now.Add(-time.Minute)})
+	st.recordHeartbeat(id, heartbeatSnapshot{UptimeSecs: 3, LoadAvg1: 0.3, MemUsedPct: 12, DiskUsedPct: 22, At: now})
+
+	samples := st.listMetricSamples(id, now.Add(-24*time.Hour), 0)
+	if len(samples) != 2 {
+		t.Fatalf("expected 2 samples within the last 24h (old sample pruned), got %d", len(samples))
+	}
+	if samples[0].UptimeSecs != 2 || samples[1].UptimeSecs != 3 {
+		t.Fatalf("expected samples ordered oldest-first, got %+v", samples)
+	}
+
+	// The stale sample must have been pruned outright by recordMetricSample,
+	// not merely excluded by the since filter above.
+	all := st.listMetricSamples(id, time.Time{}, 0)
+	for _, s := range all {
+		if s.UptimeSecs == 1 {
+			t.Fatal("expected sample older than metricRetention to be pruned from metric_samples")
+		}
+	}
+}
+
 func TestAuditLogAppendsEntries(t *testing.T) {
 	st := newTestStore(t)
 	st.log("srv_1", "admin@example.com", "server.created", `name="x"`)

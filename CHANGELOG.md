@@ -2,6 +2,35 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-22 — Historical server monitoring (SRV-008)
+
+- **Persisted heartbeat history**: every agent heartbeat (uptime/load/mem%/disk%,
+  every 30s) now writes a row to a new `metric_samples` table
+  (`store.recordMetricSample`), in addition to updating the server's live snapshot as
+  before. Pruned to a rolling 7-day retention window per server on each insert, so the
+  table's steady-state size stays bounded regardless of how long the control plane has
+  been running (no separate cleanup job needed).
+- **New endpoint**: `GET /api/v1/servers/{id}/metrics?range=1h|6h|24h|7d` returns the
+  server's samples for that range, oldest first, capped well above the maximum number
+  of samples the range could actually contain at the 30s heartbeat interval (so the cap
+  bounds response size without silently downsampling/dropping recent points). 404s for
+  an unknown server, 400s for an invalid `range` value.
+- **Dashboard**: the server-detail view gained a "Monitoring" section — three
+  dependency-free `<canvas>` sparkline charts (load average, memory %, disk %) with a
+  1h/6h/24h/7d range picker, redrawn on the dashboard's existing 10s poll. No charting
+  library added — consistent with the dashboard's single-static-page, no-build-step
+  design.
+- Added `TestRecordMetricSampleAndList` (store-level: retention pruning, ascending
+  order) and `TestMetricsEndpointReturnsRecordedSamples` (HTTP-level: range validation,
+  404 on unknown server, empty-vs-populated responses). Verified end-to-end beyond
+  `go test`: ran a real control-plane + real agent locally, confirmed heartbeat samples
+  accumulating via `curl`, and captured a headless-Chromium (Playwright) screenshot
+  showing the charts rendering live data with zero console/page errors.
+- Updated `SYSTEM.md` (§2, §8, §9, §20), `API.md` (§1, §2), and
+  `docs/SERVERAVATAR_PARITY.md` (SRV-008 promoted from a one-line summary row to a full
+  detail block, status `PARTIAL` — alerting is explicitly the next increment, not
+  bundled into this change since it has no notification channel to deliver to yet).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

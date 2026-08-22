@@ -55,6 +55,8 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | Agent identity, cert rotation, revocation | 🚧 issuance + revocation done; no
   auto-renewal before expiry yet (see `SECURITY.md` §2) |
 | Server health monitoring | ✅ heartbeat: uptime, load, mem%, disk% |
+| Historical monitoring graphs | 🚧 7-day retained history + range-picker charts;
+  no alerting yet (see §20) |
 | Server groups/tags/metadata | ✅ `group`, `tags[]` on server records |
 | Background job queue | ⬜ task dispatch is synchronous request/response today,
   not a durable queue (see `ARCHITECTURE.md` §1 "As built") |
@@ -253,6 +255,8 @@ EXISTS`, applied on every `openDB` call — idempotent, no separate migration to
 | `audit_log` | append-only: seq, timestamp, server, actor, action, detail |
 | `sites` | id, server, domain, system user, docroot, app type, PHP version, status |
 | `backups` | id, server, site, scope, path, size, sha256, status, created_at |
+| `metric_samples` | id, server, at, uptime, load avg (1m), mem%, disk% — one row per
+  heartbeat, pruned to a rolling 7-day window per server on insert |
 
 No ORM — every query is a small, explicit SQL statement in `store.go`. All secrets
 (session tokens, bootstrap tokens) are stored only as SHA-256 hashes; passwords use
@@ -262,8 +266,9 @@ bcrypt (cost 12); nothing is stored in plaintext.
 
 Full list with request/response shapes in `API.md`. Summary: `/api/v1/auth/*`
 (signup/login/logout/TOTP enroll+verify/MFA challenge/me), `/api/v1/servers*` (CRUD,
-revoke, task dispatch, sites, audit), `/agents/register` (the one unauthenticated
-agent-facing endpoint, secured by the bootstrap token itself), `/healthz`.
+revoke, task dispatch, sites, audit, metrics history), `/agents/register` (the one
+unauthenticated agent-facing endpoint, secured by the bootstrap token itself),
+`/healthz`.
 
 ## 10. Background jobs
 
@@ -372,10 +377,22 @@ first) remains a Phase 2 gap — see §21.
 
 ## 20. Monitoring and alerting
 
-Heartbeat-based only: uptime/load/mem%/disk% every connection cycle, surfaced in the
-dashboard's server-detail view. No threshold-based alerting, no email/Slack/Telegram/
-Discord/webhook notifications, no SSL-expiration or backup-failure alerts exist yet —
-all ⬜, scoped to Phase 2 per `product-plan.md` §9.
+Every heartbeat (uptime/load/mem%/disk%, every 30s) both updates the server's live
+snapshot (as before) and is now persisted as a row in `metric_samples`
+(`store.recordMetricSample`), pruned to a rolling 7-day retention window per server on
+each insert (`metricRetention` in `store.go`) so the table can't grow unboundedly. The
+public API exposes this history at `GET /api/v1/servers/{id}/metrics?range=1h|6h|24h|7d`
+(`store.listMetricSamples`), and the dashboard's server-detail view renders it as three
+dependency-free `<canvas>` sparkline charts (load average / memory / disk) with a range
+picker, redrawn on the existing 10s poll (`loadMetrics`/`drawSparkline` in
+`web/index.html`).
+
+Still missing: no threshold-based alerting, no email/Slack/Telegram/Discord/webhook
+notifications, no SSL-expiration or backup-failure alerts, and no network/disk I/O
+history (the heartbeat message doesn't carry those fields yet) — all ⬜, and
+deliberately not started in the same change as the history/graphing work above, since
+alerting without a notification channel to deliver to (Phase 2 per `product-plan.md`
+§9) would be a half-finished feature.
 
 ## 21. Known limitations
 
