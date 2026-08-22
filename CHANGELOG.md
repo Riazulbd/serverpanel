@@ -2,6 +2,44 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-22 — Database control-plane persistence + dashboard UI (DB-005)
+
+- **Closed the DB-005 parity gap**: `db.create`/`db.delete` were previously dispatchable
+  only through the generic task-dispatch endpoint, with no durable control-plane record
+  and no dedicated UI — the same gap `backups` had before the 2026-08-17 pass. Databases
+  now follow the identical dispatch-then-persist-on-success pattern.
+- New `databases` table (`apps/controlplane/db.go`) and store methods
+  (`createDatabase`/`listDatabases`/`getDatabase`/`deleteDatabaseRecord`, each scoped by
+  server ID the same way `getBackup`/`getSite` are — a caller can never address a
+  database belonging to a different server).
+- New `apps/controlplane/databases.go` with three endpoints:
+  `GET`/`POST /api/v1/servers/{id}/sites/{siteId}/databases`,
+  `DELETE /api/v1/servers/{id}/databases/{databaseId}`. Create dispatches `db.create`
+  with a freshly generated 48-hex-char (24-byte, `crypto/rand`) owner password, returned
+  to the caller exactly once in the response and never persisted anywhere — matching the
+  project's existing "no reusable plaintext secret stored merely for convenience" rule.
+  Delete dispatches `db.delete` and only removes the control-plane record after the
+  agent confirms the real drop succeeded, so the record and the actual database can
+  never drift. Database/owner-user names are validated against the same identifier
+  allow-list the agent itself enforces (`^[a-z][a-z0-9_]{0,30}$`), control-plane-side,
+  as defense in depth — a malformed name is rejected with a clear 400 before a doomed
+  dispatch round-trip.
+- New "Databases" panel per site in the dashboard (`web/index.html`): create-database
+  modal (name + optional owner user), a databases table, and a delete button with a
+  destructive-action confirmation dialog. The one-time owner password is surfaced in a
+  result banner immediately after creation.
+- Added test coverage that didn't exist before this pass: `packages/capabilities/db_test.go`
+  (5 new tests covering `handleDBCreate`/`handleDBDelete`'s identifier/password
+  validation layer — exercisable without a real MariaDB instance, since these checks all
+  run before the agent ever opens a DB connection), `store_test.go`
+  (`TestDatabaseCreateListGetDeleteRoundTrip`), and `http_test.go`
+  (`TestDatabaseEndpointsRequireARealSite`, `TestCreateDatabaseRejectsInvalidNames`).
+- Updated `docs/SYSTEM.md` and `docs/SERVERAVATAR_PARITY.md` (DB-005 moved from
+  `NOT_STARTED` to a full `PARTIAL` detail block — still `PARTIAL` because `db.create`/
+  `db.delete` themselves remain `BLOCKED_EXTERNAL`-for-real-MariaDB-verification in this
+  environment, same as the pre-existing DB-001 status; only the persistence/UI layer
+  added in this pass is new).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the
