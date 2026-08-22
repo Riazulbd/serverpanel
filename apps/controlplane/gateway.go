@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -41,13 +42,25 @@ func newGateway(ca *agentCA, st *store) *gateway {
 }
 
 func (g *gateway) listenAndServe(addr string) error {
-	certPEM, keyPEM, err := g.ca.signServerCert([]string{"localhost", "127.0.0.1", "serverpanel-gateway"})
+	ln, err := g.tlsListener(addr)
 	if err != nil {
 		return err
 	}
+	log.Printf("agent gateway (mTLS) listening on %s", ln.Addr())
+	return g.serve(ln)
+}
+
+// tlsListener builds the mTLS listener alone, without entering the blocking
+// accept loop, so tests can bind to an ephemeral port ("127.0.0.1:0") and
+// read back the resolved address before serving.
+func (g *gateway) tlsListener(addr string) (net.Listener, error) {
+	certPEM, keyPEM, err := g.ca.signServerCert([]string{"localhost", "127.0.0.1", "serverpanel-gateway"})
+	if err != nil {
+		return nil, err
+	}
 	cert, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	cfg := &tls.Config{
@@ -57,15 +70,16 @@ func (g *gateway) listenAndServe(addr string) error {
 		MinVersion:   tls.VersionTLS13,
 	}
 
-	ln, err := tls.Listen("tcp", addr, cfg)
-	if err != nil {
-		return err
-	}
-	log.Printf("agent gateway (mTLS) listening on %s", addr)
+	return tls.Listen("tcp", addr, cfg)
+}
 
+func (g *gateway) serve(ln net.Listener) error {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				return err
+			}
 			log.Printf("gateway accept error: %v", err)
 			continue
 		}
@@ -173,8 +187,34 @@ func (g *gateway) handleConn(conn net.Conn) {
 					}
 				}
 			}
+		case proto.MsgRenewRequest:
+			if env.RenewRequest != nil {
+				g.handleRenewRequest(sess, serverID, *env.RenewRequest)
+			}
 		}
 	}
+}
+
+// handleRenewRequest signs a fresh client certificate for the agent that
+// authenticated this very mTLS session. serverID comes exclusively from the
+// already-verified peer certificate's CommonName captured in handleConn —
+// never from the request body — so an agent cannot renew into a different
+// server's identity by crafting its CSR/request.
+func (g *gateway) handleRenewRequest(sess *agentSession, serverID string, req proto.RenewRequest) {
+	certPEM, serial, err := g.ca.signAgentCSR([]byte(req.CSRPEM), serverID, agentCertTTL)
+	reply := proto.Envelope{Type: proto.MsgRenewResponse, RenewResponse: &proto.RenewResponse{}}
+	if err != nil {
+		g.store.log(serverID, "", "agent.cert_renewal_failed", err.Error())
+		reply.RenewResponse.Error = err.Error()
+	} else {
+		g.store.recordRenewedCert(serverID, serial.String())
+		reply.RenewResponse.CertPEM = string(certPEM)
+		reply.RenewResponse.ExpiresAt = time.Now().UTC().Add(agentCertTTL)
+	}
+
+	sess.mu.Lock()
+	_ = sess.enc.Encode(reply)
+	sess.mu.Unlock()
 }
 
 // dispatch sends a task to a connected agent and waits (bounded by ctx) for

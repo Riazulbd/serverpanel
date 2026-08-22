@@ -54,17 +54,30 @@ Properties this guarantees:
   certificate issued by the internal Agent CA, and the agent verifies the gateway's
   certificate/pinned CA to prevent MITM or connecting to a spoofed endpoint.
   **Implemented as described** — see `apps/controlplane/gateway.go` `handleConn`.
-- Client certs are **short-lived** (e.g. 30–90 days) and **auto-rotated**: before
-  expiry, the agent requests renewal authenticated by its current still-valid cert (no
-  shared long-lived secret is ever reused for renewal). If a renewal window is missed
-  (agent offline past expiry), the agent falls back to a manual re-registration flow
-  requiring a fresh bootstrap token from the dashboard — this is an intentional
-  fail-closed behavior, not silent re-trust.
-  **Not yet implemented**: certs are issued with a fixed 30-day TTL
-  (`apps/controlplane/http.go` `handleRegister`) and there is no renewal
-  capability/endpoint yet — an agent whose cert expires must be manually
-  re-registered with a fresh bootstrap token today. Auto-rotation before expiry is
-  tracked as a known gap in `SYSTEM.md`.
+- Client certs are **short-lived** (30 days, `agentCertTTL` in `apps/controlplane/ca.go`)
+  and **auto-rotated**: before expiry, the agent requests renewal authenticated by its
+  current still-valid cert over its already-open mTLS session (no shared long-lived
+  secret is ever reused for renewal, and no new listener/endpoint is needed — see
+  `proto.MsgRenewRequest`/`MsgRenewResponse`, handled in `gateway.go`
+  `handleRenewRequest`). The agent's renewal loop
+  (`apps/agent/connect.go` `certRenewalLoop`) checks hourly and renews once fewer than
+  10 days remain, which — against a 30-day TTL — leaves roughly 10 days and ~240 hourly
+  attempts to recover from a control-plane outage or network partition before the old
+  certificate would otherwise expire. Each renewal also rotates the private key, not
+  just the certificate (`apps/agent/register.go` `newCSR`), bounding how long any one
+  key needs to stay secret. The new identity is persisted to disk via an atomic
+  temp-file-then-rename (`persistRenewedIdentity`) before the in-memory identity is
+  updated, so a crash mid-renewal can never strand the agent with a half-written or
+  mismatched cert/key pair.
+  **Fail-closed by design, not yet auto-recovered**: if a renewal window is missed
+  entirely (agent offline past its cert's expiry), there is still no automatic recovery
+  path — the agent falls back to requiring a fresh bootstrap token from the dashboard.
+  This matches the original intentional fail-closed design; it is a real gap only in
+  the sense that nothing pages an operator when it happens (see `SYSTEM.md` known
+  limitations for what's still open here, e.g. agent-offline alerting).
+  Server certificates (the gateway's own TLS identity, `signServerCert`) are unaffected
+  by this change — they are already reissued on every control-plane restart and are
+  not agent-facing long-lived identities.
 - The Agent CA's private key is held in a dedicated, tightly access-controlled service
   (e.g. `step-ca` or HSM-backed KMS in later stages), separate from the general
   application database, so a control-plane app-tier compromise doesn't automatically

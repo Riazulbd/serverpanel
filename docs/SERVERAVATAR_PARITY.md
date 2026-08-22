@@ -40,19 +40,19 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Documentation page**: Server Management → "Installation (Direct Method)"
 - **Short description**: Connect a VPS to the control plane via a one-time install command.
 - **Expected behavior** (per ServerAvatar's documented workflow): operator creates a server record, gets an install command, runs it on a clean VPS, server appears connected.
-- **Our implementation**: bootstrap-token → mTLS client-certificate exchange (`POST /agents/register`); agent connects outbound to the gateway, no inbound port required.
+- **Our implementation**: bootstrap-token → mTLS client-certificate exchange (`POST /agents/register`); agent connects outbound to the gateway, no inbound port required. Before the issued certificate's 30-day TTL expires, the agent auto-renews over its already-open mTLS session (`proto.MsgRenewRequest`/`MsgRenewResponse`, `gateway.go` `handleRenewRequest`) — no bootstrap token needed again unless a renewal window is missed entirely.
 - **Frontend**: `web/index.html` "+ New server" modal, server list/detail views.
-- **Backend service**: `apiServer.handleCreateServer`, `agentCA`, `gateway`.
-- **API endpoint(s)**: `POST /api/v1/servers`, `POST /agents/register`.
-- **Agent command**: n/a (registration precedes capability dispatch).
+- **Backend service**: `apiServer.handleCreateServer`, `agentCA`, `gateway` (including `handleRenewRequest`).
+- **API endpoint(s)**: `POST /api/v1/servers`, `POST /agents/register`. Renewal is not a new HTTP endpoint — it rides the existing mTLS `Envelope` protocol (see `packages/proto`).
+- **Agent command**: n/a (registration precedes capability dispatch); renewal is handled by `apps/agent/connect.go` `certRenewalLoop`, not a dispatched `Task`.
 - **DB tables**: `servers`, `bootstrap_tokens`, `revoked_certs`.
 - **Required permission**: authenticated session (single-user model today — see ORG-001).
-- **Security considerations**: single-use/short-lived hashed bootstrap tokens; certificate identity independently derived from the mTLS handshake, never trusted from agent-asserted data; revocation checked every handshake.
-- **Test coverage**: `apps/controlplane/http_test.go` (`TestServerCreateListRevokeFlow`, `TestRegisterEndpointRejectsBadToken`), `apps/controlplane/store_test.go`.
+- **Security considerations**: single-use/short-lived hashed bootstrap tokens; certificate identity independently derived from the mTLS handshake, never trusted from agent-asserted data; revocation checked every handshake. Renewal reuses that same identity derivation — the gateway signs the new cert for the `server_id` the connection already authenticated as, never a value the request could assert — and rotates the private key on every renewal, not just the certificate.
+- **Test coverage**: `apps/controlplane/http_test.go` (`TestServerCreateListRevokeFlow`, `TestRegisterEndpointRejectsBadToken`), `apps/controlplane/store_test.go`, `apps/controlplane/gateway_test.go` (`TestRenewRequestIssuesFreshCertAndUpdatesStore`, `TestRenewRequestRejectsMalformedCSR`), `apps/agent/register_test.go`.
 - **Current status**: `COMPLETE`
-- **Completion date**: 2026-08-14
-- **Known differences**: no agent certificate auto-renewal before 30-day expiry yet.
-- **Reason**: scoped out of the initial secure-foundation pass; tracked in `SYSTEM.md` §21.
+- **Completion date**: 2026-08-22
+- **Known differences**: if a renewal window is missed entirely (control plane unreachable for the agent's whole ~10-day renewal buffer), there is still no automated recovery — a fresh bootstrap token and manual re-registration is required, and nothing yet raises a distinguishable alert for that specific cause (tracked under SRV-008/monitoring).
+- **Reason**: fail-closed-on-total-outage is an intentional security tradeoff (no way to silently re-trust an agent past its identity's validity window); the missing alert is a monitoring gap, not a design decision — tracked in `SYSTEM.md` §21.
 
 ### SRV-002 — Hosting stack installation (LEMP)
 - **Category**: Server Management

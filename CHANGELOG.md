@@ -2,6 +2,49 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-22 — Agent certificate auto-renewal
+
+- **Closed the highest-priority security-critical known gap flagged in `SYSTEM.md`**:
+  agent client certificates (30-day TTL, `agentCertTTL` in `apps/controlplane/ca.go`)
+  previously had no renewal path at all — an agent whose cert expired would be
+  permanently locked out (no bootstrap token to fall back on) and require a manual
+  operator re-registration on every single server, every 30 days, forever.
+- Added a new protocol exchange over the *existing* mTLS session rather than a new
+  endpoint: `proto.MsgRenewRequest`/`MsgRenewResponse`. The agent generates a fresh
+  keypair + CSR and sends it; the gateway signs a new cert bound to the `server_id` it
+  already derived from the connection's peer certificate (`gateway.go`
+  `handleRenewRequest`) — never from anything the request itself claims — and updates
+  `store.recordRenewedCert`, which tracks the new serial without disturbing connection
+  status. The superseded serial is deliberately left un-revoked (it simply expires on
+  its original schedule), so a renewal whose response the agent fails to persist can
+  never strand it without any valid certificate.
+- Agent side (`apps/agent/connect.go` `certRenewalLoop`): checks hourly, renews once
+  under 10 days remain (~240 retry attempts before actual expiry), and persists the
+  new cert/key atomically (temp-file-then-rename, `persistRenewedIdentity`) before
+  adopting it in memory — so a crash mid-renewal always leaves either the complete old
+  identity or the complete new one on disk, never a mismatched pair.
+- Fixed a latent, pre-existing concurrency bug surfaced while adding a third
+  concurrent writer to the agent's connection: `heartbeatLoop` and every in-flight
+  task's `TaskEvent` were both calling `json.Encoder.Encode` on the same connection
+  without any synchronization, which can interleave partial writes into invalid JSON
+  on the wire under concurrent load. Introduced a small mutex-guarded `encoder`
+  wrapper shared by all three writers.
+- Refactored `gateway.listenAndServe` into `tlsListener` + `serve` so tests can bind an
+  ephemeral port and drive a real mTLS session end-to-end, rather than only exercising
+  the gateway indirectly through HTTP handlers.
+- Tests: 2 new full mTLS integration tests (`apps/controlplane/gateway_test.go` —
+  successful renewal issues a new serial/cert bound to the right identity and updates
+  the store, and a malformed-CSR renewal is rejected without mutating server state), 1
+  new store test (`recordRenewedCert` updates the serial without touching connection
+  status and leaves the old serial unrevoked), and 5 new agent-side unit tests
+  (`apps/agent/register_test.go` — CSR generation/verification, cert-expiry parsing,
+  and atomic identity persistence including a failure path). Full suite (68 test
+  functions total) passes under both `go test` and `go test -race`.
+- Updated `SYSTEM.md` (§7 agent lifecycle, §11 agent auth summary, known limitations —
+  removed the closed gap, added a narrower one: no distinguishable alert yet if
+  renewal keeps failing all the way to actual expiry) and `SECURITY.md` §2 (mTLS
+  renewal is now marked implemented, with the design rationale inline).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

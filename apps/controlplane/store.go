@@ -172,6 +172,20 @@ func (s *store) markIssuedCert(serverID, serial string) {
 	s.log(serverID, "", "agent.registered", fmt.Sprintf("cert_serial=%s", serial))
 }
 
+// recordRenewedCert updates a server's current certificate serial after a
+// successful mid-life renewal (gateway.go handleConn, MsgRenewRequest).
+// Unlike markIssuedCert this never touches status: the agent renews over
+// its already-live, already-connected session, so "connected" stays
+// accurate throughout. The superseded serial is deliberately left
+// un-revoked — it simply expires naturally at its original TTL — so that a
+// renewal whose response the agent fails to durably persist can't strand
+// the agent with no valid certificate at all; see agentCertTTL's doc
+// comment in ca.go for why the TTL is short enough for this to be safe.
+func (s *store) recordRenewedCert(serverID, serial string) {
+	s.db.Exec(`UPDATE servers SET cert_serial = ? WHERE id = ?`, serial, serverID)
+	s.log(serverID, "", "agent.cert_renewed", fmt.Sprintf("cert_serial=%s", serial))
+}
+
 func (s *store) isRevoked(serial string) bool {
 	var n int
 	s.db.QueryRow(`SELECT COUNT(1) FROM revoked_certs WHERE serial = ?`, serial).Scan(&n)

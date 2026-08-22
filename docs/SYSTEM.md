@@ -233,7 +233,13 @@ Unix-socket MySQL driver (no cgo, no external runtime deps). Lifecycle:
    `/proc/meminfo`, disk% via `syscall.Statfs("/")`) and receiving `Task`s, which it
    dispatches into `packages/capabilities.Default().Dispatch(...)` and reports back as
    `TaskEvent`s.
-3. **Reconnect**: on any connection loss, `main.go`'s loop retries with exponential
+3. **Cert renewal**: also on every connection, `certRenewalLoop` checks hourly whether
+   the current client certificate has under 10 days left (of its 30-day TTL) and, if
+   so, generates a fresh keypair/CSR and sends `MsgRenewRequest` over the same
+   already-authenticated session; the gateway signs a new cert bound to the same
+   `server_id` (never trusting anything else in the request) and the agent persists it
+   atomically before adopting it. See `SECURITY.md` §2.
+4. **Reconnect**: on any connection loss, `main.go`'s loop retries with exponential
    backoff (1s → 30s cap) until the process is signaled to stop (`SIGTERM`/`SIGINT`).
 
 The agent has **no shell-exec entry point in its protocol or code** — see §8.
@@ -279,7 +285,10 @@ See `SECURITY.md` in full. Summary: single-use, short-lived (15 min default),
 hashed-at-rest bootstrap tokens exchanged exactly once for a 30-day mTLS client
 certificate bound (by `CommonName`) to the server's ID; the gateway independently
 derives identity from the certificate on every connection (never trusts anything the
-agent asserts in-band) and checks a revocation list on every handshake.
+agent asserts in-band) and checks a revocation list on every handshake. Before that
+30-day certificate expires, the agent auto-renews it (previous certificate's identity
+proves the request; see §7 point 3 and `SECURITY.md` §2) — the bootstrap token is only
+needed once, at first registration.
 
 ## 12. Privileged operations and allow-list
 
@@ -384,8 +393,13 @@ all ⬜, scoped to Phase 2 per `product-plan.md` §9.
 - No backup scheduling/retention policy — backups are on-demand only.
 - No on-disk agent task journal — a task in flight when the agent process restarts is
   lost, not resumed (see `ARCHITECTURE.md` §4 "As built").
-- No agent certificate auto-renewal before its 30-day expiry (see `SECURITY.md` §2).
 - No agent self-update mechanism (see `SECURITY.md` §3).
+- Agent certificate auto-renewal (see §7 point 3) has no operator-facing alert if it
+  keeps failing all the way up to actual expiry (e.g. the control plane is down for the
+  agent's entire ~10-day renewal window) — the agent just falls silent when its cert
+  finally expires, same as any other agent-offline condition, with nothing calling that
+  specific cause out. Surfacing "renewal attempts exhausted" as a distinguishable alert
+  is a Phase 2 monitoring/alerting item (see §20), not yet built.
 - No background job queue — task dispatch is synchronous and bounded by a 120s HTTP
   timeout; this will not scale past a moderate number of concurrent long-running tasks
   (e.g. many simultaneous `stack.install` runs) without becoming a queue.

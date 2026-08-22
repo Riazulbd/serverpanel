@@ -152,6 +152,34 @@ func TestRevokeServerBlocksReuseOfCertSerial(t *testing.T) {
 	}
 }
 
+func TestRecordRenewedCertUpdatesSerialWithoutTouchingStatus(t *testing.T) {
+	st := newTestStore(t)
+	id, _, err := st.createServer("web-5", "", nil, time.Hour, "admin@example.com")
+	if err != nil {
+		t.Fatalf("createServer: %v", err)
+	}
+	st.markIssuedCert(id, "100")
+	st.setConnected(id, true)
+
+	st.recordRenewedCert(id, "101")
+
+	rec, ok := st.get(id)
+	if !ok {
+		t.Fatal("server should still exist after renewal")
+	}
+	if rec.CertSerial != "101" {
+		t.Fatalf("cert_serial = %q, want %q", rec.CertSerial, "101")
+	}
+	if rec.Status != statusConnected {
+		t.Fatalf("status = %q, want %q (renewal must not touch connection status)", rec.Status, statusConnected)
+	}
+	// The superseded serial is deliberately left un-revoked (see
+	// recordRenewedCert's doc comment) — it simply expires naturally.
+	if st.isRevoked("100") {
+		t.Fatal("previous cert serial should not be revoked by a renewal")
+	}
+}
+
 func TestRevokeServerRejectsUnknownServer(t *testing.T) {
 	st := newTestStore(t)
 	if err := st.revokeServer("srv_doesnotexist", "admin@example.com"); err == nil {
