@@ -485,6 +485,97 @@ func scanBackup(row rowScanner) (*backupRecord, error) {
 	return &rec, nil
 }
 
+type cronJobRecord struct {
+	ID        string
+	ServerID  string
+	SiteID    string
+	Schedule  string
+	Command   string
+	Enabled   bool
+	CreatedAt time.Time
+}
+
+// createCronJob persists a cron job record. Like createBackup, this is
+// only ever called after the corresponding agent capability (cron.create)
+// has already succeeded — the cron_jobs table records jobs that actually
+// exist in the site user's crontab, never merely attempted ones.
+func (s *store) createCronJob(serverID, siteID, id, schedule, command string) (*cronJobRecord, error) {
+	rec := &cronJobRecord{
+		ID: id, ServerID: serverID, SiteID: siteID, Schedule: schedule, Command: command,
+		Enabled: true, CreatedAt: time.Now().UTC(),
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO cron_jobs (id, server_id, site_id, schedule, command, enabled, created_at)
+		 VALUES (?, ?, ?, ?, ?, 1, ?)`,
+		rec.ID, rec.ServerID, rec.SiteID, rec.Schedule, rec.Command, rec.CreatedAt.Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return nil, err
+	}
+	return rec, nil
+}
+
+// listCronJobs returns cron jobs for one site, newest first.
+func (s *store) listCronJobs(serverID, siteID string) []*cronJobRecord {
+	rows, err := s.db.Query(
+		`SELECT id, server_id, site_id, schedule, command, enabled, created_at
+		 FROM cron_jobs WHERE server_id = ? AND site_id = ? ORDER BY created_at DESC`, serverID, siteID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var out []*cronJobRecord
+	for rows.Next() {
+		rec, err := scanCronJob(rows)
+		if err != nil {
+			continue
+		}
+		out = append(out, rec)
+	}
+	return out
+}
+
+// getCronJob looks up one cron job scoped to serverID, for the same
+// cross-tenant-addressing reason getSite/getBackup are scoped to serverID.
+func (s *store) getCronJob(serverID, cronID string) (*cronJobRecord, bool) {
+	row := s.db.QueryRow(
+		`SELECT id, server_id, site_id, schedule, command, enabled, created_at
+		 FROM cron_jobs WHERE id = ? AND server_id = ?`, cronID, serverID)
+	rec, err := scanCronJob(row)
+	if err != nil {
+		return nil, false
+	}
+	return rec, true
+}
+
+func (s *store) setCronJobEnabled(cronID string, enabled bool) {
+	s.db.Exec(`UPDATE cron_jobs SET enabled = ? WHERE id = ?`, boolToInt(enabled), cronID)
+}
+
+func (s *store) deleteCronJob(cronID string) {
+	s.db.Exec(`DELETE FROM cron_jobs WHERE id = ?`, cronID)
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+func scanCronJob(row rowScanner) (*cronJobRecord, error) {
+	var rec cronJobRecord
+	var enabled int
+	var createdAt string
+	if err := row.Scan(&rec.ID, &rec.ServerID, &rec.SiteID, &rec.Schedule, &rec.Command, &enabled, &createdAt); err != nil {
+		return nil, err
+	}
+	rec.Enabled = enabled != 0
+	rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+	return &rec, nil
+}
+
 func randID(prefix string) string {
 	n, _ := rand.Int(rand.Reader, big.NewInt(1<<62))
 	return fmt.Sprintf("%s_%x", prefix, n)

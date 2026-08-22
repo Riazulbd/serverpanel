@@ -181,6 +181,25 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Known differences**: no backup/recovery codes for 2FA, no login-history UI, no IP allowlisting, no API token management yet.
 - **Reason**: those are listed Phase 2 account-security items (`product-plan.md` §9) not yet built.
 
+### SRV-005 — Cron job management
+- **Category**: Server Management
+- **Documentation page**: Server Management → cron/scheduled-task management
+- **Short description**: Create, edit, enable/disable, and delete scheduled tasks that run as a specific system user.
+- **Expected behavior** (per ServerAvatar's documented workflow): pick a schedule (common presets or a custom expression), a command, and which user it runs as; list/toggle/delete existing jobs.
+- **Our implementation**: `cron.create`/`cron.delete`/`cron.set_enabled` — real `crontab(1)` read-modify-write (not a hand-written cron.d file), always scoped to a managed site's own isolated system user (enforced via `os/user.Lookup` + a `/home/sites/` home-directory check, so root or an arbitrary account can never be targeted). Each entry carries an opaque id tag so this agent's entries can be found/toggled/removed without disturbing anything else in that user's crontab. Disabling comments out the whole line (reversible, not a delete). Output redirected to a `cron.log` in the user's home directory.
+- **Frontend**: site-detail "Cron jobs" panel — create modal with named-schedule presets or a custom expression, per-job enable/disable toggle, delete with confirmation.
+- **Backend service**: `apiServer.handleCreateCronJob`/`handleListCronJobs`/`handleSetCronJobEnabled`/`handleDeleteCronJob` (`apps/controlplane/cron.go`).
+- **API endpoint(s)**: `GET`/`POST /api/v1/servers/{id}/sites/{siteId}/cron`, `POST /api/v1/servers/{id}/cron/{cronId}/enabled`, `DELETE /api/v1/servers/{id}/cron/{cronId}`.
+- **Agent command**: `cron.create`, `cron.delete`, `cron.set_enabled`.
+- **DB tables**: `cron_jobs`.
+- **Required permission**: authenticated session; the target system user is always the requested site's own recorded `system_user`, never accepted as free-form client input.
+- **Security considerations**: schedule/command/id are each validated against a narrow character set before the crontab file is ever touched (rejecting `#`/newlines in a command, which would otherwise truncate or split the crontab line cron itself parses); the user-lookup check is what keeps this from ever being a root-cron or arbitrary-account primitive — worst case is exactly what that site's own PHP-FPM pool can already do, since both run as the same unprivileged user.
+- **Test coverage**: `packages/capabilities/cron_test.go` — 7 tests (schedule/command/id validation including the exact injection attempt the character-set check exists for, non-managed-user rejection against a real `root` lookup, enabled/disabled line matching with an adjacent-numeric-id false-positive check, and a "rejected before any system call" test). `apps/controlplane/cron_test.go`/`store_test.go` — 4 tests (CRUD/enable round trip, cross-server scoping, HTTP boundary/validation-before-dispatch). Real `crontab(1)` read/write round trip against a live throwaway system user not exercised in this environment (no real Linux user accounts / `crontab` binary available in the sandboxed test run) — `BLOCKED_EXTERNAL` for that specific integration path; every validation/business-logic branch that doesn't require it is covered.
+- **Current status**: `COMPLETE` (validation, persistence, API, and dashboard UI all implemented and tested; the live-crontab-mutation path is `BLOCKED_EXTERNAL` for a real end-to-end run pending a real Ubuntu host — see `TESTING.md`)
+- **Completion date**: 2026-08-22
+- **Known differences**: no execution-history UI (only the redirected `cron.log` file on the server itself); the `cron_jobs` table is not reconciled against the live crontab, so a job hand-edited outside the dashboard will silently drift out of sync.
+- **Reason**: execution history and live reconciliation are additive follow-ups, not required for the core create/schedule/enable/delete workflow ServerAvatar documents; tracked in `SYSTEM.md` §21 rather than silently omitted.
+
 ---
 
 ## 2. Summary tables — not yet started
@@ -229,7 +248,6 @@ capability surface (per task-brief §3/§101), not just what's already built.
 |---|---|---|---|
 | SRV-003 | SSH/SFTP management, key management, port/root-login controls | `NOT_STARTED` | `product-plan.md` Phase 2 |
 | SRV-004 | Firewall (UFW) rule editing UI, Fail2Ban jail management | `PARTIAL` | Installed with safe defaults by `stack.install`; no rule-editing capability/UI yet |
-| SRV-005 | Cron job management | `NOT_STARTED` | |
 | SRV-006 | Supervisor/PM2 worker management | `NOT_STARTED` | |
 | SRV-007 | Process list / kill | `NOT_STARTED` | |
 | SRV-008 | Historical monitoring (CPU/RAM/disk/network graphs, alerts) | `PARTIAL` | Heartbeat carries current uptime/load/mem%/disk%; no history retention or alerting yet |
@@ -295,10 +313,10 @@ capability surface (per task-brief §3/§101), not just what's already built.
 
 | Status | Count (detailed entries) | Count (summary-table rows) |
 |---|---|---|
-| `COMPLETE` | 3 (SRV-001, BAK-002, ACC-001) | 1 (PROV-006) |
+| `COMPLETE` | 4 (SRV-001, BAK-002, ACC-001, SRV-005) | 1 (PROV-006) |
 | `PARTIAL` | 3 (SRV-002, APP-001, APP-002, DB-001, BAK-001 — 5 total, see note) | 6 |
-| `NOT_STARTED` | 0 | ~55 |
-| `BLOCKED_EXTERNAL` | 0 (sub-scoped within BAK-001/BAK-002's db/full-scope MariaDB verification) | 0 |
+| `NOT_STARTED` | 0 | ~54 |
+| `BLOCKED_EXTERNAL` | 0 (sub-scoped within BAK-001/BAK-002's db/full-scope MariaDB verification, and SRV-005's live-crontab integration path) | 0 |
 | `INTENTIONALLY_NOT_APPLICABLE` | 0 | 1 |
 
 *Note: BAK-001 and BAK-002 are each simultaneously `COMPLETE` for their files-scope path

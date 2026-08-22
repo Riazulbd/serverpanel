@@ -80,7 +80,16 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | SSH/SFTP management, SSH-key mgmt, port mgmt, root-login controls | ⬜ Phase 2 |
 | Automatic security updates | ⬜ Phase 2 (`unattended-upgrades` integration) |
 | Service controls | ✅ `service.control`, allow-listed units/actions only |
-| Cron-job management | ⬜ Phase 2 |
+| Cron-job management | ✅ `cron.create`/`cron.delete`/`cron.set_enabled` — jobs always
+  run as a managed site's own isolated system user (never root or another account),
+  scheduled via the real `crontab(1)` table (read-modify-write, so entries this agent
+  didn't create are left untouched), output redirected to a `cron.log` in that user's
+  home directory. Persisted per-site and exposed via
+  `GET/POST /api/v1/servers/{id}/sites/{siteId}/cron`,
+  `POST /api/v1/servers/{id}/cron/{cronId}/enabled`,
+  `DELETE /api/v1/servers/{id}/cron/{cronId}`. No execution-history log (only the
+  redirected output file) and no live crontab reconciliation (a job hand-edited
+  outside the dashboard is not detected) yet. |
 | Process/worker management | ⬜ Phase 2 |
 | Disk-usage analysis, safe cleanup | ⬜ not started |
 | Server diagnostics | 🚧 `diagnostics.basic` (read-only service-state check); no
@@ -253,6 +262,7 @@ EXISTS`, applied on every `openDB` call — idempotent, no separate migration to
 | `audit_log` | append-only: seq, timestamp, server, actor, action, detail |
 | `sites` | id, server, domain, system user, docroot, app type, PHP version, status |
 | `backups` | id, server, site, scope, path, size, sha256, status, created_at |
+| `cron_jobs` | id, server, site, schedule, command, enabled, created_at |
 
 No ORM — every query is a small, explicit SQL statement in `store.go`. All secrets
 (session tokens, bootstrap tokens) are stored only as SHA-256 hashes; passwords use
@@ -262,8 +272,9 @@ bcrypt (cost 12); nothing is stored in plaintext.
 
 Full list with request/response shapes in `API.md`. Summary: `/api/v1/auth/*`
 (signup/login/logout/TOTP enroll+verify/MFA challenge/me), `/api/v1/servers*` (CRUD,
-revoke, task dispatch, sites, audit), `/agents/register` (the one unauthenticated
-agent-facing endpoint, secured by the bootstrap token itself), `/healthz`.
+revoke, task dispatch, sites, backups, cron jobs, audit), `/agents/register` (the one
+unauthenticated agent-facing endpoint, secured by the bootstrap token itself),
+`/healthz`.
 
 ## 10. Background jobs
 
@@ -291,7 +302,12 @@ uses a literal argv built only from allow-listed or already-validated values (e.
 `service.control`'s `unit`/`action` are checked against `managedUnits`/
 `serviceActions` maps before ever reaching `systemctl`) — never a shell string with
 caller-supplied text concatenated in. This is enforced by tests (`TestServiceControl*`
-in `packages/capabilities/capabilities_test.go`), not just convention.
+in `packages/capabilities/capabilities_test.go`), not just convention. The same pattern
+applies to `cron.create`/`cron.delete`/`cron.set_enabled`: the target user is always
+looked up with `os/user.Lookup` and rejected unless its home directory is under
+`/home/sites/` (a managed site user, never root or an arbitrary account), and the
+schedule/command/id are each validated against their own narrow regex/character-set
+before the crontab file is ever read or written.
 
 Current capability list: `system.ping`, `service.control`, `diagnostics.basic`,
 `stack.install`, `site.create`, `site.set_php_version`, `site.set_status`,
@@ -379,6 +395,10 @@ all ⬜, scoped to Phase 2 per `product-plan.md` §9.
 
 ## 21. Known limitations
 
+- Cron jobs have no execution-history UI (only the redirected `cron.log` file on the
+  server itself) and the control plane's `cron_jobs` table is not reconciled against
+  the live crontab — a job edited or removed outside the dashboard (e.g. directly via
+  SSH) will silently drift out of sync with what the dashboard displays.
 - Backup restore only works on the same server that created the backup — there is no
   cross-server restore (transfer-then-restore) yet (see §19).
 - No backup scheduling/retention policy — backups are on-demand only.

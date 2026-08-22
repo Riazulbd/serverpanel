@@ -2,6 +2,47 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-22 — Cron job management (SRV-005)
+
+- **Implemented cron job management** (`packages/capabilities/cron.go`): `cron.create`,
+  `cron.delete`, `cron.set_enabled`. Jobs are always scheduled for a managed site's own
+  isolated system user — never root or an arbitrary account — enforced by looking the
+  user up with `os/user.Lookup` and rejecting anything whose home directory isn't
+  under `/home/sites/`. Mutations are a real read-modify-write of the user's actual
+  `crontab(1)` table (via `crontab -u <user> -l`/`-`, not a file written directly),
+  so entries this agent didn't create are always left untouched. Each managed entry
+  carries an opaque id tag (`# spcron:<id>`) used to find/remove/toggle it later;
+  disabling an entry comments out the whole line (a no-op for cron, trivially
+  reversible) rather than deleting it. Schedule accepts either the standard 5-field
+  cron expression or a named schedule (`@daily`, `@hourly`, ...); command and id are
+  each validated against a narrow character set before the crontab file is ever read,
+  rejecting anything (`#`, newlines) that could otherwise truncate or split the line
+  cron actually parses. `cron.create`/`cron.delete` are idempotent (a retried create
+  for an id that already landed, or a delete for an id already gone, succeeds without
+  error). Job output is redirected to a `cron.log` file in the site user's own home
+  directory.
+- Wired cron jobs into the control plane end-to-end: a new `cron_jobs` table and store
+  methods (`createCronJob`/`listCronJobs`/`getCronJob`/`setCronJobEnabled`/
+  `deleteCronJob`, scoped by server ID the same way `getSite`/`getBackup` are), four
+  new endpoints (`GET`/`POST /api/v1/servers/{id}/sites/{siteId}/cron`,
+  `POST /api/v1/servers/{id}/cron/{cronId}/enabled`,
+  `DELETE /api/v1/servers/{id}/cron/{cronId}`), and a "Cron jobs" panel per site in the
+  dashboard (schedule/command form with named-schedule presets, an enable/disable
+  toggle, and delete with confirmation).
+- Added 7 new capability-layer tests (schedule/command/id validation, non-managed-user
+  rejection including a real check against `root`, disabled/enabled line matching that
+  a shorter id can't accidentally match a longer one's line, and a "rejected before any
+  system call" test mirroring the existing `handleServiceControl`/`handleSiteCreate`
+  pattern) and 4 new control-plane tests (cron job CRUD/enable round trip, cross-server
+  scoping, and HTTP boundary/validation tests for the new endpoints — including that
+  validation happens before agent dispatch). Full suite: 71 test functions, `go vet`
+  clean.
+- Updated `SYSTEM.md` (feature table, database schema, API summary, allow-list
+  section, known limitations) and `docs/SERVERAVATAR_PARITY.md` (SRV-005 moved from
+  `NOT_STARTED` to `COMPLETE`) to reflect the new capability. Known gap, documented
+  rather than silently left out: no execution-history UI beyond the redirected log
+  file, and no reconciliation against a crontab hand-edited outside the dashboard.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the
