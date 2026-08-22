@@ -2,6 +2,40 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-22 — Database persistence and dashboard UI (DB-005)
+
+- Closed the gap flagged in the parity matrix as "good candidate for the next
+  iteration": the `db.create`/`db.delete` capabilities existed agent-side, but the
+  control plane never recorded a database once created, and there was no dashboard
+  UI for it — the same gap `backup.run`/`backup.restore` had before the previous
+  session's work. Applied the identical dispatch-then-persist-on-success pattern used
+  for sites and backups.
+- New `databases` table (`id`, `server_id`, `site_id`, `name`, `owner_user`, `status`,
+  `created_at`) and `store` methods (`createDatabase`/`listDatabases`/`getDatabase`/
+  `deleteDatabase`, each scoped by server ID the same way `getSite`/`getBackup` are).
+- Three new endpoints (`apps/controlplane/databases.go`):
+  `GET`/`POST /api/v1/servers/{id}/sites/{siteId}/databases`,
+  `DELETE /api/v1/servers/{id}/sites/{siteId}/databases/{dbId}`. The owner password is
+  generated server-side (32 random bytes, hex-encoded) at creation time and returned
+  exactly once in the API response — it is never persisted to the `databases` table
+  or written to the audit log, so the control plane never holds a plaintext database
+  credential at rest.
+- Exported `capabilities.ValidIdentifier` (wrapping the existing `identifierRe`) so the
+  control plane validates a database name with the exact same rule the agent enforces,
+  instead of duplicating the regex.
+- Added a "Databases" panel to the site-detail dashboard view: create-database modal
+  (name only — the owner user and least-privilege grant are implicit), a databases
+  table, and a delete button with a destructive-action confirmation dialog. The
+  one-time owner password is surfaced in a copyable result banner after creation.
+- Added 1 new store test (`TestDatabaseCreateListGetDeleteRoundTrip`, covering the
+  create/list/get/cross-server-scoping/delete round trip) and 2 new HTTP tests
+  (`TestDatabaseEndpointsRequireARealSite`, `TestCreateDatabaseRejectsInvalidName`),
+  following the same structure as the existing backup endpoint tests. Full suite:
+  `go vet`/`gofmt` clean, `go test ./...` green.
+- Updated `SYSTEM.md`, `API.md`, and `SERVERAVATAR_PARITY.md` (DB-001 moved from
+  `PARTIAL` to reflect the new persistence/UI layer; the DB-005 gap it tracked is
+  closed). MongoDB support and a phpMyAdmin-equivalent admin UI remain `NOT_STARTED`.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the
