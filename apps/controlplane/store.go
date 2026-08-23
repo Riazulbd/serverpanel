@@ -489,3 +489,111 @@ func randID(prefix string) string {
 	n, _ := rand.Int(rand.Reader, big.NewInt(1<<62))
 	return fmt.Sprintf("%s_%x", prefix, n)
 }
+
+// generateSecurePassword returns a cryptographically random password of at
+// least 32 characters (hex-encoded, so always printable/copy-pasteable).
+// The control plane generates database owner passwords itself rather than
+// accepting a caller-supplied one — the same reasoning bootstrap tokens
+// already follow: it is returned once in the API response and never
+// persisted, so there is nothing in the databases table an attacker with
+// read access to the control-plane DB could use to reach the database
+// itself.
+func generateSecurePassword() (string, error) {
+	raw := make([]byte, 24)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(raw), nil
+}
+
+type databaseRecord struct {
+	ID        string
+	ServerID  string
+	Name      string
+	OwnerUser string
+	Status    string
+	CreatedAt time.Time
+}
+
+// createDatabase persists a database record. Like createBackup, this is
+// only ever called after db.create has already succeeded on the agent (see
+// databases.go handleCreateDatabase) — the databases table records
+// databases that actually exist on the server, never attempted ones.
+func (s *store) createDatabase(serverID, name, ownerUser string) (*databaseRecord, error) {
+	rec := &databaseRecord{
+		ID: randID("db"), ServerID: serverID, Name: name, OwnerUser: ownerUser,
+		Status: "active", CreatedAt: time.Now().UTC(),
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO databases (id, server_id, name, owner_user, status, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		rec.ID, rec.ServerID, rec.Name, rec.OwnerUser, rec.Status, rec.CreatedAt.Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return nil, err
+	}
+	return rec, nil
+}
+
+func (s *store) listDatabases(serverID string) []*databaseRecord {
+	rows, err := s.db.Query(
+		`SELECT id, server_id, name, owner_user, status, created_at
+		 FROM databases WHERE server_id = ? ORDER BY created_at DESC`, serverID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var out []*databaseRecord
+	for rows.Next() {
+		rec, err := scanDatabase(rows)
+		if err != nil {
+			continue
+		}
+		out = append(out, rec)
+	}
+	return out
+}
+
+// getDatabase looks up one database scoped to serverID, for the same
+// cross-tenant-addressing reason getSite/getBackup are scoped to serverID.
+func (s *store) getDatabase(serverID, databaseID string) (*databaseRecord, bool) {
+	row := s.db.QueryRow(
+		`SELECT id, server_id, name, owner_user, status, created_at
+		 FROM databases WHERE id = ? AND server_id = ?`, databaseID, serverID)
+	rec, err := scanDatabase(row)
+	if err != nil {
+		return nil, false
+	}
+	return rec, true
+}
+
+// deleteDatabase removes a database's record. Like backup restore's
+// relationship to backup.restore, this is only ever called after db.delete
+// has already succeeded on the agent (see databases.go
+// handleDeleteDatabase) — a row is never left behind pointing at a database
+// that no longer exists, and never removed before the agent confirms the
+// drop actually happened.
+func (s *store) deleteDatabase(serverID, databaseID string) error {
+	res, err := s.db.Exec(`DELETE FROM databases WHERE id = ? AND server_id = ?`, databaseID, serverID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("database not found")
+	}
+	return nil
+}
+
+func scanDatabase(row rowScanner) (*databaseRecord, error) {
+	var rec databaseRecord
+	var createdAt string
+	if err := row.Scan(&rec.ID, &rec.ServerID, &rec.Name, &rec.OwnerUser, &rec.Status, &createdAt); err != nil {
+		return nil, err
+	}
+	rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+	return &rec, nil
+}

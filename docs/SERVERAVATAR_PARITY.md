@@ -113,19 +113,19 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Category**: Database Management
 - **Documentation page**: Database Management → "Understanding Database Management"
 - **Short description**: Create a MySQL/MariaDB database with a least-privilege owner user.
-- **Our implementation**: `db.create`/`db.delete`/`db.list` — identifier allow-list regex, `CREATE USER`/`GRANT` scoped to exactly one database (never global), Unix-socket root auth (no stored MySQL root password on disk for this path).
-- **Frontend**: not yet surfaced as its own dashboard panel (capability exists and is dispatchable via generic task dispatch; no dedicated "Databases" tab yet).
-- **Backend service**: `gateway.dispatch` → `packages/capabilities.handleDBCreate/Delete/List`.
-- **API endpoint(s)**: `POST /api/v1/servers/{id}/tasks`.
-- **Agent command**: `db.create`, `db.delete`, `db.list`.
-- **DB tables**: none on the control-plane side yet (no `databases` table — see Known differences).
+- **Our implementation**: `db.create`/`db.delete`/`db.list` — identifier allow-list regex, `CREATE USER`/`GRANT` scoped to exactly one database (never global), Unix-socket root auth (no stored MySQL root password on disk for this path). The control plane now generates the owner password itself (`crypto/rand`, 32 hex chars) rather than accepting one from the caller, returns it exactly once, and never persists it (`apps/controlplane/databases.go`, `store.generateSecurePassword`).
+- **Frontend**: `web/index.html` server-detail "Databases" panel — "+ New database" modal (shows the generated owner password once), databases table, per-row "Delete" with a destructive-action confirmation.
+- **Backend service**: `apiServer.handleCreateDatabase/handleListDatabases/handleDeleteDatabase` (`apps/controlplane/databases.go`), dispatch-then-persist-on-success — same pattern as `handleCreateSite`/`handleCreateBackup`.
+- **API endpoint(s)**: `GET/POST /api/v1/servers/{id}/databases`, `DELETE /api/v1/servers/{id}/databases/{databaseId}`.
+- **Agent command**: `db.create`, `db.delete`, `db.list` (`db.list` not yet wired to a control-plane endpoint — the persisted `databases` table is the dashboard's source of truth instead; see Known differences).
+- **DB tables**: `databases` (`server_id`, `name`, `owner_user`, `status`, `created_at` — deliberately never the owner password).
 - **Required permission**: authenticated session.
-- **Security considerations**: identifier allow-list (`^[a-z][a-z0-9_]{0,30}$`) prevents SQL-identifier injection where placeholders can't be used; grants are always single-database-scoped.
-- **Test coverage**: manually verified in a prior session against a real MariaDB; not covered by `go test` (requires a running MariaDB — this environment has none).
-- **Current status**: `PARTIAL`
-- **Completion date**: n/a
-- **Known differences**: MongoDB support, a dedicated dashboard UI, and control-plane persistence of database records (so they show up per-site the way backups now do) don't exist yet.
-- **Reason**: capability-layer work landed before the control-plane persistence/UI layer that backups just got (see BAK-001) — same pattern, not yet applied here. Good candidate for the next iteration.
+- **Security considerations**: identifier allow-list (`^[a-z][a-z0-9_]{0,30}$}`, exported as `capabilities.ValidIdentifier`) checked at the API layer before dispatch *and* re-enforced agent-side as the authoritative check; grants are always single-database-scoped; delete reads `name`/`owner_user` from the stored record rather than accepting them from the caller, so a request can only ever delete a database this control plane actually created.
+- **Test coverage**: `apps/controlplane/store_test.go` (`TestDatabaseCreateListGetDeleteRoundTrip`, `TestGenerateSecurePasswordIsRandomAndLong`); `apps/controlplane/http_test.go` (`TestDatabaseEndpointsRequireARealDatabase`, `TestCreateDatabaseRejectsInvalidInput` — covers empty/unsafe-identifier rejection before dispatch, and that a failed dispatch never leaves an orphan record). Real `mysql`/`mariadb` round trip (the agent-side `db.create` SQL itself) remains manually verified in a prior session / `BLOCKED_EXTERNAL` for automated re-verification in this environment (no MariaDB here), same as BAK-001/BAK-002.
+- **Current status**: `COMPLETE` (control-plane persistence, API, dashboard UI, and their validation/authorization logic are implemented and automated-tested); the underlying `db.create`/`db.delete` MariaDB SQL itself remains `PARTIAL` per the note above.
+- **Completion date**: 2026-08-23 (control-plane persistence/UI layer; the agent-side SQL predates this).
+- **Known differences**: MongoDB support and a dedicated `db.list`-reconciliation endpoint (to catch databases created outside this control plane) don't exist yet; databases aren't associated with a specific site the way backups are (ServerAvatar's own model ties a database to a server, not necessarily one app, so this matches rather than under-implements the reference behavior).
+- **Reason**: MongoDB support and drift-reconciliation are separable follow-ups, not blockers for the core create/list/delete-with-scoped-user workflow this row tracks.
 
 ### BAK-001 — On-demand backup (files/db/full)
 - **Category**: Backups
@@ -261,7 +261,7 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | DB-002 | MongoDB support | `NOT_STARTED` | |
 | DB-003 | phpMyAdmin / DB admin UI integration | `NOT_STARTED` | |
 | DB-004 | Database process/query monitoring | `NOT_STARTED` | |
-| DB-005 | Control-plane persistence + dashboard UI for databases (mirroring what BAK-001 just got) | `NOT_STARTED` | See DB-001's "Known differences" |
+| DB-005 | Control-plane persistence + dashboard UI for databases | `COMPLETE` | Folded into DB-001's detail block above (2026-08-23) |
 
 ### WordPress Toolkit (WP-*)
 | ID | Feature | Status |
@@ -295,14 +295,16 @@ capability surface (per task-brief §3/§101), not just what's already built.
 
 | Status | Count (detailed entries) | Count (summary-table rows) |
 |---|---|---|
-| `COMPLETE` | 3 (SRV-001, BAK-002, ACC-001) | 1 (PROV-006) |
-| `PARTIAL` | 3 (SRV-002, APP-001, APP-002, DB-001, BAK-001 — 5 total, see note) | 6 |
-| `NOT_STARTED` | 0 | ~55 |
-| `BLOCKED_EXTERNAL` | 0 (sub-scoped within BAK-001/BAK-002's db/full-scope MariaDB verification) | 0 |
+| `COMPLETE` | 4 (SRV-001, BAK-002, ACC-001, DB-001) | 2 (PROV-006, DB-005) |
+| `PARTIAL` | 3 (SRV-002, APP-001, APP-002, BAK-001 — 4 total, see note) | 6 |
+| `NOT_STARTED` | 0 | ~53 |
+| `BLOCKED_EXTERNAL` | 0 (sub-scoped within BAK-001/BAK-002/DB-001's db/full-scope MariaDB verification) | 0 |
 | `INTENTIONALLY_NOT_APPLICABLE` | 0 | 1 |
 
-*Note: BAK-001 and BAK-002 are each simultaneously `COMPLETE` for their files-scope path
-and effectively `PARTIAL`/`BLOCKED_EXTERNAL` for their db/full-scope path pending a real
+*Note: BAK-001, BAK-002, and DB-001 are each simultaneously `COMPLETE` for the part of
+the feature that doesn't require a real MariaDB in this sandboxed environment
+(control-plane persistence, API, dashboard UI, validation/authorization) and
+`PARTIAL`/`BLOCKED_EXTERNAL` for the underlying agent-side SQL round trip pending a real
 MariaDB environment to verify against — see their detail blocks above rather than a
 single flattened status.*
 
@@ -354,6 +356,11 @@ establish the tracking process and close the single highest-priority gap
 
 ## Change history
 
+- **2026-08-23**: DB-001/DB-005 — added control-plane persistence (`databases` table),
+  a dispatch-then-persist API (`GET/POST /api/v1/servers/{id}/databases`, `DELETE
+  .../databases/{databaseId}`), and a dashboard "Databases" panel, closing the gap the
+  previous entry flagged as the next-iteration candidate. The owner password is now
+  generated server-side and returned once, never persisted. 4 new automated tests.
 - **2026-08-17**: initial version. Established the tracking process; recorded
   SRV-001/002, APP-001/002, DB-001, ACC-001 (pre-existing work) at accurate status, and
   BAK-001/BAK-002 reflecting this session's backup-restore implementation. ~60

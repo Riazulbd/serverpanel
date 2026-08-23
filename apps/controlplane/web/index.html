@@ -174,6 +174,13 @@
           <button onclick="openNewSiteModal()">+ New site</button>
         </div>
         <div id="sitesList" class="muted">No sites yet.</div>
+
+        <div class="section-title" style="display:flex;justify-content:space-between;align-items:center">
+          <span>Databases</span>
+          <button onclick="openNewDatabaseModal()">+ New database</button>
+        </div>
+        <div id="databaseResult" class="task-result hidden"></div>
+        <div id="databasesList" class="muted">No databases yet.</div>
       </div>
     </div>
 
@@ -442,11 +449,91 @@ async function openServerDetail(id) {
   state.selectedServerId = id;
   showTab('serverDetail');
   document.getElementById('taskResult').classList.add('hidden');
+  document.getElementById('databaseResult').classList.add('hidden');
   await renderServerDetail(id);
   try {
     const sites = await api(API + '/servers/' + id + '/sites');
     renderSites(sites || []);
   } catch (e) {}
+  await refreshDatabases();
+}
+
+async function refreshDatabases() {
+  try {
+    const databases = await api(API + '/servers/' + state.selectedServerId + '/databases') || [];
+    renderDatabases(databases);
+  } catch (e) {}
+}
+
+function renderDatabases(databases) {
+  const el = document.getElementById('databasesList');
+  if (!databases.length) { el.textContent = 'No databases yet.'; return; }
+  el.innerHTML = '<table><thead><tr><th>Name</th><th>Owner user</th><th>Status</th><th>Created</th><th></th></tr></thead><tbody>' +
+    databases.map(d => `
+      <tr>
+        <td>${escapeHtml(d.Name)}</td>
+        <td class="muted">${escapeHtml(d.OwnerUser)}</td>
+        <td>${escapeHtml(d.Status)}</td>
+        <td class="muted">${new Date(d.CreatedAt).toLocaleString()}</td>
+        <td><button class="danger" onclick="deleteDatabase('${d.ID}')">Delete</button></td>
+      </tr>`).join('') +
+    '</tbody></table>';
+}
+
+function openNewDatabaseModal() {
+  const root = document.getElementById('modalRoot');
+  root.innerHTML = `
+    <div class="modal-backdrop" onclick="if(event.target===this) closeModalNoRefresh()">
+      <div class="modal">
+        <h2>New database</h2>
+        <div class="field"><label>Database name</label><input id="newDbName" placeholder="e.g. wp_example"></div>
+        <div class="field"><label>Owner username (optional, defaults to the database name)</label><input id="newDbOwner" placeholder="e.g. wp_example"></div>
+        <p class="muted">A strong owner password is generated automatically and shown once below — copy it now, it is never stored or shown again.</p>
+        <button class="primary" style="width:100%" onclick="createDatabase()">Create database</button>
+        <div class="error" id="newDbError"></div>
+        <p class="muted" id="newDbStatus"></p>
+        <pre class="code hidden" id="newDbPassword"></pre>
+      </div>
+    </div>`;
+}
+
+async function createDatabase() {
+  const name = document.getElementById('newDbName').value.trim();
+  const owner = document.getElementById('newDbOwner').value.trim();
+  const err = document.getElementById('newDbError');
+  const status = document.getElementById('newDbStatus');
+  err.textContent = '';
+  status.textContent = 'Creating database and scoped owner user...';
+  try {
+    const res = await api(API + '/servers/' + state.selectedServerId + '/databases', {
+      method: 'POST', body: JSON.stringify({name, owner_user: owner})
+    });
+    status.textContent = 'Database created. Owner password (shown once, copy it now):';
+    const pwd = document.getElementById('newDbPassword');
+    pwd.textContent = res.owner_password;
+    pwd.classList.remove('hidden');
+    await refreshDatabases();
+  } catch (e) {
+    status.textContent = '';
+    err.textContent = e.message;
+  }
+}
+
+async function deleteDatabase(databaseId) {
+  if (!confirm('Delete this database and its owner user? This permanently drops the database — any application using it will break.')) return;
+  const box = document.getElementById('databaseResult');
+  box.className = 'task-result running';
+  box.textContent = 'Deleting database...';
+  box.classList.remove('hidden');
+  try {
+    await api(API + '/servers/' + state.selectedServerId + '/databases/' + databaseId, {method: 'DELETE'});
+    box.className = 'task-result ok';
+    box.textContent = 'Database deleted.';
+    await refreshDatabases();
+  } catch (e) {
+    box.className = 'task-result fail';
+    box.textContent = 'Delete failed: ' + e.message;
+  }
 }
 
 function renderSites(sites) {
