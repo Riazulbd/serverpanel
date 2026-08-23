@@ -2,6 +2,30 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-23 — Verified SSL auto-renewal in stack.install
+
+- **Added an explicit "certbot automatic renewal timer" install step**
+  (`packages/capabilities/stack.go`), closing the gap `SYSTEM.md` had flagged:
+  `stack.install` installed certbot but never confirmed its systemd renewal timer
+  (`certbot.timer`) was actually enabled and active — on a minimal/container-style
+  base image where package post-install scripts can't auto-start services
+  (a `policy-rc.d` block), a certificate `ssl.issue_letsencrypt` issues would have
+  silently had nothing renewing it, expiring after ~90 days with no warning.
+- The new step checks `systemctl is-active certbot.timer` (idempotent, like every
+  other install step) and, if not active, verifies the unit file actually exists
+  before enabling it — if it doesn't (a certbot package build that only ships
+  cron-based renewal), the step fails loudly with a pointer to
+  `/etc/cron.d/certbot`, rather than reporting a false success.
+- Added `certbot.timer` to the agent's `service.control`/`diagnostics.basic`
+  allow-list, so its renewal-timer status is visible through the same "run
+  diagnostics" flow as every other managed service, and an operator can manually
+  restart it without a new capability.
+- 3 new structural tests (`TestPhase1LEMPStepsAreWellFormed`,
+  `TestPhase1LEMPStepsIncludeCertbotRenewalTimer`,
+  `TestCertbotTimerUnitExistsChecksBothPackagePaths`) — the actual renewal
+  behavior 90 days out remains unverifiable without a real Let's Encrypt-reachable
+  host, tracked as `BLOCKED_EXTERNAL` in `docs/SERVERAVATAR_PARITY.md` (APP-016).
+
 ## 2026-08-23 — Database control-plane persistence and dashboard UI
 
 - **Added a `databases` table and full CRUD around it** (`apps/controlplane/db.go`,

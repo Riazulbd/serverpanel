@@ -140,6 +140,37 @@ func phase1LEMPSteps() []installStep {
 			},
 		},
 		{
+			Name: "certbot automatic renewal timer",
+			// The certbot apt package normally enables its own systemd timer
+			// (certbot.timer, which runs the renewal check twice daily, per
+			// Let's Encrypt's own client recommendations) automatically on
+			// install. Minimal/container-style base images sometimes ship
+			// with automatic service auto-start disabled at the
+			// package-manager level (a policy-rc.d that blocks postinst
+			// "enable" calls), which silently leaves certbot.timer inactive
+			// — every certificate ssl.issue_letsencrypt issues would then
+			// simply expire in ~90 days with nothing renewing it. This step
+			// makes "renewal is actually running" an explicitly verified
+			// part of the install rather than an assumption about package
+			// defaults, closing the gap SYSTEM.md previously flagged.
+			Check: func(ctx context.Context) bool {
+				out, err := run(ctx, "systemctl", "is-active", "certbot.timer")
+				return err == nil && strings.TrimSpace(out) == "active"
+			},
+			Run: func(ctx context.Context) error {
+				if !certbotTimerUnitExists() {
+					// Not fatal on its own — cron-based renewal
+					// (/etc/cron.d/certbot, shipped by some certbot package
+					// builds) may already cover it — but this must never be
+					// a silent success: the operator needs to know renewal
+					// wasn't verified.
+					return fmt.Errorf("certbot.timer systemd unit not found after installing certbot; automatic renewal could not be verified (check /etc/cron.d/certbot for a cron-based fallback)")
+				}
+				_, err := run(ctx, "systemctl", "enable", "--now", "certbot.timer")
+				return err
+			},
+		},
+		{
 			Name:  "ufw",
 			Check: func(ctx context.Context) bool { return isPackageInstalled(ctx, "ufw") },
 			Run:   func(ctx context.Context) error { _, err := aptInstall(ctx, "ufw"); return err },
@@ -185,6 +216,18 @@ func phase1LEMPSteps() []installStep {
 			Run:   func(ctx context.Context) error { _, err := aptInstall(ctx, "fail2ban"); return err },
 		},
 	}
+}
+
+// certbotTimerUnitExists reports whether the installed certbot package
+// shipped a certbot.timer systemd unit file, checking both locations
+// Debian/Ubuntu packages use depending on how the package was built.
+func certbotTimerUnitExists() bool {
+	for _, p := range []string{"/lib/systemd/system/certbot.timer", "/usr/lib/systemd/system/certbot.timer"} {
+		if _, err := os.Stat(p); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // currentSSHPort reads the configured SSH port out of sshd_config,

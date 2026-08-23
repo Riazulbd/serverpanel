@@ -253,7 +253,7 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | APP-013 | Log Monitoring Suite (traffic analytics) | `NOT_STARTED` | |
 | APP-014 | Application-level WAF / AI-bot blocker | `NOT_STARTED` | |
 | APP-015 | Custom SSL upload | `PARTIAL` | `ssl.install_custom` capability exists agent-side; no dedicated dashboard UI |
-| APP-016 | Let's Encrypt SSL + auto-renewal | `PARTIAL` | `ssl.issue_letsencrypt` implemented; certbot's own renewal timer not yet wired up by `stack.install` |
+| APP-016 | Let's Encrypt SSL + auto-renewal | `PARTIAL` | `ssl.issue_letsencrypt` implemented; `stack.install` now has an explicit "certbot automatic renewal timer" step (`packages/capabilities/stack.go`) that verifies/enables `certbot.timer` rather than assuming the package default — fails the install loudly (not silently) if it can't confirm renewal is active. Structural coverage: `TestPhase1LEMPStepsIncludeCertbotRenewalTimer`, `TestCertbotTimerUnitExistsChecksBothPackagePaths`. Still `PARTIAL` because the actual renewal (certbot re-issuing and reloading nginx 90 days later) is unverified in any automated way — that requires a real Let's Encrypt-reachable host and time, or a forced `certbot renew --dry-run`, neither of which this session's sandboxed environment can do (`BLOCKED_EXTERNAL` for that specific end-to-end check) |
 
 ### Database management — not yet started (DB-*)
 | ID | Feature | Status | Notes |

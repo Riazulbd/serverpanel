@@ -103,8 +103,10 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | Maintenance mode | ⬜ not implemented |
 | Basic auth on a site | ⬜ not implemented |
 | Custom + Let's Encrypt SSL | ✅ `ssl.issue_letsencrypt` (certbot), `ssl.install_custom` |
-| Automatic SSL renewal | ⬜ not implemented (certbot's own renewal timer is not
-  wired up by `stack.install` yet) |
+| Automatic SSL renewal | ✅ `stack.install` now has an explicit, verified
+  "certbot automatic renewal timer" step (`systemctl enable --now certbot.timer`,
+  checked rather than assumed from package defaults) — fails loudly rather than
+  silently if the timer unit can't be found/enabled |
 | WordPress auto-login/auto-update | ⬜ not implemented |
 | Application enable/disable | ✅ `site.set_status` |
 | Secure file manager | ✅ `file.list/read/write/delete`, scoped + symlink-safe |
@@ -386,7 +388,9 @@ all ⬜, scoped to Phase 2 per `product-plan.md` §9.
 - No backup scheduling/retention policy — backups are on-demand only.
 - No on-disk agent task journal — a task in flight when the agent process restarts is
   lost, not resumed (see `ARCHITECTURE.md` §4 "As built").
-- No agent certificate auto-renewal before its 30-day expiry (see `SECURITY.md` §2).
+- No agent certificate auto-renewal before its 30-day expiry (see `SECURITY.md` §2)
+  — note this is a different gap from SSL *website* certificate renewal
+  (certbot/Let's Encrypt), which `stack.install` now verifies is wired up.
 - No agent self-update mechanism (see `SECURITY.md` §3).
 - No background job queue — task dispatch is synchronous and bounded by a 120s HTTP
   timeout; this will not scale past a moderate number of concurrent long-running tasks
