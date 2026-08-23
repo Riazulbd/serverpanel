@@ -287,6 +287,74 @@ func TestCreateBackupRejectsInvalidScope(t *testing.T) {
 	}
 }
 
+func TestCreateDatabaseRejectsInvalidNameBeforeDispatch(t *testing.T) {
+	secureCookies = false
+	defer func() { secureCookies = true }()
+
+	a := newTestAPIServer(t)
+	h := a.routes()
+
+	doJSON(t, h, "POST", "/api/v1/auth/signup", map[string]string{
+		"Email": "ops3@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	rec := doJSON(t, h, "POST", "/api/v1/auth/login", map[string]string{
+		"Email": "ops3@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	cookie := sessionCookie(rec)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers", map[string]any{"Name": "web-13"}, cookie)
+	var created struct {
+		ServerID string `json:"server_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+
+	// Missing name.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/databases", map[string]any{}, cookie)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("create database with no name: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// Name that doesn't match the identifier allow-list (uppercase, and too
+	// long) must be rejected before any dispatch is attempted.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/databases",
+		map[string]any{"name": "Not Valid; DROP TABLE users;--"}, cookie)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("create database with invalid name: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// A database on a site that doesn't exist under this server must 404
+	// before dispatch, the same not-found-before-dispatch pattern the site/
+	// backup endpoints use.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/databases",
+		map[string]any{"name": "wp_example", "site_id": "site_nonexistent"}, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("create database for nonexistent site: status = %d, want 404, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// A valid, well-formed request against a server with no connected agent
+	// should fail as a gateway/dispatch error, not a validation error —
+	// proving validation happens before dispatch (same boundary
+	// TestCreateBackupRejectsInvalidScope asserts for backups).
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/databases",
+		map[string]any{"name": "wp_example"}, cookie)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("create database with no agent connected: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// Deleting a database that was never recorded must 404 before dispatch.
+	rec = doJSON(t, h, "DELETE", "/api/v1/servers/"+created.ServerID+"/databases/db_nonexistent", nil, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("delete nonexistent database: status = %d, want 404, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// An empty list (no databases created — dispatch never succeeded above)
+	// must still return 200 with an empty/nil array, not error.
+	rec = doJSON(t, h, "GET", "/api/v1/servers/"+created.ServerID+"/databases", nil, cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list databases: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestRegisterEndpointRejectsBadToken(t *testing.T) {
 	a := newTestAPIServer(t)
 	h := a.routes()

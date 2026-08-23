@@ -2,6 +2,41 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-23 — Database management: control-plane persistence and dashboard UI
+
+- **Closed DB-005** (`docs/SERVERAVATAR_PARITY.md`), the gap DB-001 had explicitly
+  flagged as the recommended next candidate: databases created via `db.create` now get
+  the same durable-record + dashboard-panel treatment backups already have, instead of
+  existing only as a one-off task-dispatch call with no listing or history.
+- Added a `databases` table (`server_id`, optional `site_id` association, `name`,
+  `owner_user`, `status`, `created_at` — deliberately no password column) and store
+  methods `createDatabase`/`listDatabases`/`getDatabase`/`deleteDatabaseRecord`, the
+  last two scoped by server ID the same way `getSite`/`getBackup` are.
+- New endpoints (`apps/controlplane/databases.go`): `POST`/`GET
+  /api/v1/servers/{id}/databases`, `DELETE /api/v1/servers/{id}/databases/{databaseId}`.
+  Creation dispatches `db.create` with a server-generated 32-character
+  (`crypto/rand`-backed) owner password — never accepted from the caller, never
+  persisted, returned exactly once in the response body, the same show-once handling
+  bootstrap tokens already get. Deletion reads the database's own recorded
+  `name`/`owner_user` from the store (never trusting client-supplied values) before
+  dispatching `db.delete`, so the endpoint can only ever act on a database this control
+  plane actually created and recorded.
+- Exported `capabilities.IdentifierRe` (previously unexported `identifierRe`) so the
+  control plane validates database/user names against the exact same allow-list the
+  agent enforces before ever dispatching a task, instead of maintaining a second regex
+  that could drift out of sync.
+- Added a "Databases" panel to the server-detail dashboard view — create modal (name,
+  optional owner user, optional site association), a table with a delete action, and a
+  one-time password display after creation — mirroring the existing Sites/Backups
+  panels.
+- Added `TestCreateListGetDeleteDatabase` (`apps/controlplane/store_test.go`) and
+  `TestCreateDatabaseRejectsInvalidNameBeforeDispatch`
+  (`apps/controlplane/http_test.go`), bringing the suite to 63 test functions, all
+  passing (`go build`, `go vet`, `go test ./...` all clean). The underlying
+  `db.create`/`db.delete` capability execution against a real MariaDB remains the same
+  environment-limited gap already recorded under DB-001 in the parity matrix — this
+  change is scoped to the control-plane/API/UI layer around it.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

@@ -46,6 +46,9 @@ protected route; there is no route that skips it by omission.
 | `GET` | `/api/v1/servers/{id}/sites/{siteId}/backups` | List backups for a site, newest first |
 | `POST` | `/api/v1/servers/{id}/sites/{siteId}/backups` | Dispatch `backup.run` and persist the resulting backup record |
 | `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a previously recorded backup |
+| `GET` | `/api/v1/servers/{id}/databases` | List databases on a server, newest first |
+| `POST` | `/api/v1/servers/{id}/databases` | Dispatch `db.create` and persist the resulting database record |
+| `DELETE` | `/api/v1/servers/{id}/databases/{databaseId}` | Dispatch `db.delete` and remove the database record |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -136,6 +139,38 @@ pre-restore safety backups taken automatically before anything was overwritten,
 isn't connected; `422` if `backup.restore` itself failed on the agent (the agent-side
 error message explains why, and any checkpoint already taken is named in it so it's
 never a silent loss).
+
+### `POST /api/v1/servers/{id}/databases`
+```json
+{"name": "wp_example", "owner_user": "wp_example_usr", "site_id": ""}
+```
+`name` is required and must match the identifier allow-list
+(`capabilities.IdentifierRe`, `^[a-z][a-z0-9_]{0,30}$`); `owner_user` defaults to
+`name` if omitted (also validated against the same allow-list); `site_id` is optional
+— when set, it must name a site that already exists on this server (`404` otherwise),
+recorded only as an association for the dashboard, not enforced by MariaDB itself. A
+random 32-character password is generated server-side (never accepted from the
+caller) and dispatched to the agent as `owner_password`; only on the agent reporting
+success is a `databases` row persisted. → `201
+{"database": {...databaseRecord}, "owner_password": "..."}` — the password is
+returned exactly once and never stored anywhere on the control plane, the same
+show-once pattern `install_command`'s bootstrap token uses. `400` for a missing/
+invalid `name` or `owner_user`; `404` if `site_id` doesn't exist on that server; `502`
+if the agent isn't connected; `422` if `db.create` itself failed on the agent.
+
+### `GET /api/v1/servers/{id}/databases`
+→ `200` with an array of `databaseRecord` (`ID`, `ServerID`, `SiteID`, `Name`,
+`OwnerUser`, `Status`, `CreatedAt`), newest first. Never includes a password — it was
+never persisted.
+
+### `DELETE /api/v1/servers/{id}/databases/{databaseId}`
+No request body — the database's own recorded `name` and `owner_user` are read from
+the `databases` table and passed to `db.delete` verbatim, so a caller can only ever
+delete a database this control plane actually created and recorded. Only on the agent
+reporting success is the `databases` row removed (a real `DELETE`, unlike backups —
+there is nothing left to keep a historical record of once the database itself is
+gone). → `204`. `404` if the database doesn't exist on that server; `502` if the agent
+isn't connected; `422` if `db.delete` itself failed on the agent.
 
 ### `POST /agents/register`
 ```json

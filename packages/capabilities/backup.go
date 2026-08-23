@@ -61,7 +61,7 @@ func handleBackupRun(ctx context.Context, params map[string]any, progress Progre
 	if (scope == "files" || scope == "full") && !strings.HasPrefix(siteRoot, "/home/sites/") {
 		return "", fmt.Errorf("site_root must be a managed site home directory")
 	}
-	if (scope == "db" || scope == "full") && !identifierRe.MatchString(dbName) {
+	if (scope == "db" || scope == "full") && !IdentifierRe.MatchString(dbName) {
 		return "", fmt.Errorf("invalid db_name %q", dbName)
 	}
 
@@ -170,7 +170,7 @@ func handleBackupRestore(ctx context.Context, params map[string]any, progress Pr
 		}
 	}
 	if scope == "db" || scope == "full" {
-		if !identifierRe.MatchString(dbName) {
+		if !IdentifierRe.MatchString(dbName) {
 			return "", fmt.Errorf("invalid db_name %q", dbName)
 		}
 	}
