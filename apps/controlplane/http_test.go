@@ -287,6 +287,103 @@ func TestCreateBackupRejectsInvalidScope(t *testing.T) {
 	}
 }
 
+func TestCronEndpointsRequireARealSiteAndCronJob(t *testing.T) {
+	secureCookies = false
+	defer func() { secureCookies = true }()
+
+	a := newTestAPIServer(t)
+	h := a.routes()
+
+	doJSON(t, h, "POST", "/api/v1/auth/signup", map[string]string{
+		"Email": "cron-ops@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	rec := doJSON(t, h, "POST", "/api/v1/auth/login", map[string]string{
+		"Email": "cron-ops@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	cookie := sessionCookie(rec)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers", map[string]any{"Name": "web-cron"}, cookie)
+	var created struct {
+		ServerID string `json:"server_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+
+	rec = doJSON(t, h, "GET", "/api/v1/servers/"+created.ServerID+"/sites/site_nonexistent/cron", nil, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("list cron for nonexistent site: status = %d, want 404", rec.Code)
+	}
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/sites/site_nonexistent/cron",
+		map[string]any{"schedule": "* * * * *", "command": "true"}, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("create cron for nonexistent site: status = %d, want 404", rec.Code)
+	}
+
+	site, err := a.store.createSite(created.ServerID, "cron.example.com", "site_cron", "/home/sites/site_cron", "static", "")
+	if err != nil {
+		t.Fatalf("createSite: %v", err)
+	}
+
+	rec = doJSON(t, h, "PATCH", "/api/v1/servers/"+created.ServerID+"/sites/"+site.ID+"/cron/cron_nonexistent",
+		map[string]any{"enabled": false}, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("update nonexistent cron job: status = %d, want 404", rec.Code)
+	}
+
+	rec = doJSON(t, h, "DELETE", "/api/v1/servers/"+created.ServerID+"/sites/"+site.ID+"/cron/cron_nonexistent", nil, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("delete nonexistent cron job: status = %d, want 404", rec.Code)
+	}
+}
+
+func TestCreateCronRequiresFieldsThenFailsWithoutAgent(t *testing.T) {
+	secureCookies = false
+	defer func() { secureCookies = true }()
+
+	a := newTestAPIServer(t)
+	h := a.routes()
+
+	doJSON(t, h, "POST", "/api/v1/auth/signup", map[string]string{
+		"Email": "cron-ops2@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	rec := doJSON(t, h, "POST", "/api/v1/auth/login", map[string]string{
+		"Email": "cron-ops2@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	cookie := sessionCookie(rec)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers", map[string]any{"Name": "web-cron2"}, cookie)
+	var created struct {
+		ServerID string `json:"server_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+
+	site, err := a.store.createSite(created.ServerID, "cron2.example.com", "site_cron2", "/home/sites/site_cron2", "static", "")
+	if err != nil {
+		t.Fatalf("createSite: %v", err)
+	}
+
+	// Missing schedule/command must be rejected before any agent dispatch.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/sites/"+site.ID+"/cron",
+		map[string]any{"schedule": "* * * * *"}, cookie)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("create cron missing command: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// A well-formed request against a site whose server has no connected
+	// agent must fail as a gateway/dispatch error, not a validation error —
+	// proving validation happens before dispatch, and proving no cron_jobs
+	// row is ever persisted for a job that was never actually installed.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/sites/"+site.ID+"/cron",
+		map[string]any{"schedule": "* * * * *", "command": "true"}, cookie)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("create cron with no agent connected: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	if jobs := a.store.listCronJobs(created.ServerID, site.ID); len(jobs) != 0 {
+		t.Fatalf("expected no cron_jobs rows after a failed dispatch, got %d", len(jobs))
+	}
+}
+
 func TestRegisterEndpointRejectsBadToken(t *testing.T) {
 	a := newTestAPIServer(t)
 	h := a.routes()

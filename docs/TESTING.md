@@ -2,7 +2,7 @@
 
 ## 1. Current automated coverage
 
-`go test ./...` — 61 test functions across two packages, all passing, no `-race`
+`go test ./...` — 68 test functions across two packages, all passing, no `-race`
 failures, `go vet` clean, `gofmt -l` clean:
 
 ```
@@ -15,8 +15,8 @@ go test ./... -race
 
 | Package | Tests | What they cover |
 |---|---|---|
-| `apps/controlplane` | 27 | Auth/session lifecycle (create, MFA-verify, expiry, delete), bcrypt password rules, email normalization/uniqueness, TOTP round-trip/skew/rejection, bootstrap-token single-use/expiry/unknown-token, server create/list/get, revocation (cert-serial blocking + status transitions, including that a stray disconnect can't resurrect a revoked server), heartbeat recording, audit-log append, site create/list, `getSite`'s cross-server scoping, backup create/list/get round trip and its own cross-server scoping, and 6 full HTTP integration tests through `routes()` with `httptest` covering signup→login→protected-route, the full 2FA enroll→logout→login→MFA-challenge→access flow, server create/list/revoke, agent registration with a bad token, the backup endpoints' not-found boundaries, and backup-request validation (bad scope, missing `db_name`, and confirming validation runs before dispatch) |
-| `packages/capabilities` | 34 | Capability dispatch (unknown name rejected, `system.ping` works, nil `Progress` doesn't panic, the registry has a handler for every declared `Cap*` constant), `service.control`'s allow-list boundary (unit, action, and an explicit shell-metacharacter-injection attempt, all rejected before `systemctl` is ever invoked), the file manager's path-traversal and symlink-escape defenses (`resolveScopedPath`), oversized-read/write rejection, refusal to delete the site root itself, a real list+write round trip against a real filesystem, log redaction (token/password query params, `Authorization: Bearer`/`Basic`), `logs.tail`'s input validation, domain-name validation (including injection-shaped inputs), `systemUserForDomain`'s bounding/sanitization, the deterministic php-fpm-pool/socket/vhost path builders, `backup.run`'s scope validation and a real files-backup-and-checksum round trip, and `backup.restore`'s archive-location/checksum validation, a real files backup→corrupt→restore round trip (with a real throwaway system user, verifying both content restoration and pre-restore checkpoint creation), and `extractTarGzSafely`'s rejection of path-traversal entries, absolute-path entries, and oversized archives |
+| `apps/controlplane` | 29 | Auth/session lifecycle (create, MFA-verify, expiry, delete), bcrypt password rules, email normalization/uniqueness, TOTP round-trip/skew/rejection, bootstrap-token single-use/expiry/unknown-token, server create/list/get, revocation (cert-serial blocking + status transitions, including that a stray disconnect can't resurrect a revoked server), heartbeat recording, audit-log append, site create/list, `getSite`'s cross-server scoping, backup create/list/get round trip and its own cross-server scoping, and 8 full HTTP integration tests through `routes()` with `httptest` covering signup→login→protected-route, the full 2FA enroll→logout→login→MFA-challenge→access flow, server create/list/revoke, agent registration with a bad token, the backup endpoints' not-found boundaries, backup-request validation (bad scope, missing `db_name`, and confirming validation runs before dispatch), the cron endpoints' not-found boundaries (nonexistent site and nonexistent cron job on create/list/update/delete), and cron-request validation (missing `command`, confirming validation runs before dispatch, and confirming a failed dispatch never leaves a `cron_jobs` row behind) |
+| `packages/capabilities` | 39 | Capability dispatch (unknown name rejected, `system.ping` works, nil `Progress` doesn't panic, the registry has a handler for every declared `Cap*` constant), `service.control`'s allow-list boundary (unit, action, and an explicit shell-metacharacter-injection attempt, all rejected before `systemctl` is ever invoked), the file manager's path-traversal and symlink-escape defenses (`resolveScopedPath`), oversized-read/write rejection, refusal to delete the site root itself, a real list+write round trip against a real filesystem, log redaction (token/password query params, `Authorization: Bearer`/`Basic`), `logs.tail`'s input validation, domain-name validation (including injection-shaped inputs), `systemUserForDomain`'s bounding/sanitization, the deterministic php-fpm-pool/socket/vhost path builders, `backup.run`'s scope validation and a real files-backup-and-checksum round trip, `backup.restore`'s archive-location/checksum validation, a real files backup→corrupt→restore round trip (with a real throwaway system user, verifying both content restoration and pre-restore checkpoint creation), `extractTarGzSafely`'s rejection of path-traversal entries, absolute-path entries, and oversized archives, cron schedule/command field validation (including rejecting a newline-smuggled second crontab line), rejection of any non-`site_`-prefixed `system_user` (root included) before a real crontab is ever touched, the marker-block upsert/remove logic preserving pre-existing unrelated crontab lines and correctly commenting/uncommenting an entry on disable/enable, and (skipped where `crontab`/`useradd` aren't available, e.g. an unprivileged CI container) a real create→disable→delete round trip against a real crontab for a real throwaway system user |
 
 None of this is mocked where a cheap real implementation was possible: sessions/users/
 servers/audit run against a real temp-file SQLite database with the real schema (not
@@ -109,18 +109,23 @@ independent proof beyond) the prior manual pass having been genuine.
    throwaway system user; it does not cover a real `mysqldump`/`mysql` round trip
    (this environment's MariaDB, if any, is not exercised by these tests) or
    restore-to-a-different-server (not yet implemented — see `SYSTEM.md` §21).
-2. **Scripted real-VPS/container integration tests** — turn the manual pass in §2 into
+2. **Cron job management is unit-tested (`packages/capabilities/cron_test.go`,
+   `apps/controlplane/http_test.go`) including a real-crontab round trip, but that
+   round trip is skipped in this development environment (no `crontab` binary) — it
+   has not yet been exercised on a real Ubuntu VPS with cron actually installed and a
+   scheduled job actually firing.**
+3. **Scripted real-VPS/container integration tests** — turn the manual pass in §2 into
    a repeatable script (a disposable Ubuntu 24.04 Docker container or cloud-init VM),
    runnable in CI, covering the installation-test checklist in the project brief
    (agent install → register → stack install → site create → WordPress deploy →
    DB create → SSL issue → file ops → backup → agent restart → network
    disconnect/reconnect → failed-install recovery → upgrade → rollback → revoke).
-3. **Browser/mobile end-to-end tests** — Playwright driving the dashboard at each of
+4. **Browser/mobile end-to-end tests** — Playwright driving the dashboard at each of
    the 320/375/390/414/768/desktop breakpoints, checking for horizontal overflow,
    clipped content, and usable touch targets, screenshotted for review.
-4. **Load/failure testing of agent reconnect** under real network partition
+5. **Load/failure testing of agent reconnect** under real network partition
    conditions (not just the backoff-loop code review already done).
-5. **`govulncheck`/dependency vulnerability scanning** wired into a CI pipeline (none
+6. **`govulncheck`/dependency vulnerability scanning** wired into a CI pipeline (none
    exists yet).
 
 ## 6. Running the suite

@@ -2,6 +2,38 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-23 — Cron job management (Phase 2)
+
+- **Implemented per-site cron job management** — `cron.upsert`/`cron.delete`
+  (`packages/capabilities/cron.go`), the first Phase 2 capability landed. Manages one
+  job at a time in the site's own isolated system user's crontab (never root's), via
+  the standard `crontab -u <user> -l`/`-` mechanism with the entry streamed as stdin —
+  never a shell-interpolated command. Each job is identified by a control-plane-
+  generated id embedded as a `# serverpanel:cron:<id>` marker line, so a job can be
+  replaced or removed without disturbing any other line already in that crontab.
+  Disabling a job comments its entry out (preserving schedule/command for later
+  re-enable) rather than deleting it. `system_user` is restricted to `site_`-prefixed
+  accounts ServerPanel itself created — never root, never an arbitrary account — and
+  the schedule/job-id/command are all validated (cron field grammar, id format,
+  non-empty/bounded-length/single-line command) before anything touches a real
+  crontab.
+- Added the `cron_jobs` table, `apiServer.handleCreateCron/handleListCron/
+  handleUpdateCron/handleDeleteCron` (`apps/controlplane/cron.go`), and four new
+  endpoints: `GET`/`POST /api/v1/servers/{id}/sites/{siteId}/cron`,
+  `PATCH`/`DELETE .../cron/{cronId}` — the same dispatch-then-persist-on-success
+  pattern backups already use, so a failed agent-side dispatch never leaves an orphan
+  `cron_jobs` row.
+- Added a "Cron jobs" panel to the site-detail dashboard view: create, per-row
+  enable/disable toggle, and delete, with destructive-action confirmation on delete.
+- Added 6 new capability-layer tests (schedule/command validation including a
+  newline-smuggling rejection, non-`site_`-user rejection, marker-block upsert/remove
+  logic, and a real crontab round trip skipped where `crontab`/`useradd` aren't
+  available) and 2 new HTTP integration tests (not-found boundaries, validation-
+  before-dispatch, no-orphan-row-on-failed-dispatch). Full suite: 68 test functions,
+  `go vet`/`gofmt` clean.
+- Updated `SYSTEM.md`, `API.md`, `TESTING.md`, and `SERVERAVATAR_PARITY.md` (SRV-005
+  moved from the not-yet-started summary table to a full `COMPLETE` detail block).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

@@ -485,6 +485,122 @@ func scanBackup(row rowScanner) (*backupRecord, error) {
 	return &rec, nil
 }
 
+type cronJobRecord struct {
+	ID        string
+	ServerID  string
+	SiteID    string
+	Schedule  string
+	Command   string
+	Enabled   bool
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// createCronJobWithID persists a cron job record under an id the caller
+// already generated (and, unlike createBackup's server-generated id, must
+// have generated *before* dispatch — the id is embedded as the crontab
+// marker the agent writes, so the control plane and the live crontab have
+// to agree on it up front). Like createBackup, this is only ever called
+// after cron.upsert has already succeeded on the agent — the cron_jobs
+// table records jobs that actually exist in the site's crontab, never
+// in-flight or failed ones.
+func (s *store) createCronJobWithID(id, serverID, siteID, schedule, command string, enabled bool) (*cronJobRecord, error) {
+	now := time.Now().UTC()
+	rec := &cronJobRecord{
+		ID: id, ServerID: serverID, SiteID: siteID, Schedule: schedule, Command: command,
+		Enabled: enabled, CreatedAt: now, UpdatedAt: now,
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO cron_jobs (id, server_id, site_id, schedule, command, enabled, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		rec.ID, rec.ServerID, rec.SiteID, rec.Schedule, rec.Command, boolToInt(rec.Enabled),
+		rec.CreatedAt.Format(time.RFC3339Nano), rec.UpdatedAt.Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return nil, err
+	}
+	return rec, nil
+}
+
+// listCronJobs returns cron jobs for one site, newest first.
+func (s *store) listCronJobs(serverID, siteID string) []*cronJobRecord {
+	rows, err := s.db.Query(
+		`SELECT id, server_id, site_id, schedule, command, enabled, created_at, updated_at
+		 FROM cron_jobs WHERE server_id = ? AND site_id = ? ORDER BY created_at DESC`, serverID, siteID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var out []*cronJobRecord
+	for rows.Next() {
+		rec, err := scanCronJob(rows)
+		if err != nil {
+			continue
+		}
+		out = append(out, rec)
+	}
+	return out
+}
+
+// getCronJob looks up one cron job scoped to serverID, so a caller can
+// never address (and update/delete) a job belonging to a different server
+// — the same cross-tenant-addressing guard as getSite/getBackup.
+func (s *store) getCronJob(serverID, cronID string) (*cronJobRecord, bool) {
+	row := s.db.QueryRow(
+		`SELECT id, server_id, site_id, schedule, command, enabled, created_at, updated_at
+		 FROM cron_jobs WHERE id = ? AND server_id = ?`, cronID, serverID)
+	rec, err := scanCronJob(row)
+	if err != nil {
+		return nil, false
+	}
+	return rec, true
+}
+
+// updateCronJob persists a schedule/command/enabled change already applied
+// on the agent via cron.upsert.
+func (s *store) updateCronJob(serverID, cronID, schedule, command string, enabled bool) error {
+	res, err := s.db.Exec(
+		`UPDATE cron_jobs SET schedule = ?, command = ?, enabled = ?, updated_at = ? WHERE id = ? AND server_id = ?`,
+		schedule, command, boolToInt(enabled), time.Now().UTC().Format(time.RFC3339Nano), cronID, serverID,
+	)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("cron job not found")
+	}
+	return nil
+}
+
+// deleteCronJob removes a cron job record after cron.delete has already
+// succeeded on the agent.
+func (s *store) deleteCronJob(serverID, cronID string) error {
+	_, err := s.db.Exec(`DELETE FROM cron_jobs WHERE id = ? AND server_id = ?`, cronID, serverID)
+	return err
+}
+
+func scanCronJob(row rowScanner) (*cronJobRecord, error) {
+	var rec cronJobRecord
+	var enabled int
+	var createdAt, updatedAt string
+	if err := row.Scan(&rec.ID, &rec.ServerID, &rec.SiteID, &rec.Schedule, &rec.Command,
+		&enabled, &createdAt, &updatedAt); err != nil {
+		return nil, err
+	}
+	rec.Enabled = enabled != 0
+	rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+	rec.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedAt)
+	return &rec, nil
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
 func randID(prefix string) string {
 	n, _ := rand.Int(rand.Reader, big.NewInt(1<<62))
 	return fmt.Sprintf("%s_%x", prefix, n)

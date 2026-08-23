@@ -181,6 +181,25 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Known differences**: no backup/recovery codes for 2FA, no login-history UI, no IP allowlisting, no API token management yet.
 - **Reason**: those are listed Phase 2 account-security items (`product-plan.md` §9) not yet built.
 
+### SRV-005 — Cron job management
+- **Category**: Server Management
+- **Documentation page**: Server Management → Cron Jobs
+- **Short description**: Create, edit, enable/disable, and delete scheduled cron jobs for an application.
+- **Expected behavior**: pick a schedule and a command, the job runs on that schedule as the application's own user; it can later be edited, disabled without losing its definition, re-enabled, or deleted.
+- **Our implementation**: `cron.upsert`/`cron.delete` (agent) manage one job at a time in the site's own isolated system user's crontab (never root's) via the standard `crontab -u <user> -l`/`-` mechanism, streamed as stdin — never a shell-interpolated command. Each job is identified by a control-plane-generated id embedded as a `# serverpanel:cron:<id>` marker comment directly above its entry line, so a job can be replaced or removed without touching any other line already in that crontab (including ones ServerPanel didn't create). Disabling a job comments its entry line out (preserving schedule/command for a later re-enable) rather than deleting it.
+- **Frontend**: site-detail "Cron jobs" panel — "+ New cron job" modal, a table with per-row Enable/Disable and Delete actions.
+- **Backend service**: `apiServer.handleCreateCron/handleListCron/handleUpdateCron/handleDeleteCron` (`apps/controlplane/cron.go`), same dispatch-then-persist-on-success pattern as backups/sites.
+- **API endpoint(s)**: `POST`/`GET /api/v1/servers/{id}/sites/{siteId}/cron`, `PATCH`/`DELETE /api/v1/servers/{id}/sites/{siteId}/cron/{cronId}`.
+- **Agent command**: `cron.upsert`, `cron.delete`.
+- **DB tables**: `cron_jobs` (`server_id`, `site_id`, `schedule`, `command`, `enabled`, `created_at`, `updated_at`).
+- **Required permission**: authenticated session; `system_user` dispatched to the agent is always the site's own recorded `SystemUser`, never caller-supplied, and the agent independently re-validates it's a ServerPanel-managed `site_`-prefixed account before touching any crontab.
+- **Security considerations**: jobs only ever run as the site's own unprivileged, `nologin` system user — the same isolation boundary the rest of the site's files/PHP-FPM pool/database grants already rely on, never root; the schedule field is regex-validated against cron's own field grammar before ever reaching `crontab`; the job id is control-plane-generated and regex-validated, never end-user text, since it's embedded unescaped as a crontab comment; the command itself is intentionally not metacharacter-filtered (an ordinary cron command line is expected to be a shell command, same as on any Linux system) but newlines are rejected so one job can never smuggle in extra crontab lines/entries.
+- **Test coverage**: `packages/capabilities/cron_test.go` — schedule/command validation (including a newline-smuggling rejection test), non-`site_`-user rejection, marker-block upsert/remove logic (preserving unrelated existing crontab content, correct comment/uncomment on disable/enable), and a real crontab create→disable→delete round trip against a real throwaway system user (skipped where `crontab`/`useradd` aren't available). `apps/controlplane/http_test.go` — not-found boundaries for a nonexistent site/cron job, missing-field validation, and confirming a failed dispatch never leaves a `cron_jobs` row behind.
+- **Current status**: `COMPLETE`
+- **Completion date**: 2026-08-23
+- **Known differences**: no execution-history/output logging per run (ServerAvatar's docs describe surfacing recent run output; this implementation manages the schedule but does not currently capture cron's own mail/log output per invocation); no timezone selector (jobs run in the server's own system timezone, matching stock cron behavior).
+- **Reason**: per-run execution history would need either parsing system cron logs or wrapping every job's command (e.g. redirecting output to a per-job log file the dashboard reads) — deliberately deferred as a follow-up enhancement rather than blocking the core create/edit/enable/disable/delete workflow, which is the documented capability's primary functional surface.
+
 ---
 
 ## 2. Summary tables — not yet started
@@ -229,7 +248,6 @@ capability surface (per task-brief §3/§101), not just what's already built.
 |---|---|---|---|
 | SRV-003 | SSH/SFTP management, key management, port/root-login controls | `NOT_STARTED` | `product-plan.md` Phase 2 |
 | SRV-004 | Firewall (UFW) rule editing UI, Fail2Ban jail management | `PARTIAL` | Installed with safe defaults by `stack.install`; no rule-editing capability/UI yet |
-| SRV-005 | Cron job management | `NOT_STARTED` | |
 | SRV-006 | Supervisor/PM2 worker management | `NOT_STARTED` | |
 | SRV-007 | Process list / kill | `NOT_STARTED` | |
 | SRV-008 | Historical monitoring (CPU/RAM/disk/network graphs, alerts) | `PARTIAL` | Heartbeat carries current uptime/load/mem%/disk%; no history retention or alerting yet |

@@ -52,6 +52,8 @@ const (
 	CapBackupRun        = "backup.run"
 	CapBackupRestore    = "backup.restore"
 	CapLogsTail         = "logs.tail"
+	CapCronUpsert       = "cron.upsert"
+	CapCronDelete       = "cron.delete"
 )
 
 // managedUnits is the allow-list of systemd units the agent will ever act
@@ -97,6 +99,8 @@ func Default() Registry {
 		CapBackupRun:        handleBackupRun,
 		CapBackupRestore:    handleBackupRestore,
 		CapLogsTail:         handleLogsTail,
+		CapCronUpsert:       handleCronUpsert,
+		CapCronDelete:       handleCronDelete,
 	}
 }
 
