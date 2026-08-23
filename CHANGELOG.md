@@ -2,6 +2,42 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-23 — Database control-plane persistence and dashboard UI (DB-005)
+
+- **Closed the DB-001/DB-005 gap** flagged in the previous parity pass ("capability-layer
+  work landed before the control-plane persistence/UI layer that backups just got").
+  `db.create`/`db.delete` (`packages/capabilities/db.go`) now return structured JSON
+  detail (`{"name":..., "owner_user":...}`) instead of a free-text message, matching the
+  same dispatch-then-persist-on-success pattern `site.create` and `backup.run` already
+  use — a raw task result alone was never enough for the control plane to record that a
+  database durably exists.
+- Added a `databases` table and `apps/controlplane/databases.go` (mirroring
+  `backups.go`): `POST`/`GET /api/v1/servers/{id}/databases`,
+  `DELETE /api/v1/servers/{id}/databases/{dbId}`. The control plane generates a random
+  24-byte owner password itself (never caller-supplied), dispatches `db.create` with it,
+  and returns it to the caller exactly once in the create response — the same
+  shown-once, never-persisted pattern `createServer` already uses for bootstrap tokens.
+  A duplicate database name on the same server is rejected with `409 Conflict` before
+  dispatch, since `db.create`'s own `CREATE DATABASE IF NOT EXISTS` is idempotent at the
+  SQL layer and would otherwise silently let a second control-plane record attach to a
+  database another record already owns. Delete only removes the control-plane record
+  after the agent confirms `db.delete` succeeded — a failed agent-side drop never
+  desyncs the dashboard from what's actually on the server.
+- Added a "Databases" panel to the server-detail dashboard view (create-database modal,
+  databases table, delete button with confirmation), the first dedicated database UI
+  this project has had — previously `db.create`/`db.delete`/`db.list` were only
+  reachable via generic task dispatch.
+- Added 9 new capability-layer validation tests (invalid name/owner/password rejection
+  on both create and delete, plus a JSON-shape pin test guarding the control plane's
+  unmarshal contract), 1 new store-layer round-trip test (create/list/get/
+  get-by-name/delete, including cross-server scoping), and 2 new HTTP-layer tests
+  (validation-before-dispatch, duplicate-name rejection, 404 scoping, and proving a
+  failed no-agent delete leaves the record intact). Full suite: 70 test functions,
+  `go vet`/`gofmt` clean.
+- Updated `SYSTEM.md` and `docs/SERVERAVATAR_PARITY.md` (DB-001 promoted from `PARTIAL`
+  with a documented gap to a full `PARTIAL`→dashboard-covered entry; MongoDB support and
+  a phpMyAdmin-style admin UI remain the next `NOT_STARTED` items in that category).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

@@ -3,11 +3,35 @@ package capabilities
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"regexp"
 
 	_ "github.com/go-sql-driver/mysql"
 )
+
+// dbCreateResult and dbDeleteResult are the structured JSON details
+// db.create/db.delete report back, mirroring how site.create and
+// backup.run report structured results (see packages/capabilities/site.go,
+// backup.go) rather than a free-text message — this is what lets the
+// control plane parse the outcome and persist a durable record instead of
+// just showing raw task output.
+type dbCreateResult struct {
+	Name      string `json:"name"`
+	OwnerUser string `json:"owner_user"`
+}
+
+type dbDeleteResult struct {
+	Name string `json:"name"`
+}
+
+func marshalDBResult(v any) (string, error) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "", fmt.Errorf("marshal result: %w", err)
+	}
+	return string(b), nil
+}
 
 // identifierRe is the allow-list for database/user names. MySQL has no
 // placeholder syntax for identifiers (only for values), so the standard
@@ -75,7 +99,7 @@ func handleDBCreate(ctx context.Context, params map[string]any, progress Progres
 		return "", fmt.Errorf("flush privileges: %w", err)
 	}
 
-	return fmt.Sprintf("database %q created, owned by user %q with grants scoped to that database only", name, owner), nil
+	return marshalDBResult(dbCreateResult{Name: name, OwnerUser: owner})
 }
 
 func handleDBDelete(ctx context.Context, params map[string]any, progress Progress) (string, error) {
@@ -100,7 +124,7 @@ func handleDBDelete(ctx context.Context, params map[string]any, progress Progres
 		}
 		db.ExecContext(ctx, fmt.Sprintf("DROP USER IF EXISTS `%s`@'localhost'", owner))
 	}
-	return fmt.Sprintf("database %q deleted", name), nil
+	return marshalDBResult(dbDeleteResult{Name: name})
 }
 
 func handleDBList(ctx context.Context, params map[string]any, progress Progress) (string, error) {

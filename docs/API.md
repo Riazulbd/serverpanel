@@ -46,6 +46,9 @@ protected route; there is no route that skips it by omission.
 | `GET` | `/api/v1/servers/{id}/sites/{siteId}/backups` | List backups for a site, newest first |
 | `POST` | `/api/v1/servers/{id}/sites/{siteId}/backups` | Dispatch `backup.run` and persist the resulting backup record |
 | `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a previously recorded backup |
+| `GET` | `/api/v1/servers/{id}/databases` | List databases on a server, newest first |
+| `POST` | `/api/v1/servers/{id}/databases` | Dispatch `db.create` and persist the resulting database record |
+| `DELETE` | `/api/v1/servers/{id}/databases/{dbId}` | Dispatch `db.delete` and remove the database record |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -136,6 +139,35 @@ pre-restore safety backups taken automatically before anything was overwritten,
 isn't connected; `422` if `backup.restore` itself failed on the agent (the agent-side
 error message explains why, and any checkpoint already taken is named in it so it's
 never a silent loss).
+
+### `POST /api/v1/servers/{id}/databases`
+```json
+{"name": "app_db", "owner_user": "app_user"}
+```
+`name` must match `^[a-z][a-z0-9_]{0,30}$` (also enforced independently, and as the real
+security boundary, by the agent's own `identifierRe` in `packages/capabilities/db.go`);
+`owner_user` is optional and defaults to `name`. The control plane generates a random
+24-byte owner password itself — it is never accepted from the caller — and dispatches
+`db.create` with it. Only on the agent reporting success is a `databases` row persisted.
+→ `201 {"database": {...databaseRecord}, "owner_password": "<hex>"}`. `owner_password`
+is returned exactly once here and never stored or retrievable again (same pattern as
+`install_command`'s bootstrap token). `400` for an invalid name/owner; `409` if a
+database with that name already exists on this server (checked before dispatch, since
+the agent's `CREATE DATABASE IF NOT EXISTS` is itself idempotent and would otherwise let
+a second record silently attach to a database another record already owns); `502` if
+the agent isn't connected; `422` if `db.create` itself failed on the agent.
+
+### `GET /api/v1/servers/{id}/databases`
+→ `200` with an array of `databaseRecord` (`ID`, `ServerID`, `Name`, `OwnerUser`,
+`Status`, `CreatedAt`), newest first.
+
+### `DELETE /api/v1/servers/{id}/databases/{dbId}`
+No request body — the database's own recorded `name`/`owner_user` are read from the
+`databases` table and passed to `db.delete`. The control-plane record is removed only
+after the agent confirms success, so a failed delete never desyncs the dashboard from
+what's actually on the server. → `200 {"status": "deleted"}`. `404` if the database
+doesn't exist on that server; `502` if the agent isn't connected; `422` if `db.delete`
+itself failed on the agent.
 
 ### `POST /agents/register`
 ```json
