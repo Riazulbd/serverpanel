@@ -113,19 +113,19 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Category**: Database Management
 - **Documentation page**: Database Management → "Understanding Database Management"
 - **Short description**: Create a MySQL/MariaDB database with a least-privilege owner user.
-- **Our implementation**: `db.create`/`db.delete`/`db.list` — identifier allow-list regex, `CREATE USER`/`GRANT` scoped to exactly one database (never global), Unix-socket root auth (no stored MySQL root password on disk for this path).
-- **Frontend**: not yet surfaced as its own dashboard panel (capability exists and is dispatchable via generic task dispatch; no dedicated "Databases" tab yet).
-- **Backend service**: `gateway.dispatch` → `packages/capabilities.handleDBCreate/Delete/List`.
-- **API endpoint(s)**: `POST /api/v1/servers/{id}/tasks`.
-- **Agent command**: `db.create`, `db.delete`, `db.list`.
-- **DB tables**: none on the control-plane side yet (no `databases` table — see Known differences).
-- **Required permission**: authenticated session.
-- **Security considerations**: identifier allow-list (`^[a-z][a-z0-9_]{0,30}$`) prevents SQL-identifier injection where placeholders can't be used; grants are always single-database-scoped.
-- **Test coverage**: manually verified in a prior session against a real MariaDB; not covered by `go test` (requires a running MariaDB — this environment has none).
-- **Current status**: `PARTIAL`
-- **Completion date**: n/a
-- **Known differences**: MongoDB support, a dedicated dashboard UI, and control-plane persistence of database records (so they show up per-site the way backups now do) don't exist yet.
-- **Reason**: capability-layer work landed before the control-plane persistence/UI layer that backups just got (see BAK-001) — same pattern, not yet applied here. Good candidate for the next iteration.
+- **Our implementation**: `db.create`/`db.delete`/`db.list` — identifier allow-list regex, `CREATE USER`/`GRANT` scoped to exactly one database (never global), Unix-socket root auth (no stored MySQL root password on disk for this path). The control plane now dispatches `db.create`/`db.delete` and, only on agent-confirmed success, persists/removes a `databases` row — the same dispatch-then-persist pattern `sites`/`backups` use (see DB-005, folded into this entry).
+- **Frontend**: dedicated "Databases" panel per server (`web/index.html`) — create-database modal (name, owner user; owner password shown exactly once after creation and never stored), databases table with per-row delete, and a summary count on the server-detail page.
+- **Backend service**: `gateway.dispatch` → `packages/capabilities.handleDBCreate/Delete/List`; `apiServer.handleCreateDatabase/handleListDatabases/handleDeleteDatabase` (`apps/controlplane/databases.go`).
+- **API endpoint(s)**: `POST /api/v1/servers/{id}/databases`, `GET /api/v1/servers/{id}/databases`, `DELETE /api/v1/servers/{id}/databases/{dbId}`.
+- **Agent command**: `db.create`, `db.delete`, `db.list` (`db.list` is not yet wired to a dedicated endpoint — the dashboard reads the control plane's own `databases` table instead of live-querying the agent, matching how the sites/backups panels work).
+- **DB tables**: `databases` (`server_id`, `site_id` optional, `name`, `owner_user`, `status`, `created_at`; `UNIQUE(server_id, name)`) — never a password column.
+- **Required permission**: authenticated session; delete requires the caller to reference a `dbId` the control plane itself issued (read server-side from the `databases` row), never a free-form database name — same anti-redirection property `backup.restore` has.
+- **Security considerations**: identifier allow-list (`^[a-z][a-z0-9_]{0,30}$`) prevents SQL-identifier injection where placeholders can't be used, checked twice (control-plane API layer, then again independently by the agent); grants are always single-database-scoped; the owner password is generated server-side with `crypto/rand` (28 alphanumeric chars), returned exactly once in the creation response, and never persisted anywhere — the control plane does not become a second place a database credential is stored.
+- **Test coverage**: `apps/controlplane/store_test.go` (`TestDatabaseCreateListGetDeleteRoundTrip`, `TestCreateDatabaseRecordRejectsDuplicateNameOnSameServer`), `apps/controlplane/http_test.go` (`TestCreateDatabaseRejectsInvalidNames`, `TestDeleteDatabaseRequiresARealRecord`, `TestListDatabasesEmptyForUnknownServer`) — all against real SQLite, no mocks. The underlying `db.create`/`db.delete`/`db.list` agent capabilities' real-MariaDB round trip remain manually verified in a prior session (see below), not exercised by `go test` in this environment (no MariaDB here).
+- **Current status**: `PARTIAL` (control-plane persistence/API/UI layer is `COMPLETE` and automated-tested; the agent capability's real-MariaDB execution is unverified in *this* environment, same `BLOCKED_EXTERNAL`-flavored gap BAK-001/BAK-002 have for their db-scope path)
+- **Completion date**: 2026-08-23 (persistence/API/UI layer)
+- **Known differences**: MongoDB support (DB-002) doesn't exist yet; `db.list` isn't surfaced as a live "what does the agent actually see" reconciliation view (a divergence between the `databases` table and what's really on the server — e.g. a database created outside this panel — would not currently be detected or shown).
+- **Reason**: MongoDB and drift-detection are follow-up scope, not blockers for the primary create/list/delete workflow this entry covers.
 
 ### BAK-001 — On-demand backup (files/db/full)
 - **Category**: Backups
@@ -261,7 +261,7 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | DB-002 | MongoDB support | `NOT_STARTED` | |
 | DB-003 | phpMyAdmin / DB admin UI integration | `NOT_STARTED` | |
 | DB-004 | Database process/query monitoring | `NOT_STARTED` | |
-| DB-005 | Control-plane persistence + dashboard UI for databases (mirroring what BAK-001 just got) | `NOT_STARTED` | See DB-001's "Known differences" |
+| DB-005 | Control-plane persistence + dashboard UI for databases | `COMPLETE` | Folded into DB-001's detail block above (2026-08-23) |
 
 ### WordPress Toolkit (WP-*)
 | ID | Feature | Status |
@@ -295,9 +295,9 @@ capability surface (per task-brief §3/§101), not just what's already built.
 
 | Status | Count (detailed entries) | Count (summary-table rows) |
 |---|---|---|
-| `COMPLETE` | 3 (SRV-001, BAK-002, ACC-001) | 1 (PROV-006) |
+| `COMPLETE` | 3 (SRV-001, BAK-002, ACC-001) | 2 (PROV-006, DB-005) |
 | `PARTIAL` | 3 (SRV-002, APP-001, APP-002, DB-001, BAK-001 — 5 total, see note) | 6 |
-| `NOT_STARTED` | 0 | ~55 |
+| `NOT_STARTED` | 0 | ~54 |
 | `BLOCKED_EXTERNAL` | 0 (sub-scoped within BAK-001/BAK-002's db/full-scope MariaDB verification) | 0 |
 | `INTENTIONALLY_NOT_APPLICABLE` | 0 | 1 |
 
@@ -359,3 +359,16 @@ establish the tracking process and close the single highest-priority gap
   BAK-001/BAK-002 reflecting this session's backup-restore implementation. ~60
   capabilities enumerated overall (detailed + summary), the large majority honestly
   `NOT_STARTED`.
+- **2026-08-23**: closed DB-001's explicitly flagged "next iteration" gap — added
+  control-plane persistence (`databases` table) and a dashboard "Databases" panel
+  (create/list/delete) on top of the pre-existing `db.create`/`db.delete`/`db.list`
+  agent capabilities, following the same dispatch-then-persist-on-success pattern
+  `sites`/`backups` already use. Owner passwords are generated server-side and shown
+  exactly once, never persisted. DB-005 (tracked separately as a summary row) is folded
+  into DB-001 and marked `COMPLETE`. Automated test coverage added at the store and
+  HTTP layers (`TestDatabaseCreateListGetDeleteRoundTrip`,
+  `TestCreateDatabaseRecordRejectsDuplicateNameOnSameServer`,
+  `TestCreateDatabaseRejectsInvalidNames`, `TestDeleteDatabaseRequiresARealRecord`,
+  `TestListDatabasesEmptyForUnknownServer`); manually smoke-tested end-to-end against a
+  running instance (signup → login → create server → validation errors → dispatch-
+  failure path with no agent connected → 404 on delete of a nonexistent record).

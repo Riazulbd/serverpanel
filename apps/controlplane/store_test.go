@@ -297,3 +297,60 @@ func TestBackupCreateListGetRoundTrip(t *testing.T) {
 		t.Fatal("expected getBackup to refuse a backup ID under the wrong server")
 	}
 }
+
+func TestDatabaseCreateListGetDeleteRoundTrip(t *testing.T) {
+	st := newTestStore(t)
+	serverID, _, _ := st.createServer("web-11", "", nil, time.Hour, "admin@example.com")
+	site, err := st.createSite(serverID, "d.example.com", "sp_d", "/home/sites/sp_d", "wordpress", "8.3")
+	if err != nil {
+		t.Fatalf("createSite: %v", err)
+	}
+
+	rec, err := st.createDatabaseRecord(serverID, site.ID, "wp_example", "wp_example_owner")
+	if err != nil {
+		t.Fatalf("createDatabaseRecord: %v", err)
+	}
+	if rec.ID == "" || rec.Status != "active" {
+		t.Fatalf("unexpected database record: %+v", rec)
+	}
+
+	list := st.listDatabases(serverID)
+	if len(list) != 1 || list[0].Name != "wp_example" {
+		t.Fatalf("listDatabases = %+v, want one entry matching the created database", list)
+	}
+
+	got, ok := st.getDatabaseRecord(serverID, rec.ID)
+	if !ok {
+		t.Fatal("expected getDatabaseRecord to find the created database")
+	}
+	if got.OwnerUser != "wp_example_owner" {
+		t.Fatalf("getDatabaseRecord = %+v, fields don't round-trip", got)
+	}
+
+	otherServer, _, _ := st.createServer("web-12", "", nil, time.Hour, "admin@example.com")
+	if _, ok := st.getDatabaseRecord(otherServer, rec.ID); ok {
+		t.Fatal("expected getDatabaseRecord to refuse a database ID under the wrong server")
+	}
+
+	if err := st.deleteDatabaseRecord(serverID, rec.ID); err != nil {
+		t.Fatalf("deleteDatabaseRecord: %v", err)
+	}
+	if _, ok := st.getDatabaseRecord(serverID, rec.ID); ok {
+		t.Fatal("expected getDatabaseRecord to return false after deletion")
+	}
+	if len(st.listDatabases(serverID)) != 0 {
+		t.Fatal("expected listDatabases to be empty after deletion")
+	}
+}
+
+func TestCreateDatabaseRecordRejectsDuplicateNameOnSameServer(t *testing.T) {
+	st := newTestStore(t)
+	serverID, _, _ := st.createServer("web-13", "", nil, time.Hour, "admin@example.com")
+
+	if _, err := st.createDatabaseRecord(serverID, "", "dupdb", "owner_a"); err != nil {
+		t.Fatalf("first createDatabaseRecord: %v", err)
+	}
+	if _, err := st.createDatabaseRecord(serverID, "", "dupdb", "owner_b"); err == nil {
+		t.Fatal("expected a second database with the same name on the same server to be rejected")
+	}
+}

@@ -2,6 +2,53 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-23 — Database management: control-plane persistence + dashboard UI
+
+- **Closed DB-001's flagged follow-up gap** (`docs/SERVERAVATAR_PARITY.md`): the
+  `db.create`/`db.delete`/`db.list` agent capabilities existed since Phase 1 but were
+  only reachable via generic task dispatch, with no durable record and no dedicated UI
+  — the same gap `backup.run`/`backup.restore` had before the 2026-08-17 entry above,
+  now closed the same way.
+- New `databases` table (`server_id`, `site_id` optional, `name`, `owner_user`,
+  `status`, `created_at`, `UNIQUE(server_id, name)`) — deliberately **no password
+  column**. Three new endpoints (`GET`/`POST /api/v1/servers/{id}/databases`,
+  `DELETE /api/v1/servers/{id}/databases/{dbId}`) follow the dispatch-then-persist-on-
+  success pattern `sites`/`backups` already use: `db.create`/`db.delete` must succeed on
+  the agent before the control plane writes or removes a row, and delete only ever acts
+  on a `dbId` the control plane itself issued (never a free-form database name).
+- The owner password is generated server-side (28 random alphanumeric characters,
+  `crypto/rand`, meeting `db.create`'s 16-character minimum), sent to the agent as
+  `owner_password`, and returned to the caller **exactly once** in the creation
+  response — it is never written to the `databases` table or logged, so the control
+  plane never becomes a second place a database credential is stored.
+- Name/owner-user validation (`^[a-z][a-z0-9_]{0,30}$`) happens at the API layer before
+  dispatch (fast, clear `400`s) and is still independently re-checked by the agent's own
+  `identifierRe` in `packages/capabilities/db.go` — defense in depth on the one field
+  that ends up interpolated into `CREATE DATABASE`/`CREATE USER`.
+- New dashboard "Databases" panel per server (`web/index.html`): a create-database modal
+  (name, owner user, one-time password display), a databases table with per-row delete
+  (destructive-action confirmation), and a database-count summary on the server-detail
+  page.
+- Added 5 new automated tests (`TestDatabaseCreateListGetDeleteRoundTrip`,
+  `TestCreateDatabaseRecordRejectsDuplicateNameOnSameServer`,
+  `TestCreateDatabaseRejectsInvalidNames`, `TestDeleteDatabaseRequiresARealRecord`,
+  `TestListDatabasesEmptyForUnknownServer`) against real SQLite/HTTP — no mocks. Full
+  suite (`go test ./...`) passes; `go vet` and `gofmt -l` are clean. Manually
+  smoke-tested end-to-end against a running instance (signup → login → create server →
+  invalid-name/invalid-owner/unknown-site validation → correct `502` when no agent is
+  connected → `404` on deleting a nonexistent record).
+- Updated `docs/SYSTEM.md` (schema table, feature status, API summary),
+  `docs/API.md` (full request/response reference for the three new endpoints), and
+  `docs/SERVERAVATAR_PARITY.md` (DB-001 expanded detail block, DB-005 marked
+  `COMPLETE` and folded into DB-001, progress-summary counts, change history).
+- **Known differences carried forward**: MongoDB support (DB-002) still doesn't exist;
+  `db.list` (a live "what does the agent actually see" query) isn't wired to a
+  reconciliation view, so a database created outside this panel wouldn't be detected as
+  drift; the agent capabilities' real-MariaDB execution remains manually verified from a
+  prior session, not exercised by `go test` in this environment (no MariaDB here) — same
+  environment limitation already documented for `backup.run`/`backup.restore`'s
+  db/full-scope paths.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the
