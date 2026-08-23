@@ -2,6 +2,41 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-23 — Database persistence and dashboard UI (DB-005)
+
+- **Added control-plane persistence and a dedicated dashboard panel for databases**,
+  closing the gap the previous entry's parity matrix flagged as the next candidate:
+  `db.create`/`db.delete`/`db.list` existed at the agent-capability layer but were only
+  reachable via generic task dispatch, with no durable record and no UI, the same
+  pre-BAK-001 state backups used to be in.
+- New `databases` table (`id`, `server_id`, `site_id`, `name`, `owner_user`, `status`,
+  `created_at`) and `store.go` methods (`createDatabase`/`listDatabases`/
+  `getDatabase`/`deleteDatabase`), each scoped by `server_id` the same way
+  `getSite`/`getBackup` are — a database record can never be addressed under the wrong
+  server.
+- New `apps/controlplane/databases.go` with three endpoints
+  (`GET`/`POST /api/v1/servers/{id}/databases`,
+  `DELETE /api/v1/servers/{id}/databases/{dbId}`) following the existing
+  dispatch-then-persist-on-success pattern. The database owner password is generated
+  server-side with `crypto/rand` (≥16 characters, matching `handleDBCreate`'s own
+  minimum), never sent by the client, never persisted anywhere (no password column,
+  never written to the audit log), and returned to the caller exactly once — the same
+  "shown once" model the server bootstrap-token install command already uses. Delete
+  reads the stored `name`/`owner_user` back from the row rather than accepting
+  free-form client input, so a caller can only ever delete a database this control
+  plane actually created and recorded.
+- New "Databases" panel on the server-detail dashboard view: create modal (name, owner
+  username) that displays the generated credentials once, a table with per-row delete
+  (with a destructive-action confirmation).
+- Tests: `TestDatabaseCreateListGetDeleteRoundTrip` (store layer, including
+  cross-server-scoping rejection) and `TestCreateDatabaseRejectsInvalidIdentifiers`
+  (HTTP layer: invalid name/owner_user, nonexistent `site_id`, no-agent-connected `502`
+  proving validation runs before dispatch, delete-nonexistent `404`). Full suite
+  (`go test ./...`) passes; `gofmt`/`go vet` clean.
+- Updated `docs/SERVERAVATAR_PARITY.md` (DB-001 known-differences note, new DB-005
+  detail block marked `COMPLETE`, progress-summary counts), `docs/API.md` (new
+  endpoints), and `docs/SYSTEM.md` (schema table, database-management status line).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

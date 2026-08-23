@@ -46,6 +46,9 @@ protected route; there is no route that skips it by omission.
 | `GET` | `/api/v1/servers/{id}/sites/{siteId}/backups` | List backups for a site, newest first |
 | `POST` | `/api/v1/servers/{id}/sites/{siteId}/backups` | Dispatch `backup.run` and persist the resulting backup record |
 | `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a previously recorded backup |
+| `GET` | `/api/v1/servers/{id}/databases` | List databases on a server, newest first |
+| `POST` | `/api/v1/servers/{id}/databases` | Dispatch `db.create` and persist the resulting database record |
+| `DELETE` | `/api/v1/servers/{id}/databases/{dbId}` | Dispatch `db.delete` and remove the database record |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -136,6 +139,33 @@ pre-restore safety backups taken automatically before anything was overwritten,
 isn't connected; `422` if `backup.restore` itself failed on the agent (the agent-side
 error message explains why, and any checkpoint already taken is named in it so it's
 never a silent loss).
+
+### `POST /api/v1/servers/{id}/databases`
+```json
+{"name": "wp_example", "owner_user": "wp_example_owner", "site_id": ""}
+```
+`name`/`owner_user` must each match `^[a-z][a-z0-9_]{0,30}$` (validated here for a fast
+`400`, and independently re-validated agent-side — the API-layer check is a convenience,
+not the security boundary). `site_id` is optional; if given, must be a site that exists
+on that server. A random ≥16-character owner password is generated server-side (never
+client-supplied, never agent-generated, never logged) and dispatched to `db.create`.
+Only on the agent reporting success is a `databases` row persisted — the password itself
+is **not** part of that row. → `201 {"database": {...databaseRecord}, "owner_password":
+"..."}`. `owner_password` is returned exactly once in this response and is never
+retrievable again — the same "shown once" model as the install-command bootstrap token.
+`400` for an invalid name/owner_user; `404` if `site_id` doesn't exist on that server;
+`502` if the agent isn't connected; `422` if `db.create` itself failed on the agent.
+
+### `GET /api/v1/servers/{id}/databases`
+→ `200` with an array of `databaseRecord` (`ID`, `ServerID`, `SiteID`, `Name`,
+`OwnerUser`, `Status`, `CreatedAt` — no password field, ever), newest first.
+
+### `DELETE /api/v1/servers/{id}/databases/{dbId}`
+No request body — the database's own recorded `name`/`owner_user` are read from the
+`databases` table and passed to `db.delete`, so a caller can only ever delete a database
+that was actually created and recorded through this API. → `204` on success. `404` if
+the database doesn't exist on that server; `502` if the agent isn't connected; `422` if
+`db.delete` itself failed on the agent.
 
 ### `POST /agents/register`
 ```json
