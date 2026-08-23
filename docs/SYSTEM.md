@@ -102,9 +102,14 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | Site cloning, cross-server migration | ⬜ Phase 2 |
 | Maintenance mode | ⬜ not implemented |
 | Basic auth on a site | ⬜ not implemented |
-| Custom + Let's Encrypt SSL | ✅ `ssl.issue_letsencrypt` (certbot), `ssl.install_custom` |
-| Automatic SSL renewal | ⬜ not implemented (certbot's own renewal timer is not
-  wired up by `stack.install` yet) |
+| Custom + Let's Encrypt SSL | ✅ `ssl.issue_letsencrypt` (certbot), `ssl.install_custom`;
+  now reachable from a dedicated site-detail dashboard panel, not just the generic task API |
+| Automatic SSL renewal | ✅ `stack.install` and `ssl.issue_letsencrypt` both
+  `systemctl enable --now` certbot's `certbot.timer`; a new `ssl.status` capability
+  reports live certificate expiry + timer state, persisted on the site record
+  (`ssl_status`/`ssl_expires_at`/`ssl_renewal_active`). Real ACME issuance against a
+  public domain is unverified in this dev environment (no reachable test domain) — see
+  `SERVERAVATAR_PARITY.md` APP-016 |
 | WordPress auto-login/auto-update | ⬜ not implemented |
 | Application enable/disable | ✅ `site.set_status` |
 | Secure file manager | ✅ `file.list/read/write/delete`, scoped + symlink-safe |
@@ -164,9 +169,10 @@ Phase boundaries and full milestone/estimate tables are in `product-plan.md` §6
 is the condensed status:
 
 - **Phase 1 — secure working foundation:** ~90% of the *capability* surface exists and
-  is tested per-capability (see the tables above); the biggest real gaps are backup
-  **restore**, an automated test suite (now added, see `TESTING.md`), SSL auto-renewal,
-  and agent cert auto-rotation. Not "GA-ready" yet, but the architecture and security
+  is tested per-capability (see the tables above); backup **restore**, an automated test
+  suite, and SSL auto-renewal (certbot's renewal timer, plus a status capability and
+  dashboard UI) have all since been closed. The biggest remaining real gap is agent cert
+  auto-rotation. Not "GA-ready" yet, but the architecture and security
   primitives it depends on (mTLS, allow-listed capabilities, per-app isolation, audit
   log) are real and proven, not stubs.
 - **Phase 2 — professional server management:** not started. Git deployment,
@@ -295,7 +301,7 @@ in `packages/capabilities/capabilities_test.go`), not just convention.
 
 Current capability list: `system.ping`, `service.control`, `diagnostics.basic`,
 `stack.install`, `site.create`, `site.set_php_version`, `site.set_status`,
-`app.wordpress_install`, `ssl.issue_letsencrypt`, `ssl.install_custom`, `db.create`,
+`app.wordpress_install`, `ssl.issue_letsencrypt`, `ssl.install_custom`, `ssl.status`, `db.create`,
 `db.delete`, `db.list`, `file.list`, `file.read`, `file.write`, `file.delete`,
 `backup.run`, `backup.restore`, `logs.tail`. Notably absent (by design, until reviewed
 and added): `git.deploy`, `cron.upsert`, `ssh.*`, `firewall.*`, `agent.self_update`.

@@ -46,6 +46,8 @@ protected route; there is no route that skips it by omission.
 | `GET` | `/api/v1/servers/{id}/sites/{siteId}/backups` | List backups for a site, newest first |
 | `POST` | `/api/v1/servers/{id}/sites/{siteId}/backups` | Dispatch `backup.run` and persist the resulting backup record |
 | `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a previously recorded backup |
+| `POST` | `/api/v1/servers/{id}/sites/{siteId}/ssl` | Dispatch `ssl.issue_letsencrypt` for the site's own domain and persist the resulting certificate/renewal state |
+| `GET` | `/api/v1/servers/{id}/sites/{siteId}/ssl` | Dispatch `ssl.status` for a live read of the site's certificate/renewal state (falls back to the last persisted state if the agent is unreachable) |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -137,6 +139,27 @@ isn't connected; `422` if `backup.restore` itself failed on the agent (the agent
 error message explains why, and any checkpoint already taken is named in it so it's
 never a silent loss).
 
+### `POST /api/v1/servers/{id}/sites/{siteId}/ssl`
+No request body — the domain dispatched to `ssl.issue_letsencrypt` is always the site's
+own recorded `Domain` (never caller-supplied), and the Let's Encrypt notification email
+is always the logged-in account's own email. Also `systemctl enable --now`s certbot's
+renewal timer as part of issuance. 120s dispatch timeout. → `200` with
+`{"site": {...siteRecord with ssl_status/ssl_expires_at/ssl_renewal_active updated}, "ssl": {...}}`
+on success. `404` if the site doesn't exist on that server; `502` if the agent isn't
+connected; `422` if `ssl.issue_letsencrypt` itself failed on the agent (e.g. DNS for the
+domain doesn't point at this server yet).
+
+### `GET /api/v1/servers/{id}/sites/{siteId}/ssl`
+Dispatches `ssl.status` for a fresh, on-agent read of the site's certificate (parsed
+directly from `/etc/letsencrypt/live/<domain>/cert.pem`, never cached) and renewal-timer
+state, refreshing the persisted copy on the site record whenever the agent is reachable.
+30s dispatch timeout. → `200` always for a request against a real site — an unreachable
+agent or an agent-side error degrades to `{"site": {...last persisted state}, "live": false}`
+rather than failing the request, since a read-only status check should never error the
+dashboard out. On a live read: `{"site": {...}, "live": true, "ssl": {"domain", "managed",
+"not_after", "days_until_expiry", "renewal_timer_active", "renewal_timer_enabled"}}`.
+`404` if the site doesn't exist on that server.
+
 ### `POST /agents/register`
 ```json
 {"token": "<bootstrap token>", "csr_pem": "<PEM-encoded CSR>"}
@@ -177,7 +200,7 @@ The full allow-listed capability names `packages/capabilities.Default()` registe
 (see `SYSTEM.md` §12 for the allow-list rationale): `system.ping`, `service.control`,
 `diagnostics.basic`, `stack.install`, `site.create`, `site.set_php_version`,
 `site.set_status`, `app.wordpress_install`, `ssl.issue_letsencrypt`,
-`ssl.install_custom`, `db.create`, `db.delete`, `db.list`, `file.list`, `file.read`,
+`ssl.install_custom`, `ssl.status`, `db.create`, `db.delete`, `db.list`, `file.list`, `file.read`,
 `file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`.
 
 ### `backup.restore`

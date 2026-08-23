@@ -287,6 +287,93 @@ func TestCreateBackupRejectsInvalidScope(t *testing.T) {
 	}
 }
 
+func TestSSLEndpointsRequireARealSite(t *testing.T) {
+	secureCookies = false
+	defer func() { secureCookies = true }()
+
+	a := newTestAPIServer(t)
+	h := a.routes()
+
+	doJSON(t, h, "POST", "/api/v1/auth/signup", map[string]string{
+		"Email": "ssl-ops@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	rec := doJSON(t, h, "POST", "/api/v1/auth/login", map[string]string{
+		"Email": "ssl-ops@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	cookie := sessionCookie(rec)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers", map[string]any{"Name": "web-ssl"}, cookie)
+	var created struct {
+		ServerID string `json:"server_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/sites/site_nonexistent/ssl", nil, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("issue SSL for nonexistent site: status = %d, want 404", rec.Code)
+	}
+	rec = doJSON(t, h, "GET", "/api/v1/servers/"+created.ServerID+"/sites/site_nonexistent/ssl", nil, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("get SSL status for nonexistent site: status = %d, want 404", rec.Code)
+	}
+}
+
+// TestSSLIssueWithNoAgentConnectedFails proves ssl issuance goes through
+// the real dispatch path (and so fails the same way backup/site dispatch
+// does when no agent is connected) rather than ever fabricating a success.
+func TestSSLIssueWithNoAgentConnectedFails(t *testing.T) {
+	secureCookies = false
+	defer func() { secureCookies = true }()
+
+	a := newTestAPIServer(t)
+	h := a.routes()
+
+	doJSON(t, h, "POST", "/api/v1/auth/signup", map[string]string{
+		"Email": "ssl-ops2@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	rec := doJSON(t, h, "POST", "/api/v1/auth/login", map[string]string{
+		"Email": "ssl-ops2@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	cookie := sessionCookie(rec)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers", map[string]any{"Name": "web-ssl-2"}, cookie)
+	var created struct {
+		ServerID string `json:"server_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+
+	site, err := a.store.createSite(created.ServerID, "d.example.com", "sp_d", "/home/sites/sp_d", "static", "")
+	if err != nil {
+		t.Fatalf("createSite: %v", err)
+	}
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/sites/"+site.ID+"/ssl", nil, cookie)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("issue SSL with no agent connected: status = %d, body = %s, want 502", rec.Code, rec.Body.String())
+	}
+
+	// A read-only status check must degrade gracefully instead of erroring
+	// out when the agent isn't reachable — it falls back to the last
+	// persisted state.
+	rec = doJSON(t, h, "GET", "/api/v1/servers/"+created.ServerID+"/sites/"+site.ID+"/ssl", nil, cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get SSL status with no agent connected: status = %d, body = %s, want 200", rec.Code, rec.Body.String())
+	}
+	var status struct {
+		Live bool `json:"live"`
+		Site siteRecord
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &status); err != nil {
+		t.Fatalf("unmarshal SSL status response: %v", err)
+	}
+	if status.Live {
+		t.Fatal("expected live = false when no agent is connected")
+	}
+	if status.Site.SSLStatus != "none" {
+		t.Fatalf("SSLStatus = %q, want \"none\" before any certificate has been issued", status.Site.SSLStatus)
+	}
+}
+
 func TestRegisterEndpointRejectsBadToken(t *testing.T) {
 	a := newTestAPIServer(t)
 	h := a.routes()

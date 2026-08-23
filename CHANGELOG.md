@@ -2,6 +2,42 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-23 — SSL auto-renewal, status, and dashboard reachability
+
+- **Closed the SSL auto-renewal gap** flagged in the previous entry's `SYSTEM.md`
+  status as one of the two biggest remaining Phase 1 items. `stack.install`'s certbot
+  step now `systemctl enable --now`s the package's `certbot.timer` (the systemd timer
+  that runs `certbot renew` twice daily), so a fresh install gets working auto-renewal
+  without a separate step. `ssl.issue_letsencrypt` does the same immediately after
+  issuance (covers servers that already had certbot installed before this change) and
+  now reports back whether the timer actually ended up active/enabled, rather than
+  treating "certbot exited 0" as proof renewal is wired up.
+- **Added `ssl.status`**, a new read-only capability that parses a domain's real
+  certificate straight off disk (`crypto/x509` against
+  `/etc/letsencrypt/live/<domain>/cert.pem` — never trusted from certbot's own stdout)
+  and reports issuer, expiry, days-until-expiry, and live renewal-timer state.
+- **Made SSL reachable from the dashboard for the first time.** Despite being marked
+  "implemented" in `SYSTEM.md`, `ssl.issue_letsencrypt`/`ssl.install_custom` had no
+  dedicated UI or REST endpoint — the only way to invoke them was the raw generic
+  `POST /servers/{id}/tasks` capability-dispatch API. Added
+  `POST`/`GET /api/v1/servers/{id}/sites/{siteId}/ssl` (dispatch-then-persist-on-success,
+  the same pattern `handleCreateSite`/`handleCreateBackup` use), three new `sites`
+  columns (`ssl_status`, `ssl_expires_at`, `ssl_renewal_active`, added via the existing
+  idempotent `addColumnIfMissing` migration path), and a site-detail "SSL certificate"
+  panel in the dashboard showing live status and an "Issue Let's Encrypt certificate"
+  button behind a confirmation dialog. A status read that can't reach the agent
+  degrades to the last persisted state (`live: false`) instead of erroring the page out.
+- Added 6 new capability-layer tests (`packages/capabilities/ssl_test.go`: domain/email
+  validation, unmanaged-domain reports no error, real certificate-expiry parsing against
+  a generated self-signed certificate, corrupt-certificate-file degrades gracefully) and
+  2 new control-plane HTTP tests (SSL endpoints' not-found boundaries; issuing with no
+  agent connected fails as a real `502` dispatch error while a status read degrades to
+  `200`/`live: false`). Full suite: 69 test functions, `go vet`/`gofmt` clean.
+- Updated `SYSTEM.md`, `API.md`, `TESTING.md`, and `SERVERAVATAR_PARITY.md` (new
+  APP-016 detail entry) to reflect the new capability, endpoints, and honest remaining
+  gap: real ACME issuance against a public domain is still `BLOCKED_EXTERNAL` in this
+  dev environment (no reachable test domain), tracked explicitly rather than claimed.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

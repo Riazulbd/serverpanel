@@ -184,6 +184,13 @@
         <p class="muted" id="siteDetailMeta" style="margin:0 0 20px"></p>
 
         <div class="section-title" style="display:flex;justify-content:space-between;align-items:center">
+          <span>SSL certificate</span>
+          <button class="primary" onclick="issueSSL()">Issue Let's Encrypt certificate</button>
+        </div>
+        <div id="sslResult" class="task-result hidden"></div>
+        <div id="sslStatus" class="muted">Checking certificate status...</div>
+
+        <div class="section-title" style="display:flex;justify-content:space-between;align-items:center">
           <span>Backups</span>
           <button class="primary" onclick="openNewBackupModal()">+ Create backup</button>
         </div>
@@ -475,7 +482,46 @@ async function openSiteDetail(siteId) {
     document.getElementById('siteDetailMeta').textContent =
       site.AppType + (site.PHPVersion ? (' · PHP ' + site.PHPVersion) : '') + ' · ' + site.Status;
   }
+  document.getElementById('sslResult').classList.add('hidden');
+  await refreshSSLStatus();
   await refreshBackups();
+}
+
+async function refreshSSLStatus() {
+  const el = document.getElementById('sslStatus');
+  el.textContent = 'Checking certificate status...';
+  try {
+    const res = await api(API + '/servers/' + state.selectedServerId + '/sites/' + state.selectedSiteId + '/ssl');
+    const site = res.site || {};
+    if (site.SSLStatus !== 'active') {
+      el.textContent = 'No certificate issued yet.' + (res.live ? '' : ' (could not confirm live server status — showing last known state)');
+      return;
+    }
+    const expires = site.SSLExpiresAt ? new Date(site.SSLExpiresAt) : null;
+    const daysLeft = expires ? Math.round((expires - Date.now()) / 86400000) : null;
+    el.innerHTML = 'Active' + (expires ? ' · expires ' + expires.toLocaleDateString() + (daysLeft !== null ? ' (' + daysLeft + ' days)' : '') : '') +
+      ' · automatic renewal ' + (site.SSLRenewalActive ? '<span class="badge connected">enabled</span>' : '<span class="badge disconnected">not confirmed active</span>') +
+      (res.live ? '' : ' <span class="muted">(showing last known state — agent not reachable)</span>');
+  } catch (e) {
+    el.textContent = 'Could not load certificate status: ' + e.message;
+  }
+}
+
+async function issueSSL() {
+  if (!confirm('Issue a free Let\'s Encrypt certificate for this domain? DNS for the domain must already point at this server.')) return;
+  const box = document.getElementById('sslResult');
+  box.className = 'task-result running';
+  box.textContent = 'Requesting certificate from Let\'s Encrypt and enabling automatic renewal...';
+  box.classList.remove('hidden');
+  try {
+    await api(API + '/servers/' + state.selectedServerId + '/sites/' + state.selectedSiteId + '/ssl', {method: 'POST'});
+    box.className = 'task-result ok';
+    box.textContent = 'Certificate issued and automatic renewal enabled.';
+    await refreshSSLStatus();
+  } catch (e) {
+    box.className = 'task-result fail';
+    box.textContent = 'Issuing certificate failed: ' + e.message;
+  }
 }
 
 async function refreshBackups() {

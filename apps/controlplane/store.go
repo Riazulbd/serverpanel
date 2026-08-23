@@ -334,21 +334,43 @@ func (s *store) auditLog() []auditEntry {
 }
 
 type siteRecord struct {
-	ID         string
-	ServerID   string
-	Domain     string
-	SystemUser string
-	Docroot    string
-	AppType    string
-	PHPVersion string
-	Status     string
-	CreatedAt  time.Time
+	ID               string
+	ServerID         string
+	Domain           string
+	SystemUser       string
+	Docroot          string
+	AppType          string
+	PHPVersion       string
+	Status           string
+	SSLStatus        string // "none" or "active" — see updateSiteSSL
+	SSLExpiresAt     time.Time
+	SSLRenewalActive bool
+	CreatedAt        time.Time
+}
+
+const siteColumns = `id, server_id, domain, system_user, docroot, app_type, php_version, status,
+	ssl_status, ssl_expires_at, ssl_renewal_active, created_at`
+
+func scanSite(row interface{ Scan(...any) error }) (*siteRecord, error) {
+	var rec siteRecord
+	var createdAt, sslExpiresAt string
+	var sslRenewalActive int
+	if err := row.Scan(&rec.ID, &rec.ServerID, &rec.Domain, &rec.SystemUser, &rec.Docroot,
+		&rec.AppType, &rec.PHPVersion, &rec.Status, &rec.SSLStatus, &sslExpiresAt, &sslRenewalActive,
+		&createdAt); err != nil {
+		return nil, err
+	}
+	rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+	if sslExpiresAt != "" {
+		rec.SSLExpiresAt, _ = time.Parse(time.RFC3339, sslExpiresAt)
+	}
+	rec.SSLRenewalActive = sslRenewalActive != 0
+	return &rec, nil
 }
 
 func (s *store) listSites(serverID string) []*siteRecord {
 	rows, err := s.db.Query(
-		`SELECT id, server_id, domain, system_user, docroot, app_type, php_version, status, created_at
-		 FROM sites WHERE server_id = ? ORDER BY created_at DESC`, serverID)
+		`SELECT `+siteColumns+` FROM sites WHERE server_id = ? ORDER BY created_at DESC`, serverID)
 	if err != nil {
 		return nil
 	}
@@ -356,14 +378,11 @@ func (s *store) listSites(serverID string) []*siteRecord {
 
 	var out []*siteRecord
 	for rows.Next() {
-		var rec siteRecord
-		var createdAt string
-		if err := rows.Scan(&rec.ID, &rec.ServerID, &rec.Domain, &rec.SystemUser, &rec.Docroot,
-			&rec.AppType, &rec.PHPVersion, &rec.Status, &createdAt); err != nil {
+		rec, err := scanSite(rows)
+		if err != nil {
 			continue
 		}
-		rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
-		out = append(out, &rec)
+		out = append(out, rec)
 	}
 	return out
 }
@@ -371,13 +390,14 @@ func (s *store) listSites(serverID string) []*siteRecord {
 func (s *store) createSite(serverID, domain, systemUser, docroot, appType, phpVersion string) (*siteRecord, error) {
 	rec := &siteRecord{
 		ID: randID("site"), ServerID: serverID, Domain: domain, SystemUser: systemUser,
-		Docroot: docroot, AppType: appType, PHPVersion: phpVersion, Status: "active", CreatedAt: time.Now().UTC(),
+		Docroot: docroot, AppType: appType, PHPVersion: phpVersion, Status: "active",
+		SSLStatus: "none", CreatedAt: time.Now().UTC(),
 	}
 	_, err := s.db.Exec(
-		`INSERT INTO sites (id, server_id, domain, system_user, docroot, app_type, php_version, status, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO sites (id, server_id, domain, system_user, docroot, app_type, php_version, status, ssl_status, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		rec.ID, rec.ServerID, rec.Domain, rec.SystemUser, rec.Docroot, rec.AppType, rec.PHPVersion, rec.Status,
-		rec.CreatedAt.Format(time.RFC3339Nano),
+		rec.SSLStatus, rec.CreatedAt.Format(time.RFC3339Nano),
 	)
 	if err != nil {
 		return nil, err
@@ -391,16 +411,27 @@ func (s *store) createSite(serverID, domain, systemUser, docroot, appType, phpVe
 // site X's docroot if X actually belongs to server B).
 func (s *store) getSite(serverID, siteID string) (*siteRecord, bool) {
 	row := s.db.QueryRow(
-		`SELECT id, server_id, domain, system_user, docroot, app_type, php_version, status, created_at
-		 FROM sites WHERE id = ? AND server_id = ?`, siteID, serverID)
-	var rec siteRecord
-	var createdAt string
-	if err := row.Scan(&rec.ID, &rec.ServerID, &rec.Domain, &rec.SystemUser, &rec.Docroot,
-		&rec.AppType, &rec.PHPVersion, &rec.Status, &createdAt); err != nil {
+		`SELECT `+siteColumns+` FROM sites WHERE id = ? AND server_id = ?`, siteID, serverID)
+	rec, err := scanSite(row)
+	if err != nil {
 		return nil, false
 	}
-	rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
-	return &rec, true
+	return rec, true
+}
+
+// updateSiteSSL records the outcome of an ssl.issue_letsencrypt or
+// ssl.status dispatch against this site. notAfter is an RFC3339 timestamp
+// (or "" if the certificate's expiry could not be determined).
+func (s *store) updateSiteSSL(serverID, siteID, notAfter string, renewalActive bool) error {
+	status := "none"
+	if notAfter != "" {
+		status = "active"
+	}
+	_, err := s.db.Exec(
+		`UPDATE sites SET ssl_status = ?, ssl_expires_at = ?, ssl_renewal_active = ? WHERE id = ? AND server_id = ?`,
+		status, notAfter, renewalActive, siteID, serverID,
+	)
+	return err
 }
 
 type backupRecord struct {

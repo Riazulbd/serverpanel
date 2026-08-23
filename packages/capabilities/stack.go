@@ -132,11 +132,25 @@ func phase1LEMPSteps() []installStep {
 			Run:   installWPCLI,
 		},
 		{
-			Name:  "certbot (Let's Encrypt ACME client)",
-			Check: func(ctx context.Context) bool { return isPackageInstalled(ctx, "certbot") },
+			Name: "certbot (Let's Encrypt ACME client) with automatic renewal",
+			Check: func(ctx context.Context) bool {
+				return isPackageInstalled(ctx, "certbot") && systemdUnitIsEnabled(ctx, certbotRenewalTimer)
+			},
 			Run: func(ctx context.Context) error {
-				_, err := aptInstall(ctx, "certbot", "python3-certbot-nginx")
-				return err
+				if _, err := aptInstall(ctx, "certbot", "python3-certbot-nginx"); err != nil {
+					return err
+				}
+				// The certbot package ships a systemd timer that runs
+				// `certbot renew` twice daily; enabling it here (rather
+				// than only at issuance time in ssl.issue_letsencrypt)
+				// means a server that already had certbot installed
+				// before this change, or whose package postinst didn't
+				// enable it, still ends up with working auto-renewal the
+				// next time stack.install is (re)run.
+				if _, err := run(ctx, "systemctl", "enable", "--now", certbotRenewalTimer); err != nil {
+					return fmt.Errorf("enable %s: %w", certbotRenewalTimer, err)
+				}
+				return nil
 			},
 		},
 		{
