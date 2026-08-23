@@ -297,3 +297,63 @@ func TestBackupCreateListGetRoundTrip(t *testing.T) {
 		t.Fatal("expected getBackup to refuse a backup ID under the wrong server")
 	}
 }
+
+func TestDatabaseCreateListGetDeleteRoundTrip(t *testing.T) {
+	st := newTestStore(t)
+	serverID, _, _ := st.createServer("web-11", "", nil, time.Hour, "admin@example.com")
+
+	db, err := st.createDatabase(serverID, "", "wp_example", "wp_owner", "mariadb")
+	if err != nil {
+		t.Fatalf("createDatabase: %v", err)
+	}
+	if db.ID == "" || db.Status != "active" || db.Engine != "mariadb" {
+		t.Fatalf("unexpected database record: %+v", db)
+	}
+
+	list := st.listDatabases(serverID)
+	if len(list) != 1 || list[0].Name != "wp_example" {
+		t.Fatalf("listDatabases = %+v, want one entry matching the created database", list)
+	}
+
+	got, ok := st.getDatabase(serverID, db.ID)
+	if !ok {
+		t.Fatal("expected getDatabase to find the created database")
+	}
+	if got.OwnerUser != "wp_owner" {
+		t.Fatalf("getDatabase = %+v, fields don't round-trip", got)
+	}
+
+	if err := st.deleteDatabaseRecord(serverID, db.ID); err != nil {
+		t.Fatalf("deleteDatabaseRecord: %v", err)
+	}
+	if _, ok := st.getDatabase(serverID, db.ID); ok {
+		t.Fatal("expected getDatabase to no longer find a deleted database")
+	}
+	if err := st.deleteDatabaseRecord(serverID, db.ID); err == nil {
+		t.Fatal("expected deleteDatabaseRecord to error on an already-deleted database")
+	}
+}
+
+func TestGetDatabaseIsScopedToServerID(t *testing.T) {
+	st := newTestStore(t)
+	serverA, _, _ := st.createServer("web-c", "", nil, time.Hour, "admin@example.com")
+	serverB, _, _ := st.createServer("web-d", "", nil, time.Hour, "admin@example.com")
+
+	db, err := st.createDatabase(serverA, "", "app_db", "app_owner", "mariadb")
+	if err != nil {
+		t.Fatalf("createDatabase: %v", err)
+	}
+
+	if _, ok := st.getDatabase(serverA, db.ID); !ok {
+		t.Fatal("expected getDatabase to find the database under its real server")
+	}
+	if _, ok := st.getDatabase(serverB, db.ID); ok {
+		t.Fatal("expected getDatabase to refuse a database ID under the wrong server")
+	}
+	if err := st.deleteDatabaseRecord(serverB, db.ID); err == nil {
+		t.Fatal("expected deleteDatabaseRecord to refuse deleting a database ID under the wrong server")
+	}
+	if _, ok := st.getDatabase(serverA, db.ID); !ok {
+		t.Fatal("database should still exist after a cross-server delete attempt was correctly rejected")
+	}
+}

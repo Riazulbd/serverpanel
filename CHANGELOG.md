@@ -2,6 +2,59 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-23 — Database control-plane persistence and dashboard UI
+
+- **Closed the highest-priority gap the parity tracker had flagged**
+  (`docs/SERVERAVATAR_PARITY.md` DB-001/DB-005, "good candidate for the next
+  iteration"): databases created via `db.create` are now durably recorded and
+  manageable from the dashboard, the same dispatch-then-persist-on-success pattern
+  `site.create` and `backup.run` already use.
+- `packages/capabilities/db.go`: `handleDBCreate` now returns its result as JSON
+  (`dbResult{name, owner_user}`) instead of a plain string, mirroring `site.create`'s
+  `siteResult`, so the control plane can parse and persist it. Exported
+  `IdentifierPattern` (the existing `identifierRe`'s source) so the control plane can
+  apply the same validation before dispatch without duplicating or drifting from the
+  pattern — guarded by a new test that fails if the two ever diverge.
+- New `databases` SQLite table (`server_id`, `site_id` (optional), `name`,
+  `owner_user`, `engine`, `status`, `created_at`) and matching `store.go` methods
+  (`createDatabase`/`listDatabases`/`getDatabase`/`deleteDatabaseRecord`, each scoped
+  by server ID the same way `getSite`/`getBackup` are). Deliberately **no password
+  column**: a cryptographically random 48-hex-char owner password is generated
+  per-request in `apps/controlplane/databases.go` (never accepted from the client),
+  handed to the agent to set on the new database user, and returned to the caller
+  exactly once in the API response — the same "shown once, never stored" treatment
+  `createServer` already gives bootstrap tokens.
+- Three new endpoints (`GET`/`POST /api/v1/servers/{id}/databases`,
+  `DELETE /api/v1/servers/{id}/databases/{databaseId}`), all requiring an
+  authenticated session. Create validates `name`/`owner_user` against the identifier
+  allow-list and an optional `site_id` against the server's own sites *before*
+  dispatching (fail fast, no wasted round trip to a disconnected agent). Delete reads
+  the database's own recorded `name`/`owner_user` from the store rather than trusting
+  client input, so a caller can only ever delete a database this platform actually
+  created and recorded — the same parameter-sourcing discipline `backup.restore`'s
+  endpoint already applies.
+- Added a "Databases" panel to the server-detail dashboard view: a create modal
+  (name + optional owner user) that shows the generated password exactly once with an
+  explicit "save this now" prompt, a databases table, and a delete button with a
+  destructive-action confirmation dialog.
+- Added 6 new capability-layer tests (identifier allow-list accept/reject including a
+  SQL-injection-shaped input, the `IdentifierPattern`/`identifierRe` drift guard,
+  `db.create`/`db.delete` rejecting an invalid name/owner/short password *before* any
+  MariaDB connection is attempted, and `dbResult`'s JSON round trip), 2 new store-layer
+  tests (create/list/get/delete round trip, cross-server scoping for both read and
+  delete), and 2 new HTTP-layer tests (not-found boundaries, and validation-running-
+  before-dispatch — the same shape as the existing backup-endpoint tests). Full suite:
+  72 test functions (31 `apps/controlplane` + 41 `packages/capabilities`), `go vet`/
+  `gofmt` clean. A real dispatch → agent → MariaDB → persisted-record round trip
+  remains `BLOCKED_EXTERNAL` in this environment (no MariaDB available here) — see
+  `docs/TESTING.md` §2 and `docs/SERVERAVATAR_PARITY.md` DB-001 for exactly what is and
+  isn't covered.
+- Updated `SYSTEM.md` (new "Database management" feature table, schema, API summary),
+  `API.md` (full request/response docs for the three new endpoints), `TESTING.md`
+  (updated counts and coverage description), and `SERVERAVATAR_PARITY.md` (DB-001
+  expanded to a full detail block; the now-redundant DB-005 summary row retired and
+  folded into it, with a change-history entry explaining why).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the
