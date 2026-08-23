@@ -2,6 +2,45 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-23 — Database control-plane persistence and dashboard panel (DB-005)
+
+- **Closed the gap flagged in DB-001's "known differences"** (2026-08-17 entry below):
+  `db.create`/`db.delete` existed only as agent-side capabilities dispatched through
+  the generic task-dispatch endpoint, with no durable control-plane record and no
+  dashboard UI — unlike sites and backups, which already get both. Databases now get
+  the same dispatch-then-persist-on-success treatment.
+- New `databases` table (`server_id`, optional `site_id`, `name`, `owner_user`,
+  `status`, `created_at`; `UNIQUE(server_id, name)`) and store methods
+  (`createDatabase`/`listDatabases`/`getDatabase`/`deleteDatabase`, each scoped by
+  server ID the same way `getSite`/`getBackup` are).
+- Three new endpoints: `GET`/`POST /api/v1/servers/{id}/databases`,
+  `DELETE /api/v1/servers/{id}/databases/{databaseId}` (`apps/controlplane/databases.go`).
+  The owner username is always the database name itself; the owner password is
+  generated control-plane-side (24 random bytes, hex-encoded), sent to the agent for
+  `CREATE USER ... IDENTIFIED BY`, and returned to the caller exactly once in the
+  create response — never persisted, matching the bootstrap-token "shown once" pattern.
+- `packages/capabilities/db.go`'s `handleDBCreate` now returns a small JSON result
+  (`dbCreateResult{Name, OwnerUser}`) instead of a free-form string, so the control
+  plane can parse it the way `siteResult`/`backupResult` already are.
+- New "Databases" panel in the server-detail dashboard view: create-database modal
+  (name only), a databases table with a delete action, and a one-time password
+  banner after creation.
+- Added capability-layer validation tests (`packages/capabilities/db_test.go`:
+  identifier/password-length rejection for both create and delete, safe to run without
+  a live MariaDB) and control-plane tests (`store_test.go`:
+  `TestDatabaseCreateListGetDeleteRoundTrip`, `TestGetDatabaseIsScopedToServerID`
+  including the per-server uniqueness constraint; `http_test.go`:
+  `TestCreateDatabaseRejectsInvalidName`, `TestDeleteDatabaseRequiresARealRecord`,
+  proving validation happens before dispatch — a well-formed request against a server
+  with no connected agent fails as `502`, not a validation error). Full suite passes,
+  `go build`/`go vet` clean.
+- Updated `docs/API.md`, `docs/SYSTEM.md` (database-schema table), and
+  `docs/SERVERAVATAR_PARITY.md` (DB-005 moved to a full detail block, `COMPLETE`;
+  DB-001's known-differences narrowed accordingly). Real `db.create`/`db.delete`
+  dispatch success against a live MariaDB-backed agent remains unverified by `go test`
+  in this environment (no MariaDB here) — same documented, pre-existing gap as DB-001
+  itself, not something this change introduced.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

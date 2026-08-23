@@ -46,6 +46,9 @@ protected route; there is no route that skips it by omission.
 | `GET` | `/api/v1/servers/{id}/sites/{siteId}/backups` | List backups for a site, newest first |
 | `POST` | `/api/v1/servers/{id}/sites/{siteId}/backups` | Dispatch `backup.run` and persist the resulting backup record |
 | `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a previously recorded backup |
+| `GET` | `/api/v1/servers/{id}/databases` | List databases on a server, newest first |
+| `POST` | `/api/v1/servers/{id}/databases` | Dispatch `db.create` and persist the resulting database record |
+| `DELETE` | `/api/v1/servers/{id}/databases/{databaseId}` | Dispatch `db.delete` for a previously recorded database, then remove its record |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -136,6 +139,38 @@ pre-restore safety backups taken automatically before anything was overwritten,
 isn't connected; `422` if `backup.restore` itself failed on the agent (the agent-side
 error message explains why, and any checkpoint already taken is named in it so it's
 never a silent loss).
+
+### `POST /api/v1/servers/{id}/databases`
+```json
+{"name": "app_db", "site_id": ""}
+```
+`name` must match `^[a-z][a-z0-9_]{0,30}$` (validated here *and* independently by the
+agent's own `identifierRe` — defense in depth, same reasoning as `SYSTEM.md` §12's
+double OS-support check). `site_id` is optional (associates the database with an
+application for bookkeeping; when set, must reference an existing site on the same
+server). The owner username is always the database name itself, and the owner password
+is generated server-side (24 random bytes, hex-encoded) — never caller-supplied, never
+persisted anywhere. Dispatches `db.create` with that generated password, and only on
+the agent reporting success, persists a `databases` row (password excluded). →
+`201 {"database": {...databaseRecord}, "owner_password": "..."}` — the password is
+returned exactly once in this response and cannot be retrieved again (the same
+"shown once" pattern the bootstrap-token install command uses). `400` for an
+invalid/missing name; `404` if `site_id` is set but doesn't exist on that server; `502`
+if the agent isn't connected; `422` if `db.create` itself failed on the agent (e.g. the
+name is already in use).
+
+### `GET /api/v1/servers/{id}/databases`
+→ `200` with an array of `databaseRecord` (`ID`, `ServerID`, `SiteID`, `Name`,
+`OwnerUser`, `Status`, `CreatedAt`), newest first.
+
+### `DELETE /api/v1/servers/{id}/databases/{databaseId}`
+No request body — the database's own recorded `name` and `owner_user` are read from
+the `databases` table and passed to `db.delete` verbatim; a caller can only ever delete
+a database that was actually created and recorded, never point deletion at an arbitrary
+name. → `204` on success. `404` if the database doesn't exist on that server; `502` if
+the agent isn't connected; `422` if `db.delete` itself failed on the agent (the record
+is only removed after the agent confirms deletion, so a failed delete never leaves the
+control plane's view out of sync with what's actually on the server).
 
 ### `POST /agents/register`
 ```json
