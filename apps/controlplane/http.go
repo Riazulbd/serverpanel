@@ -56,6 +56,10 @@ func (a *apiServer) routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/servers/{id}/sites/{siteId}/backups", a.requireAuth(a.handleListBackups))
 	mux.HandleFunc("POST /api/v1/servers/{id}/sites/{siteId}/backups", a.requireAuth(a.handleCreateBackup))
 	mux.HandleFunc("POST /api/v1/servers/{id}/backups/{backupId}/restore", a.requireAuth(a.handleRestoreBackup))
+	mux.HandleFunc("GET /api/v1/servers/{id}/sites/{siteId}/cron", a.requireAuth(a.handleListCronJobs))
+	mux.HandleFunc("POST /api/v1/servers/{id}/sites/{siteId}/cron", a.requireAuth(a.handleCreateCronJob))
+	mux.HandleFunc("POST /api/v1/servers/{id}/sites/{siteId}/cron/{cronId}/toggle", a.requireAuth(a.handleSetCronJobEnabled))
+	mux.HandleFunc("DELETE /api/v1/servers/{id}/sites/{siteId}/cron/{cronId}", a.requireAuth(a.handleDeleteCronJob))
 	mux.HandleFunc("GET /api/v1/audit", a.requireAuth(a.handleAudit))
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })

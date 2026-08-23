@@ -80,7 +80,8 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | SSH/SFTP management, SSH-key mgmt, port mgmt, root-login controls | ⬜ Phase 2 |
 | Automatic security updates | ⬜ Phase 2 (`unattended-upgrades` integration) |
 | Service controls | ✅ `service.control`, allow-listed units/actions only |
-| Cron-job management | ⬜ Phase 2 |
+| Cron-job management | ✅ `cron.create`/`cron.list`/`cron.delete`/`cron.set_enabled`,
+  scoped to a site's own system user, dashboard UI on the site-detail view |
 | Process/worker management | ⬜ Phase 2 |
 | Disk-usage analysis, safe cleanup | ⬜ not started |
 | Server diagnostics | 🚧 `diagnostics.basic` (read-only service-state check); no
@@ -169,9 +170,10 @@ is the condensed status:
   and agent cert auto-rotation. Not "GA-ready" yet, but the architecture and security
   primitives it depends on (mTLS, allow-listed capabilities, per-app isolation, audit
   log) are real and proven, not stubs.
-- **Phase 2 — professional server management:** not started. Git deployment,
-  cron/process management, SSH/firewall management UI, remote backups, cross-server
-  migration all remain ⬜.
+- **Phase 2 — professional server management:** mostly not started; cron-job
+  management has landed early (see the Server management table above). Git
+  deployment, process/worker management, SSH/firewall management UI, remote backups,
+  cross-server migration all remain ⬜.
 - **Phase 3 — commercial platform:** not started.
 
 ## 4. System architecture
@@ -253,6 +255,7 @@ EXISTS`, applied on every `openDB` call — idempotent, no separate migration to
 | `audit_log` | append-only: seq, timestamp, server, actor, action, detail |
 | `sites` | id, server, domain, system user, docroot, app type, PHP version, status |
 | `backups` | id, server, site, scope, path, size, sha256, status, created_at |
+| `cron_jobs` | id, server, site, agent-assigned job id, label, schedule, command, enabled, created_at |
 
 No ORM — every query is a small, explicit SQL statement in `store.go`. All secrets
 (session tokens, bootstrap tokens) are stored only as SHA-256 hashes; passwords use
@@ -262,8 +265,9 @@ bcrypt (cost 12); nothing is stored in plaintext.
 
 Full list with request/response shapes in `API.md`. Summary: `/api/v1/auth/*`
 (signup/login/logout/TOTP enroll+verify/MFA challenge/me), `/api/v1/servers*` (CRUD,
-revoke, task dispatch, sites, audit), `/agents/register` (the one unauthenticated
-agent-facing endpoint, secured by the bootstrap token itself), `/healthz`.
+revoke, task dispatch, sites, backups, cron jobs, audit), `/agents/register` (the one
+unauthenticated agent-facing endpoint, secured by the bootstrap token itself),
+`/healthz`.
 
 ## 10. Background jobs
 
@@ -297,8 +301,9 @@ Current capability list: `system.ping`, `service.control`, `diagnostics.basic`,
 `stack.install`, `site.create`, `site.set_php_version`, `site.set_status`,
 `app.wordpress_install`, `ssl.issue_letsencrypt`, `ssl.install_custom`, `db.create`,
 `db.delete`, `db.list`, `file.list`, `file.read`, `file.write`, `file.delete`,
-`backup.run`, `backup.restore`, `logs.tail`. Notably absent (by design, until reviewed
-and added): `git.deploy`, `cron.upsert`, `ssh.*`, `firewall.*`, `agent.self_update`.
+`backup.run`, `backup.restore`, `logs.tail`, `cron.list`, `cron.create`,
+`cron.delete`, `cron.set_enabled`. Notably absent (by design, until reviewed and
+added): `git.deploy`, `ssh.*`, `firewall.*`, `agent.self_update`.
 
 ## 13. Installation and deployment
 

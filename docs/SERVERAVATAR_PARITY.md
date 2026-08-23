@@ -163,6 +163,25 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Known differences**: same-server restore only — there is no capability to restore a backup onto a *different* server (that needs a transfer step first).
 - **Reason**: cross-server restore is coupled to cross-server migration/cloning, both explicitly Phase 2 (`product-plan.md` §9); tracked as a follow-up, not silently dropped.
 
+### SRV-005 — Cron job management
+- **Category**: Server Management
+- **Documentation page**: Server Management → "Cron Jobs"
+- **Short description**: Schedule recurring commands to run as a chosen application/system user.
+- **Expected behavior** (per ServerAvatar's documented workflow): pick a schedule (common presets or a custom expression), a command, and which user it runs as; list, enable/disable, and delete scheduled jobs per site.
+- **Our implementation**: `cron.create`/`cron.list`/`cron.delete`/`cron.set_enabled` (agent) — each site's cron jobs are scheduled as that site's own isolated system user (never a caller-chosen one), tracked in a per-user JSON metadata file (`/etc/serverpanel/cron/<user>.json`, the durable source of truth including disabled jobs) and mirrored into a generated `/etc/cron.d/serverpanel-<user>` drop-in file — regenerated in full, write-temp-then-rename, on every mutation, containing only currently-enabled jobs so "disabled" is actually enforced by cron's own file absence, not just a database flag. Control plane persists a `cron_jobs` row only after the agent confirms success, mirroring the `backup.run`/`backup.restore` dispatch-then-persist pattern.
+- **Frontend**: site-detail "Cron jobs" panel — "New cron job" modal (common-schedule presets or a custom cron expression, command, optional label), jobs table with enable/disable and delete actions.
+- **Backend service**: `apiServer.handleCreateCronJob`/`handleListCronJobs`/`handleSetCronJobEnabled`/`handleDeleteCronJob` (`apps/controlplane/cron.go`).
+- **API endpoint(s)**: `GET`/`POST /api/v1/servers/{id}/sites/{siteId}/cron`, `POST /api/v1/servers/{id}/sites/{siteId}/cron/{cronId}/toggle`, `DELETE /api/v1/servers/{id}/sites/{siteId}/cron/{cronId}`.
+- **Agent command**: `cron.list`, `cron.create`, `cron.delete`, `cron.set_enabled`.
+- **DB tables**: `cron_jobs` (`server_id`, `site_id`, `agent_id`, `label`, `schedule`, `command`, `enabled`, `created_at`).
+- **Required permission**: authenticated session; `system_user` is always re-derived server-side from the site record, never accepted from the request body, so a caller can only ever schedule a job as their own site's system user.
+- **Security considerations**: `system_user` is validated against a POSIX-username regex and, where `id` is available, checked to actually exist on the host; `schedule` fields are restricted to a fixed safe charset (`[0-9A-Za-z*,/-]`) or a fixed nickname set; `command` is rejected outright if it contains a newline or NUL byte (which would otherwise let a crafted command inject an extra, uncontrolled line into the generated cron.d file) and any `%` is auto-escaped to `\%` (cron's own newline-in-command footgun, closed transparently rather than left as a caller trap); every write to the metadata JSON or the cron.d file is write-to-temp-then-rename, so a crash mid-write can never leave a half-written file cron might try to parse.
+- **Test coverage**: `packages/capabilities/cron_test.go` (schedule/command/user validation including the `%`-escaping and newline-injection checks, and a full create→list→disable→list→delete round trip against a real throwaway system user verifying the generated `/etc/cron.d` file's exact contents after each mutation); `apps/controlplane/store_test.go` (`TestCronJobCreateListGetToggleDeleteRoundTrip`, including cross-server scoping); `apps/controlplane/http_test.go` (`TestCronEndpointsRequireARealSiteAndValidatePayload` — not-found boundaries, empty-schedule rejection, unknown-cron-ID handling, and confirming validation runs before dispatch).
+- **Current status**: `COMPLETE`
+- **Completion date**: 2026-08-23
+- **Known differences**: no execution-history/output logging per run (ServerAvatar-style panels often show recent run output); no timezone selector (jobs run in the server's own system timezone, matching cron's normal behavior, rather than an explicit per-job timezone); the real `cron`/`cronie` daemon actually picking up and executing the generated file has not been verified against a live systemd host in this environment (see `TESTING.md` §3) — only the file's generated contents are automated-tested.
+- **Reason**: per-run execution history would need either polling cron's own log output or wrapping every command (adding complexity/failure modes not requested yet); tracked as a natural follow-up once basic scheduling parity was established. The real-daemon verification gap is the same class of environment limitation as `systemctl`'s (`TESTING.md` §3) — the generated file matches standard, unmodified `/etc/cron.d` syntax, so it should work unmodified on a real Ubuntu host.
+
 ### ACC-001 — Authentication, 2FA, session management
 - **Category**: Account Management
 - **Documentation page**: Account Management → "Update Account Info"
@@ -229,7 +248,6 @@ capability surface (per task-brief §3/§101), not just what's already built.
 |---|---|---|---|
 | SRV-003 | SSH/SFTP management, key management, port/root-login controls | `NOT_STARTED` | `product-plan.md` Phase 2 |
 | SRV-004 | Firewall (UFW) rule editing UI, Fail2Ban jail management | `PARTIAL` | Installed with safe defaults by `stack.install`; no rule-editing capability/UI yet |
-| SRV-005 | Cron job management | `NOT_STARTED` | |
 | SRV-006 | Supervisor/PM2 worker management | `NOT_STARTED` | |
 | SRV-007 | Process list / kill | `NOT_STARTED` | |
 | SRV-008 | Historical monitoring (CPU/RAM/disk/network graphs, alerts) | `PARTIAL` | Heartbeat carries current uptime/load/mem%/disk%; no history retention or alerting yet |
@@ -295,9 +313,9 @@ capability surface (per task-brief §3/§101), not just what's already built.
 
 | Status | Count (detailed entries) | Count (summary-table rows) |
 |---|---|---|
-| `COMPLETE` | 3 (SRV-001, BAK-002, ACC-001) | 1 (PROV-006) |
+| `COMPLETE` | 4 (SRV-001, SRV-005, BAK-002, ACC-001) | 1 (PROV-006) |
 | `PARTIAL` | 3 (SRV-002, APP-001, APP-002, DB-001, BAK-001 — 5 total, see note) | 6 |
-| `NOT_STARTED` | 0 | ~55 |
+| `NOT_STARTED` | 0 | ~54 |
 | `BLOCKED_EXTERNAL` | 0 (sub-scoped within BAK-001/BAK-002's db/full-scope MariaDB verification) | 0 |
 | `INTENTIONALLY_NOT_APPLICABLE` | 0 | 1 |
 
@@ -359,3 +377,9 @@ establish the tracking process and close the single highest-priority gap
   BAK-001/BAK-002 reflecting this session's backup-restore implementation. ~60
   capabilities enumerated overall (detailed + summary), the large majority honestly
   `NOT_STARTED`.
+- **2026-08-23**: SRV-005 (cron job management) moved `NOT_STARTED` → `COMPLETE` —
+  full vertical slice (agent capability + control-plane persistence/API + dashboard UI
+  + automated tests + docs), picked as the highest-priority `NOT_STARTED` row per the
+  §7 workflow (next in the security-critical → ... → core-provisioning →
+  application-lifecycle → databases → SSL → backups/restores → monitoring →
+  ordering, after backup restore closed the previous top gap).

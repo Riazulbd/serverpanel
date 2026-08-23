@@ -297,3 +297,50 @@ func TestBackupCreateListGetRoundTrip(t *testing.T) {
 		t.Fatal("expected getBackup to refuse a backup ID under the wrong server")
 	}
 }
+
+func TestCronJobCreateListGetToggleDeleteRoundTrip(t *testing.T) {
+	st := newTestStore(t)
+	serverID, _, _ := st.createServer("web-9", "", nil, time.Hour, "admin@example.com")
+	site, err := st.createSite(serverID, "c.example.com", "sp_c", "/home/sites/sp_c", "php", "8.3")
+	if err != nil {
+		t.Fatalf("createSite: %v", err)
+	}
+
+	job, err := st.createCronJob(serverID, site.ID, "agent-job-1", "nightly cleanup", "0 3 * * *", "/usr/bin/php artisan schedule:run")
+	if err != nil {
+		t.Fatalf("createCronJob: %v", err)
+	}
+	if job.ID == "" || !job.Enabled || job.AgentID != "agent-job-1" {
+		t.Fatalf("unexpected cron job record: %+v", job)
+	}
+
+	list := st.listCronJobs(serverID, site.ID)
+	if len(list) != 1 || list[0].Schedule != "0 3 * * *" {
+		t.Fatalf("listCronJobs = %+v, want one entry matching the created job", list)
+	}
+
+	got, ok := st.getCronJob(serverID, job.ID)
+	if !ok || got.Command != job.Command {
+		t.Fatalf("getCronJob = %+v, ok=%v, fields don't round-trip", got, ok)
+	}
+
+	otherServer, _, _ := st.createServer("web-10", "", nil, time.Hour, "admin@example.com")
+	if _, ok := st.getCronJob(otherServer, job.ID); ok {
+		t.Fatal("expected getCronJob to refuse a cron job ID under the wrong server")
+	}
+
+	if err := st.setCronJobEnabled(serverID, job.ID, false); err != nil {
+		t.Fatalf("setCronJobEnabled: %v", err)
+	}
+	got, _ = st.getCronJob(serverID, job.ID)
+	if got.Enabled {
+		t.Fatal("expected cron job to be disabled after setCronJobEnabled(false)")
+	}
+
+	if err := st.deleteCronJob(serverID, job.ID); err != nil {
+		t.Fatalf("deleteCronJob: %v", err)
+	}
+	if _, ok := st.getCronJob(serverID, job.ID); ok {
+		t.Fatal("expected cron job to be gone after deleteCronJob")
+	}
+}

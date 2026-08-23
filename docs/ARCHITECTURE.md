@@ -99,7 +99,7 @@ e.g.:
 | `ssl.issue_letsencrypt` | `{domain}` | Invokes certbot/ACME client with fixed flags, no shell interpolation of user input |
 | `service.control` | `{unit: "nginx", action: "restart"}` | `unit` restricted to an allow-list of managed systemd units |
 | `db.create` | `{name, owner}` | Executes via MySQL client library with parameter binding, not raw SQL string concat |
-| `cron.upsert` | `{schedule, command_id, user}` | `command_id` maps to a pre-registered, reviewed command template — not a free-text shell string |
+| `cron.create` | `{system_user, schedule, command, label}` | **As built** (deviates from the `command_id`-template design originally sketched here): `command` is caller-supplied free text, not a pre-registered template — cron itself, not this agent, is what runs it (as `/bin/sh -c command`, cron's normal behavior), so the injection surface a template would have closed doesn't exist at the agent layer; instead the agent rejects newlines/NUL (which would corrupt the generated `/etc/cron.d` file into extra lines) and auto-escapes `%`. The privileged part — *which unix user* the command runs as — is still fully allow-listed: `system_user` is validated to exist locally, and the control plane only ever passes a site's own system user, never a caller-chosen one. |
 | `firewall.apply_rules` | `{rules: [...]}` | Validated, dry-run diffed, applied via the commit-confirm flow (see security doc) |
 | `backup.run` | `{scope: "db"\|"files"\|"full", target}` | Streams progress events back over the same channel |
 

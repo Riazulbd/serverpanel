@@ -2,6 +2,49 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-23 — Cron job management
+
+- **Implemented per-site cron job management** end-to-end: agent capabilities
+  `cron.list`/`cron.create`/`cron.delete`/`cron.set_enabled`
+  (`packages/capabilities/cron.go`), each scoped to a validated system user (checked
+  to exist locally, never trusted as a caller-supplied string). Jobs are tracked in a
+  per-user JSON metadata file (`/etc/serverpanel/cron/<user>.json`, the durable source
+  of truth including disabled jobs) and mirrored into a generated
+  `/etc/cron.d/serverpanel-<user>` drop-in, regenerated in full (write-temp-then-rename)
+  on every mutation and containing only currently-enabled jobs, so disabling a job
+  actually stops it from running rather than just flipping a flag nothing enforces.
+  Schedule fields are restricted to a safe charset or a fixed nickname set (`@daily`,
+  `@hourly`, ...); commands are rejected if they contain a newline or NUL byte (which
+  would otherwise inject an extra, uncontrolled line into the generated file), and any
+  `%` is auto-escaped to `\%` — cron's own well-known footgun (an unescaped `%` becomes
+  a literal newline inside the command field), closed transparently instead of left as
+  a caller trap.
+- Wired the new capabilities into the control plane end-to-end: a new `cron_jobs`
+  table, `createCronJob`/`listCronJobs`/`getCronJob`/`deleteCronJob`/
+  `setCronJobEnabled` store methods (each scoped by server ID, the same
+  cross-tenant-addressing guard `getSite`/`getBackup` already use), four new endpoints
+  (`GET`/`POST /api/v1/servers/{id}/sites/{siteId}/cron`,
+  `POST .../cron/{cronId}/toggle`, `DELETE .../cron/{cronId}`), and a "Cron jobs" panel
+  on the site-detail dashboard view (schedule presets or a custom expression, command,
+  optional label, enable/disable and delete actions). Every endpoint dispatches to the
+  agent first and only persists/mutates the local record on confirmed success — the
+  same dispatch-then-persist pattern `backup.run`/`backup.restore` established. The
+  site's own `system_user` is always re-derived server-side from the site record, never
+  accepted from the request body, so a caller can only ever schedule jobs as their own
+  site's isolated system user.
+- Added 6 new capability-layer tests (schedule/command/user validation, the
+  `%`-escaping and newline-injection checks, and a full create→list→disable→list→delete
+  round trip against a real throwaway system user verifying the generated
+  `/etc/cron.d` file's exact contents after each mutation) and 2 new control-plane
+  tests (a full store-layer round trip with cross-server scoping, and an HTTP boundary
+  test covering not-found handling, payload validation, and validation-before-dispatch
+  ordering). Full suite: 69 test functions, `go vet`/`gofmt` clean.
+- Updated `SYSTEM.md`, `API.md`, `ARCHITECTURE.md` (documented the `cron.create`
+  "as built" design deviating from the `command_id`-template approach originally
+  sketched there, and why that's still safe), `TESTING.md`, and
+  `SERVERAVATAR_PARITY.md` (SRV-005 moved `NOT_STARTED` → `COMPLETE`) to reflect the
+  new feature.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

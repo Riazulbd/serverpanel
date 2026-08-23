@@ -485,6 +485,102 @@ func scanBackup(row rowScanner) (*backupRecord, error) {
 	return &rec, nil
 }
 
+type cronJobRecord struct {
+	ID        string
+	ServerID  string
+	SiteID    string
+	AgentID   string // the agent-assigned job id used to address cron.delete/cron.set_enabled
+	Label     string
+	Schedule  string
+	Command   string
+	Enabled   bool
+	CreatedAt time.Time
+}
+
+// createCronJob persists a cron job record. Like createBackup, this is only
+// ever called after cron.create has already succeeded on the agent (see
+// cron.go handleCreateCronJob) — the cron_jobs table records jobs that are
+// actually scheduled on the server, never in-flight or failed attempts.
+func (s *store) createCronJob(serverID, siteID, agentID, label, schedule, command string) (*cronJobRecord, error) {
+	rec := &cronJobRecord{
+		ID: randID("cron"), ServerID: serverID, SiteID: siteID, AgentID: agentID,
+		Label: label, Schedule: schedule, Command: command, Enabled: true, CreatedAt: time.Now().UTC(),
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO cron_jobs (id, server_id, site_id, agent_id, label, schedule, command, enabled, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		rec.ID, rec.ServerID, rec.SiteID, rec.AgentID, rec.Label, rec.Schedule, rec.Command, 1,
+		rec.CreatedAt.Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return nil, err
+	}
+	return rec, nil
+}
+
+// listCronJobs returns cron jobs for one site, newest first, scoped to
+// serverID for the same cross-tenant-addressing reason listBackups is.
+func (s *store) listCronJobs(serverID, siteID string) []*cronJobRecord {
+	rows, err := s.db.Query(
+		`SELECT id, server_id, site_id, agent_id, label, schedule, command, enabled, created_at
+		 FROM cron_jobs WHERE server_id = ? AND site_id = ? ORDER BY created_at DESC`, serverID, siteID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var out []*cronJobRecord
+	for rows.Next() {
+		rec, err := scanCronJob(rows)
+		if err != nil {
+			continue
+		}
+		out = append(out, rec)
+	}
+	return out
+}
+
+// getCronJob looks up one cron job scoped to serverID, so a caller can
+// never address (and therefore toggle/delete) a cron job belonging to a
+// site on a different server.
+func (s *store) getCronJob(serverID, cronID string) (*cronJobRecord, bool) {
+	row := s.db.QueryRow(
+		`SELECT id, server_id, site_id, agent_id, label, schedule, command, enabled, created_at
+		 FROM cron_jobs WHERE id = ? AND server_id = ?`, cronID, serverID)
+	rec, err := scanCronJob(row)
+	if err != nil {
+		return nil, false
+	}
+	return rec, true
+}
+
+func (s *store) deleteCronJob(serverID, cronID string) error {
+	_, err := s.db.Exec(`DELETE FROM cron_jobs WHERE id = ? AND server_id = ?`, cronID, serverID)
+	return err
+}
+
+func (s *store) setCronJobEnabled(serverID, cronID string, enabled bool) error {
+	val := 0
+	if enabled {
+		val = 1
+	}
+	_, err := s.db.Exec(`UPDATE cron_jobs SET enabled = ? WHERE id = ? AND server_id = ?`, val, cronID, serverID)
+	return err
+}
+
+func scanCronJob(row rowScanner) (*cronJobRecord, error) {
+	var rec cronJobRecord
+	var createdAt string
+	var enabled int
+	if err := row.Scan(&rec.ID, &rec.ServerID, &rec.SiteID, &rec.AgentID, &rec.Label, &rec.Schedule,
+		&rec.Command, &enabled, &createdAt); err != nil {
+		return nil, err
+	}
+	rec.Enabled = enabled != 0
+	rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+	return &rec, nil
+}
+
 func randID(prefix string) string {
 	n, _ := rand.Int(rand.Reader, big.NewInt(1<<62))
 	return fmt.Sprintf("%s_%x", prefix, n)

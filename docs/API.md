@@ -46,6 +46,10 @@ protected route; there is no route that skips it by omission.
 | `GET` | `/api/v1/servers/{id}/sites/{siteId}/backups` | List backups for a site, newest first |
 | `POST` | `/api/v1/servers/{id}/sites/{siteId}/backups` | Dispatch `backup.run` and persist the resulting backup record |
 | `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a previously recorded backup |
+| `GET` | `/api/v1/servers/{id}/sites/{siteId}/cron` | List cron jobs for a site, newest first |
+| `POST` | `/api/v1/servers/{id}/sites/{siteId}/cron` | Dispatch `cron.create` and persist the resulting cron job record |
+| `POST` | `/api/v1/servers/{id}/sites/{siteId}/cron/{cronId}/toggle` | Dispatch `cron.set_enabled` for a previously recorded cron job |
+| `DELETE` | `/api/v1/servers/{id}/sites/{siteId}/cron/{cronId}` | Dispatch `cron.delete` and, only on success, remove the local record |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -137,6 +141,41 @@ isn't connected; `422` if `backup.restore` itself failed on the agent (the agent
 error message explains why, and any checkpoint already taken is named in it so it's
 never a silent loss).
 
+### `POST /api/v1/servers/{id}/sites/{siteId}/cron`
+```json
+{"schedule": "0 3 * * *", "command": "/usr/bin/php /home/sites/site_example/artisan schedule:run", "label": "nightly"}
+```
+`schedule` is a standard 5-field cron expression or a nickname (`@hourly`, `@daily`,
+`@weekly`, `@monthly`, `@yearly`, `@reboot`). Dispatches `cron.create` with
+`system_user` taken from the site's own recorded `system_user` (never
+caller-supplied — a request can only ever schedule a job as the requesting site's own
+isolated system user, never another site's). Only on the agent reporting success is a
+`cron_jobs` row persisted. → `201` with the `cronJobRecord` JSON (`ID`, `ServerID`,
+`SiteID`, `AgentID`, `Label`, `Schedule`, `Command`, `Enabled`, `CreatedAt`). `404` if
+the site doesn't exist on that server; `400` for a missing schedule/command; `502` if
+the agent isn't connected; `422` if `cron.create` itself failed on the agent (e.g. an
+invalid schedule expression).
+
+### `GET /api/v1/servers/{id}/sites/{siteId}/cron`
+→ `200` with an array of `cronJobRecord`, newest first. `404` if the site doesn't
+exist on that server.
+
+### `POST /api/v1/servers/{id}/sites/{siteId}/cron/{cronId}/toggle`
+```json
+{"enabled": false}
+```
+Dispatches `cron.set_enabled`, re-deriving `system_user` from the site record (not
+trusted from the request). A disabled job is removed from the agent's active
+`/etc/cron.d` file (so it stops running immediately) while its record — and the
+option to re-enable it — is retained. `404` if the site or cron job doesn't exist on
+that server; `502`/`422` as above.
+
+### `DELETE /api/v1/servers/{id}/sites/{siteId}/cron/{cronId}`
+Dispatches `cron.delete`; the local `cron_jobs` row is only removed once the agent
+confirms the job is gone from its own state — never the other way around, which could
+leave a job the dashboard no longer shows still running on the server. `404` if the
+site or cron job doesn't exist on that server; `502`/`422` as above.
+
 ### `POST /agents/register`
 ```json
 {"token": "<bootstrap token>", "csr_pem": "<PEM-encoded CSR>"}
@@ -178,7 +217,31 @@ The full allow-listed capability names `packages/capabilities.Default()` registe
 `diagnostics.basic`, `stack.install`, `site.create`, `site.set_php_version`,
 `site.set_status`, `app.wordpress_install`, `ssl.issue_letsencrypt`,
 `ssl.install_custom`, `db.create`, `db.delete`, `db.list`, `file.list`, `file.read`,
-`file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`.
+`file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`, `cron.list`,
+`cron.create`, `cron.delete`, `cron.set_enabled`.
+
+### `cron.create` / `cron.list` / `cron.delete` / `cron.set_enabled`
+```json
+{"system_user": "site_example", "schedule": "0 3 * * *",
+ "command": "/usr/bin/php /home/sites/site_example/artisan schedule:run", "label": "nightly"}
+```
+Every cron capability takes `system_user` (validated against a POSIX-username regex
+and, where `id` is available, checked to actually exist on the host — never trusted
+as a caller-supplied string). The agent keeps one JSON metadata file per user under
+`/etc/serverpanel/cron/<user>.json` (the durable source of truth for that user's
+managed jobs, including disabled ones) and regenerates
+`/etc/cron.d/serverpanel-<user>` from it on every mutation, write-temp-then-rename —
+containing only the *enabled* jobs, so "disabled" means cron will not run the job, not
+just a flag nothing enforces. `schedule` must be a 5-field cron expression built only
+from `[0-9A-Za-z*,/-]` per field, or a nickname (`@daily`, `@hourly`, `@reboot`, ...).
+`command` is rejected if it contains a newline or NUL byte (which would otherwise
+corrupt the generated cron.d file into extra, uncontrolled lines), and any `%`
+character is auto-escaped to `\%` — cron treats a literal `%` as a newline inside the
+command field, a well-known footgun this closes transparently rather than requiring
+callers to know cron's own escaping rules. `cron.create` returns the created
+`cronJob` JSON; `cron.list` returns the array for that user; `cron.delete`/
+`cron.set_enabled` take `cron_id` (the agent-assigned ID from `cron.create`) and
+return a short confirmation string.
 
 ### `backup.restore`
 ```json

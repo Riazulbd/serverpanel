@@ -2,7 +2,7 @@
 
 ## 1. Current automated coverage
 
-`go test ./...` — 61 test functions across two packages, all passing, no `-race`
+`go test ./...` — 69 test functions across two packages, all passing, no `-race`
 failures, `go vet` clean, `gofmt -l` clean:
 
 ```
@@ -15,8 +15,8 @@ go test ./... -race
 
 | Package | Tests | What they cover |
 |---|---|---|
-| `apps/controlplane` | 27 | Auth/session lifecycle (create, MFA-verify, expiry, delete), bcrypt password rules, email normalization/uniqueness, TOTP round-trip/skew/rejection, bootstrap-token single-use/expiry/unknown-token, server create/list/get, revocation (cert-serial blocking + status transitions, including that a stray disconnect can't resurrect a revoked server), heartbeat recording, audit-log append, site create/list, `getSite`'s cross-server scoping, backup create/list/get round trip and its own cross-server scoping, and 6 full HTTP integration tests through `routes()` with `httptest` covering signup→login→protected-route, the full 2FA enroll→logout→login→MFA-challenge→access flow, server create/list/revoke, agent registration with a bad token, the backup endpoints' not-found boundaries, and backup-request validation (bad scope, missing `db_name`, and confirming validation runs before dispatch) |
-| `packages/capabilities` | 34 | Capability dispatch (unknown name rejected, `system.ping` works, nil `Progress` doesn't panic, the registry has a handler for every declared `Cap*` constant), `service.control`'s allow-list boundary (unit, action, and an explicit shell-metacharacter-injection attempt, all rejected before `systemctl` is ever invoked), the file manager's path-traversal and symlink-escape defenses (`resolveScopedPath`), oversized-read/write rejection, refusal to delete the site root itself, a real list+write round trip against a real filesystem, log redaction (token/password query params, `Authorization: Bearer`/`Basic`), `logs.tail`'s input validation, domain-name validation (including injection-shaped inputs), `systemUserForDomain`'s bounding/sanitization, the deterministic php-fpm-pool/socket/vhost path builders, `backup.run`'s scope validation and a real files-backup-and-checksum round trip, and `backup.restore`'s archive-location/checksum validation, a real files backup→corrupt→restore round trip (with a real throwaway system user, verifying both content restoration and pre-restore checkpoint creation), and `extractTarGzSafely`'s rejection of path-traversal entries, absolute-path entries, and oversized archives |
+| `apps/controlplane` | 29 | Auth/session lifecycle (create, MFA-verify, expiry, delete), bcrypt password rules, email normalization/uniqueness, TOTP round-trip/skew/rejection, bootstrap-token single-use/expiry/unknown-token, server create/list/get, revocation (cert-serial blocking + status transitions, including that a stray disconnect can't resurrect a revoked server), heartbeat recording, audit-log append, site create/list, `getSite`'s cross-server scoping, backup create/list/get round trip and its own cross-server scoping, cron job create/list/get/toggle/delete round trip and its own cross-server scoping, and 7 full HTTP integration tests through `routes()` with `httptest` covering signup→login→protected-route, the full 2FA enroll→logout→login→MFA-challenge→access flow, server create/list/revoke, agent registration with a bad token, the backup endpoints' not-found boundaries, backup-request validation (bad scope, missing `db_name`, and confirming validation runs before dispatch), and the cron endpoints' not-found boundaries + payload validation (empty schedule, unknown site/cron IDs, confirming validation runs before dispatch) |
+| `packages/capabilities` | 40 | Capability dispatch (unknown name rejected, `system.ping` works, nil `Progress` doesn't panic, the registry has a handler for every declared `Cap*` constant), `service.control`'s allow-list boundary (unit, action, and an explicit shell-metacharacter-injection attempt, all rejected before `systemctl` is ever invoked), the file manager's path-traversal and symlink-escape defenses (`resolveScopedPath`), oversized-read/write rejection, refusal to delete the site root itself, a real list+write round trip against a real filesystem, log redaction (token/password query params, `Authorization: Bearer`/`Basic`), `logs.tail`'s input validation, domain-name validation (including injection-shaped inputs), `systemUserForDomain`'s bounding/sanitization, the deterministic php-fpm-pool/socket/vhost path builders, `backup.run`'s scope validation and a real files-backup-and-checksum round trip, `backup.restore`'s archive-location/checksum validation, a real files backup→corrupt→restore round trip (with a real throwaway system user, verifying both content restoration and pre-restore checkpoint creation), `extractTarGzSafely`'s rejection of path-traversal entries, absolute-path entries, and oversized archives, and the cron capabilities' schedule/command/user validation (including a `%`-escaping and newline-injection check), a full create→list→disable→list→delete round trip against a real throwaway system user verifying the generated `/etc/cron.d` file's contents change with each mutation, rejection of an unknown/nonexistent system user, and rejection of an invalid schedule |
 
 None of this is mocked where a cheap real implementation was possible: sessions/users/
 servers/audit run against a real temp-file SQLite database with the real schema (not
@@ -69,6 +69,13 @@ next testing investment worth making, tracked below.
   and under task load, backup/restore throughput) — no measurements have been taken.
 - Cross-server workflows (migration/cloning) — not applicable yet, since the feature
   itself isn't implemented (Phase 2).
+- `cron.create`'s generated `/etc/cron.d/serverpanel-<user>` file actually being picked
+  up and executed on schedule by a real running `cron`/`cronie` daemon — this session's
+  sandbox has no systemd/cron as PID 1 (same limitation as `systemctl` above). The
+  automated tests verify the file's exact contents after each mutation (create,
+  disable, delete), which is everything this codebase controls; whether the system's
+  cron daemon then runs it is standard, unmodified `/etc/cron.d` behavior that hasn't
+  been separately confirmed on a real VPS in this project.
 
 ## 4. Bugs found and fixed by testing (kept as evidence testing was real)
 
