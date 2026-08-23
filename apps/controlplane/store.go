@@ -485,6 +485,119 @@ func scanBackup(row rowScanner) (*backupRecord, error) {
 	return &rec, nil
 }
 
+type databaseRecord struct {
+	ID        string
+	ServerID  string
+	SiteID    string
+	Name      string
+	OwnerUser string
+	Status    string
+	CreatedAt time.Time
+}
+
+// createDatabase persists a database record. Like createBackup, this is
+// only ever called after db.create has already succeeded on the agent (see
+// databases.go handleCreateDatabase) — the databases table records
+// databases that actually exist on the server, never in-flight or failed
+// attempts. The UNIQUE(server_id, name) schema constraint is the second
+// line of defense against a duplicate record (handleCreateDatabase also
+// checks getDatabaseByName first, to return a clean 409 instead of a raw
+// constraint-violation error).
+func (s *store) createDatabase(serverID, siteID, name, ownerUser string) (*databaseRecord, error) {
+	rec := &databaseRecord{
+		ID: randID("db"), ServerID: serverID, SiteID: siteID, Name: name,
+		OwnerUser: ownerUser, Status: "active", CreatedAt: time.Now().UTC(),
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO databases (id, server_id, site_id, name, owner_user, status, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		rec.ID, rec.ServerID, rec.SiteID, rec.Name, rec.OwnerUser, rec.Status, rec.CreatedAt.Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return nil, err
+	}
+	return rec, nil
+}
+
+// listDatabases returns every database record for one server, newest
+// first. Databases are server-scoped (one MariaDB instance per managed
+// server), not site-scoped, though a record may optionally reference the
+// site it was created for via SiteID.
+func (s *store) listDatabases(serverID string) []*databaseRecord {
+	rows, err := s.db.Query(
+		`SELECT id, server_id, site_id, name, owner_user, status, created_at
+		 FROM databases WHERE server_id = ? ORDER BY created_at DESC`, serverID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var out []*databaseRecord
+	for rows.Next() {
+		rec, err := scanDatabase(rows)
+		if err != nil {
+			continue
+		}
+		out = append(out, rec)
+	}
+	return out
+}
+
+// getDatabase looks up one database scoped to serverID, for the same
+// cross-tenant-addressing reason getSite/getBackup are scoped to serverID.
+func (s *store) getDatabase(serverID, dbID string) (*databaseRecord, bool) {
+	row := s.db.QueryRow(
+		`SELECT id, server_id, site_id, name, owner_user, status, created_at
+		 FROM databases WHERE id = ? AND server_id = ?`, dbID, serverID)
+	rec, err := scanDatabase(row)
+	if err != nil {
+		return nil, false
+	}
+	return rec, true
+}
+
+// getDatabaseByName is used to pre-check name collisions before dispatching
+// db.create, so a duplicate name is reported as a clean 409 rather than a
+// raw SQL constraint-violation error surfacing from either this table's
+// UNIQUE constraint or a "CREATE DATABASE IF NOT EXISTS" silently colliding
+// with an existing, differently-owned database on the agent side.
+func (s *store) getDatabaseByName(serverID, name string) (*databaseRecord, bool) {
+	row := s.db.QueryRow(
+		`SELECT id, server_id, site_id, name, owner_user, status, created_at
+		 FROM databases WHERE server_id = ? AND name = ?`, serverID, name)
+	rec, err := scanDatabase(row)
+	if err != nil {
+		return nil, false
+	}
+	return rec, true
+}
+
+// deleteDatabase removes a database's record. Like backups, there is no
+// soft-delete here: this is only called after db.delete has already
+// succeeded on the agent, at which point the database genuinely no longer
+// exists and the record should not either.
+func (s *store) deleteDatabase(serverID, dbID string) error {
+	res, err := s.db.Exec(`DELETE FROM databases WHERE id = ? AND server_id = ?`, dbID, serverID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("database not found")
+	}
+	return nil
+}
+
+func scanDatabase(row rowScanner) (*databaseRecord, error) {
+	var rec databaseRecord
+	var createdAt string
+	if err := row.Scan(&rec.ID, &rec.ServerID, &rec.SiteID, &rec.Name, &rec.OwnerUser, &rec.Status, &createdAt); err != nil {
+		return nil, err
+	}
+	rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+	return &rec, nil
+}
+
 func randID(prefix string) string {
 	n, _ := rand.Int(rand.Reader, big.NewInt(1<<62))
 	return fmt.Sprintf("%s_%x", prefix, n)

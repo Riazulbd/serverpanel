@@ -97,6 +97,7 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | Per-site PHP version/settings | 🚧 `site.set_php_version` exists; only 8.3 actually
   installed today |
 | Custom webroot | ✅ `docroot` per site |
+| Database management (create/list/delete, dashboard UI) | ✅ `db.create`/`db.delete`/`db.list` capabilities, persisted `databases` table, dedicated server-detail dashboard panel |
 | Environment variables (per app) | ⬜ not implemented |
 | Temporary sites, staging environments | ⬜ not implemented |
 | Site cloning, cross-server migration | ⬜ Phase 2 |
@@ -253,6 +254,7 @@ EXISTS`, applied on every `openDB` call — idempotent, no separate migration to
 | `audit_log` | append-only: seq, timestamp, server, actor, action, detail |
 | `sites` | id, server, domain, system user, docroot, app type, PHP version, status |
 | `backups` | id, server, site, scope, path, size, sha256, status, created_at |
+| `databases` | id, server, site (optional), name, owner user, status, created_at — `UNIQUE(server_id, name)`; owner passwords are generated server-side and returned once, never persisted |
 
 No ORM — every query is a small, explicit SQL statement in `store.go`. All secrets
 (session tokens, bootstrap tokens) are stored only as SHA-256 hashes; passwords use

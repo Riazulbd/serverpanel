@@ -297,3 +297,67 @@ func TestBackupCreateListGetRoundTrip(t *testing.T) {
 		t.Fatal("expected getBackup to refuse a backup ID under the wrong server")
 	}
 }
+
+func TestDatabaseCreateListGetDeleteRoundTrip(t *testing.T) {
+	st := newTestStore(t)
+	serverID, _, _ := st.createServer("web-11", "", nil, time.Hour, "admin@example.com")
+
+	rec, err := st.createDatabase(serverID, "", "wp_example", "wp_example")
+	if err != nil {
+		t.Fatalf("createDatabase: %v", err)
+	}
+	if rec.ID == "" || rec.Status != "active" {
+		t.Fatalf("unexpected database record: %+v", rec)
+	}
+
+	list := st.listDatabases(serverID)
+	if len(list) != 1 || list[0].Name != "wp_example" {
+		t.Fatalf("listDatabases = %+v, want one entry matching the created database", list)
+	}
+
+	got, ok := st.getDatabase(serverID, rec.ID)
+	if !ok || got.OwnerUser != "wp_example" {
+		t.Fatalf("getDatabase = %+v, ok=%v, fields don't round-trip", got, ok)
+	}
+
+	if _, ok := st.getDatabaseByName(serverID, "wp_example"); !ok {
+		t.Fatal("expected getDatabaseByName to find the created database")
+	}
+	if _, ok := st.getDatabaseByName(serverID, "does_not_exist"); ok {
+		t.Fatal("expected getDatabaseByName to report no match for an unknown name")
+	}
+
+	otherServer, _, _ := st.createServer("web-12", "", nil, time.Hour, "admin@example.com")
+	if _, ok := st.getDatabase(otherServer, rec.ID); ok {
+		t.Fatal("expected getDatabase to refuse a database ID under the wrong server")
+	}
+
+	if err := st.deleteDatabase(serverID, rec.ID); err != nil {
+		t.Fatalf("deleteDatabase: %v", err)
+	}
+	if _, ok := st.getDatabase(serverID, rec.ID); ok {
+		t.Fatal("expected database to be gone after deleteDatabase")
+	}
+	if err := st.deleteDatabase(serverID, rec.ID); err == nil {
+		t.Fatal("expected deleting an already-deleted database to fail")
+	}
+}
+
+func TestCreateDatabaseRejectsDuplicateNamePerServer(t *testing.T) {
+	st := newTestStore(t)
+	serverID, _, _ := st.createServer("web-13", "", nil, time.Hour, "admin@example.com")
+
+	if _, err := st.createDatabase(serverID, "", "dupdb", "dupdb"); err != nil {
+		t.Fatalf("createDatabase (first): %v", err)
+	}
+	if _, err := st.createDatabase(serverID, "", "dupdb", "dupdb"); err == nil {
+		t.Fatal("expected duplicate database name on the same server to be rejected (UNIQUE(server_id, name))")
+	}
+
+	// The same name on a different server is a distinct record — one
+	// MariaDB instance per server, so cross-server names never collide.
+	otherServer, _, _ := st.createServer("web-14", "", nil, time.Hour, "admin@example.com")
+	if _, err := st.createDatabase(otherServer, "", "dupdb", "dupdb"); err != nil {
+		t.Fatalf("createDatabase on a different server with the same name: %v", err)
+	}
+}

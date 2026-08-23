@@ -2,6 +2,40 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-23 — Database management: control-plane persistence and dashboard UI
+
+- **Closed DB-001's persistence/UI gap** (`docs/SERVERAVATAR_PARITY.md`), flagged in the
+  previous entry as the recommended next iteration: `db.create`/`db.delete` were
+  already real agent capabilities but had no control-plane record and no dashboard
+  panel — a database created via the generic task-dispatch endpoint left no trace once
+  the response was discarded.
+- Added a `databases` table (`server_id`, `site_id` optional, `name`, `owner_user`,
+  `status`, `created_at`, `UNIQUE(server_id, name)`) and store methods
+  (`createDatabase`/`listDatabases`/`getDatabase`/`getDatabaseByName`/
+  `deleteDatabase`), following the same dispatch-then-persist-on-success pattern
+  `handleCreateSite`/`handleCreateBackup` already use.
+- New endpoints: `GET`/`POST /api/v1/servers/{id}/databases`,
+  `DELETE /api/v1/servers/{id}/databases/{dbId}` (`apps/controlplane/databases.go`).
+  The owner database password is generated control-plane-side (`crypto/rand`, 24 random
+  bytes hex-encoded) and returned to the caller exactly once in the create response —
+  never accepted from the client, never persisted, matching the "no reusable stored
+  plaintext credentials" principle used elsewhere in this project. A duplicate database
+  name on the same server is rejected with a `409` before any agent dispatch (checked
+  against the `databases` table, backstopped by its own `UNIQUE` constraint).
+- Added a "Databases" panel to the server-detail dashboard view: a create-database
+  modal (name field, one-time password reveal that will not be shown again), a
+  databases table, and a per-row delete action with a confirmation prompt.
+- Added 4 new automated tests (`apps/controlplane/store_test.go`,
+  `apps/controlplane/http_test.go`) covering the store round trip, per-server
+  uniqueness, validation-before-dispatch ordering, the site-reference check, the
+  duplicate-name conflict, and not-found boundaries — all `go test`-covered against a
+  real SQLite store, no MariaDB required for this layer. Manually smoke-tested the new
+  endpoints end-to-end against a running control-plane binary (signup → login → create
+  server → list/create/delete database validation paths).
+- Updated `docs/SERVERAVATAR_PARITY.md` (DB-001 moved `PARTIAL` → `COMPLETE`, the
+  now-redundant DB-005 summary row folded into it) and `docs/API.md`/`docs/SYSTEM.md`
+  to match.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

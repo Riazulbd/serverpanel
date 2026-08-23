@@ -46,6 +46,9 @@ protected route; there is no route that skips it by omission.
 | `GET` | `/api/v1/servers/{id}/sites/{siteId}/backups` | List backups for a site, newest first |
 | `POST` | `/api/v1/servers/{id}/sites/{siteId}/backups` | Dispatch `backup.run` and persist the resulting backup record |
 | `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a previously recorded backup |
+| `GET` | `/api/v1/servers/{id}/databases` | List databases on a server |
+| `POST` | `/api/v1/servers/{id}/databases` | Dispatch `db.create` and persist the resulting database record |
+| `DELETE` | `/api/v1/servers/{id}/databases/{dbId}` | Dispatch `db.delete` and remove the database record |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -136,6 +139,33 @@ pre-restore safety backups taken automatically before anything was overwritten,
 isn't connected; `422` if `backup.restore` itself failed on the agent (the agent-side
 error message explains why, and any checkpoint already taken is named in it so it's
 never a silent loss).
+
+### `POST /api/v1/servers/{id}/databases`
+```json
+{"name": "wp_example", "site_id": ""}
+```
+`name` must match `^[a-z][a-z0-9_]{0,30}$` (validated here before dispatch, and again
+by the agent) and be unique per server (checked against the `databases` table before
+dispatch, returning a clean `409` rather than a raw constraint error). `site_id` is
+optional context linking the database to a site record; if supplied it must reference
+an existing site on the same server. The owner MySQL/MariaDB user is always named the
+same as the database, and its password is generated server-side (32 random bytes,
+hex-encoded) — never accepted from the client. Dispatches `db.create`, and only on the
+agent reporting success, persists a `databases` row. → `201
+{"database": {...databaseRecord}, "owner_password": "<shown once, never stored>"}`.
+`400` for an invalid name; `404` if `site_id` doesn't exist on that server; `409` for a
+duplicate name; `502` if the agent isn't connected; `422` if `db.create` itself failed
+on the agent.
+
+### `GET /api/v1/servers/{id}/databases`
+→ `200` with an array of `databaseRecord` (`ID`, `ServerID`, `SiteID`, `Name`,
+`OwnerUser`, `Status`, `CreatedAt`), newest first. `404` if the server doesn't exist.
+
+### `DELETE /api/v1/servers/{id}/databases/{dbId}`
+No request body. Dispatches `db.delete` with the database's own recorded `name` and
+`owner_user`; only on the agent reporting success is the `databases` row removed. →
+`204` on success. `404` if the database doesn't exist on that server; `502` if the
+agent isn't connected; `422` if `db.delete` itself failed on the agent.
 
 ### `POST /agents/register`
 ```json
