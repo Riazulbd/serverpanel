@@ -2,6 +2,38 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-23 — Database control-plane persistence and dashboard UI
+
+- **Closed the DB-005 parity gap** flagged in the previous entry ("good candidate for
+  the next iteration"): `db.create`/`db.delete` results are now durably recorded on the
+  control plane instead of only existing as a live-agent capability with no record of
+  what was actually provisioned.
+- Added a `databases` table (`server_id`, `site_id` optional, `name`, `owner_user`,
+  `engine`, `status`, `created_at`, `UNIQUE(server_id, name)`) and matching `store`
+  methods (`createDatabaseRecord`/`listDatabases`/`getDatabaseRecord`/
+  `deleteDatabaseRecord`, each scoped by server ID the same way `getSite`/`getBackup`
+  are, so a database record can never be addressed under the wrong server).
+- New `apps/controlplane/databases.go` with three endpoints
+  (`GET`/`POST /api/v1/servers/{id}/databases`,
+  `DELETE /api/v1/servers/{id}/databases/{databaseId}`) following the same
+  dispatch-then-persist-on-success pattern as `handleCreateBackup`/`handleCreateSite`:
+  the agent's `db.create`/`db.delete` capability must actually succeed before the
+  control plane's own record is written or removed.
+- The owner password is generated server-side (16 random bytes, hex-encoded — well
+  above `db.create`'s 16-character minimum) and returned to the caller exactly once in
+  the create-database response; it is never persisted anywhere, the same "shown once,
+  stored nowhere" pattern bootstrap tokens already use.
+- Added a per-server "Databases" panel to the dashboard (create-database modal, a
+  databases table, and a delete button with a destructive-action confirmation dialog),
+  visible on the same server-detail view as "Sites".
+- Added 4 new store tests (create/list/get/delete round trip, cross-server scoping,
+  duplicate-name-per-server rejection) and 2 new HTTP tests (name/site validation
+  ordering before dispatch, list-for-unknown-server, delete-of-unrecorded-database
+  404s). Full suite passes, `go vet`/`gofmt` clean.
+- Updated `SYSTEM.md` and `SERVERAVATAR_PARITY.md` (DB-001 known-differences note
+  resolved; DB-005 moved from `NOT_STARTED` to `COMPLETE`). MongoDB support and a
+  phpMyAdmin-equivalent admin UI remain open gaps (DB-002/DB-003).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

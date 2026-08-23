@@ -73,7 +73,8 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | PHP-FPM, multiple PHP versions | 🚧 php-fpm pool-per-site works; only 8.3 is
   installed by `stack.install` today, though `site.set_php_version` and pool paths are
   already version-parameterized |
-| MariaDB/MySQL | ✅ install + per-DB least-privilege grants |
+| MariaDB/MySQL | ✅ install + per-DB least-privilege grants + control-plane persistence
+  (`databases` table) and a dashboard panel per server |
 | Redis, Git, Composer, WP-CLI | ✅ installed by `stack.install` |
 | Node.js | ⬜ Phase 3 |
 | UFW firewall, Fail2Ban | 🚧 installed with safe defaults; no rule-editing UI |
@@ -253,6 +254,7 @@ EXISTS`, applied on every `openDB` call — idempotent, no separate migration to
 | `audit_log` | append-only: seq, timestamp, server, actor, action, detail |
 | `sites` | id, server, domain, system user, docroot, app type, PHP version, status |
 | `backups` | id, server, site, scope, path, size, sha256, status, created_at |
+| `databases` | id, server, site (optional), name, owner_user, engine, status, created_at — unique per `(server_id, name)` |
 
 No ORM — every query is a small, explicit SQL statement in `store.go`. All secrets
 (session tokens, bootstrap tokens) are stored only as SHA-256 hashes; passwords use
@@ -262,8 +264,9 @@ bcrypt (cost 12); nothing is stored in plaintext.
 
 Full list with request/response shapes in `API.md`. Summary: `/api/v1/auth/*`
 (signup/login/logout/TOTP enroll+verify/MFA challenge/me), `/api/v1/servers*` (CRUD,
-revoke, task dispatch, sites, audit), `/agents/register` (the one unauthenticated
-agent-facing endpoint, secured by the bootstrap token itself), `/healthz`.
+revoke, task dispatch, sites, backups, databases, audit), `/agents/register` (the one
+unauthenticated agent-facing endpoint, secured by the bootstrap token itself),
+`/healthz`.
 
 ## 10. Background jobs
 

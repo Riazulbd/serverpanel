@@ -485,6 +485,96 @@ func scanBackup(row rowScanner) (*backupRecord, error) {
 	return &rec, nil
 }
 
+type databaseRecord struct {
+	ID        string
+	ServerID  string
+	SiteID    string
+	Name      string
+	OwnerUser string
+	Engine    string
+	Status    string
+	CreatedAt time.Time
+}
+
+// createDatabaseRecord persists a database record. Like createBackup, this
+// is only ever called after db.create has already succeeded on the agent
+// (see databases.go handleCreateDatabase) — the databases table records
+// databases actually provisioned on the server, never in-flight or
+// attempted ones. The owner password is deliberately not a field here: it
+// is generated per-request, handed back to the caller exactly once in the
+// API response, and never stored anywhere (same reasoning as bootstrap
+// tokens — see SECURITY.md).
+func (s *store) createDatabaseRecord(serverID, siteID, name, ownerUser string) (*databaseRecord, error) {
+	rec := &databaseRecord{
+		ID: randID("db"), ServerID: serverID, SiteID: siteID, Name: name, OwnerUser: ownerUser,
+		Engine: "mariadb", Status: "active", CreatedAt: time.Now().UTC(),
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO databases (id, server_id, site_id, name, owner_user, engine, status, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		rec.ID, rec.ServerID, rec.SiteID, rec.Name, rec.OwnerUser, rec.Engine, rec.Status,
+		rec.CreatedAt.Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return nil, err
+	}
+	return rec, nil
+}
+
+// listDatabases returns databases for one server, newest first.
+func (s *store) listDatabases(serverID string) []*databaseRecord {
+	rows, err := s.db.Query(
+		`SELECT id, server_id, site_id, name, owner_user, engine, status, created_at
+		 FROM databases WHERE server_id = ? ORDER BY created_at DESC`, serverID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var out []*databaseRecord
+	for rows.Next() {
+		rec, err := scanDatabase(rows)
+		if err != nil {
+			continue
+		}
+		out = append(out, rec)
+	}
+	return out
+}
+
+// getDatabaseRecord looks up one database scoped to serverID, for the same
+// cross-tenant-addressing reason getSite/getBackup are scoped to serverID.
+func (s *store) getDatabaseRecord(serverID, databaseID string) (*databaseRecord, bool) {
+	row := s.db.QueryRow(
+		`SELECT id, server_id, site_id, name, owner_user, engine, status, created_at
+		 FROM databases WHERE id = ? AND server_id = ?`, databaseID, serverID)
+	rec, err := scanDatabase(row)
+	if err != nil {
+		return nil, false
+	}
+	return rec, true
+}
+
+// deleteDatabaseRecord removes a database's persisted record. Called only
+// after db.delete has already succeeded on the agent (see
+// handleDeleteDatabase) — mirrors the dispatch-then-persist pattern in
+// reverse for a destructive action.
+func (s *store) deleteDatabaseRecord(serverID, databaseID string) error {
+	_, err := s.db.Exec(`DELETE FROM databases WHERE id = ? AND server_id = ?`, databaseID, serverID)
+	return err
+}
+
+func scanDatabase(row rowScanner) (*databaseRecord, error) {
+	var rec databaseRecord
+	var createdAt string
+	if err := row.Scan(&rec.ID, &rec.ServerID, &rec.SiteID, &rec.Name, &rec.OwnerUser,
+		&rec.Engine, &rec.Status, &createdAt); err != nil {
+		return nil, err
+	}
+	rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+	return &rec, nil
+}
+
 func randID(prefix string) string {
 	n, _ := rand.Int(rand.Reader, big.NewInt(1<<62))
 	return fmt.Sprintf("%s_%x", prefix, n)
