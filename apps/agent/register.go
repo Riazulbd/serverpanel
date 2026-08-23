@@ -2,11 +2,7 @@ package main
 
 import (
 	"bytes"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -70,16 +66,10 @@ func loadIdentity(dataDir string) (*identity, error) {
 // token is read once from the caller-supplied value and is never written to
 // disk or logged; only the resulting certificate and identifiers persist.
 func register(apiAddr, token, dataDir string) (*identity, error) {
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	key, csrPEM, err := generateKeyAndCSR("pending-registration")
 	if err != nil {
-		return nil, fmt.Errorf("generate key: %w", err)
+		return nil, err
 	}
-	csrTmpl := &x509.CertificateRequest{Subject: pkix.Name{CommonName: "pending-registration"}}
-	csrDER, err := x509.CreateCertificateRequest(rand.Reader, csrTmpl, key)
-	if err != nil {
-		return nil, fmt.Errorf("create CSR: %w", err)
-	}
-	csrPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
 
 	reqBody, _ := json.Marshal(map[string]string{"token": token, "csr_pem": string(csrPEM)})
 	httpClient := &http.Client{Timeout: 30 * time.Second}

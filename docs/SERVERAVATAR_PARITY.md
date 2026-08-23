@@ -40,19 +40,19 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Documentation page**: Server Management → "Installation (Direct Method)"
 - **Short description**: Connect a VPS to the control plane via a one-time install command.
 - **Expected behavior** (per ServerAvatar's documented workflow): operator creates a server record, gets an install command, runs it on a clean VPS, server appears connected.
-- **Our implementation**: bootstrap-token → mTLS client-certificate exchange (`POST /agents/register`); agent connects outbound to the gateway, no inbound port required.
+- **Our implementation**: bootstrap-token → mTLS client-certificate exchange (`POST /agents/register`); agent connects outbound to the gateway, no inbound port required. The issued client certificate (`agentCertTTL` = 30 days) auto-renews: once two-thirds of its lifetime has elapsed, the agent requests a fresh one over its already-authenticated session (`proto.MsgRenewRequest`/`MsgRenewResponse`), persists it atomically (backup + rollback on any failure), and reconnects to start using it — a healthy, reachable agent never actually reaches expiry.
 - **Frontend**: `web/index.html` "+ New server" modal, server list/detail views.
-- **Backend service**: `apiServer.handleCreateServer`, `agentCA`, `gateway`.
-- **API endpoint(s)**: `POST /api/v1/servers`, `POST /agents/register`.
-- **Agent command**: n/a (registration precedes capability dispatch).
-- **DB tables**: `servers`, `bootstrap_tokens`, `revoked_certs`.
+- **Backend service**: `apiServer.handleCreateServer`, `agentCA`, `gateway` (`gateway.handleRenewRequest`).
+- **API endpoint(s)**: `POST /api/v1/servers`, `POST /agents/register`; renewal itself is a message over the existing mTLS gateway session, not a separate HTTP endpoint.
+- **Agent command**: n/a (registration and renewal precede/parallel capability dispatch).
+- **DB tables**: `servers`, `bootstrap_tokens`, `revoked_certs`, `issued_certs` (full history of every certificate serial ever issued to a server, across registration and every renewal — see Security considerations).
 - **Required permission**: authenticated session (single-user model today — see ORG-001).
-- **Security considerations**: single-use/short-lived hashed bootstrap tokens; certificate identity independently derived from the mTLS handshake, never trusted from agent-asserted data; revocation checked every handshake.
-- **Test coverage**: `apps/controlplane/http_test.go` (`TestServerCreateListRevokeFlow`, `TestRegisterEndpointRejectsBadToken`), `apps/controlplane/store_test.go`.
+- **Security considerations**: single-use/short-lived hashed bootstrap tokens; certificate identity independently derived from the mTLS handshake, never trusted from agent-asserted data; revocation checked every handshake. A renewal deliberately leaves the superseded certificate un-revoked (avoids a lockout race if the agent fails to persist the new one), but `issued_certs` records every serial ever issued so `revokeServer` still revokes the server's *entire* certificate history, not just its current serial — otherwise a pre-renewal certificate would keep authenticating after the server was supposedly revoked.
+- **Test coverage**: `apps/controlplane/http_test.go` (`TestServerCreateListRevokeFlow`, `TestRegisterEndpointRejectsBadToken`), `apps/controlplane/store_test.go` (incl. `TestRenewCertUpdatesCurrentSerialWithoutRevokingPrevious`, `TestRevokeServerRevokesEveryHistoricalSerial`), `apps/controlplane/gateway_test.go` (real mTLS round trip: register → renew → reconnect with the renewed cert → revoke → confirm both the original and renewed certs are rejected), `apps/agent/cert_test.go` (CSR generation, cert-expiry parsing, atomic persist-with-rollback). Also manually smoke-tested as real OS processes (control plane + agent binaries, real TCP/TLS, real SQLite file) — see `CHANGELOG.md`.
 - **Current status**: `COMPLETE`
-- **Completion date**: 2026-08-14
-- **Known differences**: no agent certificate auto-renewal before 30-day expiry yet.
-- **Reason**: scoped out of the initial secure-foundation pass; tracked in `SYSTEM.md` §21.
+- **Completion date**: 2026-08-23
+- **Known differences**: renewal is time-based only (checked hourly against the cert's own NotBefore/NotAfter); there's no forced renewal via an admin action, and no alert if an agent has been unreachable long enough that its certificate is at risk of expiring before it can reconnect and renew.
+- **Reason**: an admin-triggered forced renewal and an expiry-risk alert are monitoring/alerting-adjacent (`ALR-*`, still `NOT_STARTED`) rather than core to the enrollment mechanism itself.
 
 ### SRV-002 — Hosting stack installation (LEMP)
 - **Category**: Server Management

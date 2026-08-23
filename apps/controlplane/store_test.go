@@ -152,6 +152,73 @@ func TestRevokeServerBlocksReuseOfCertSerial(t *testing.T) {
 	}
 }
 
+func TestRenewCertUpdatesCurrentSerialWithoutRevokingPrevious(t *testing.T) {
+	st := newTestStore(t)
+	id, _, err := st.createServer("web-renew", "", nil, time.Hour, "admin@example.com")
+	if err != nil {
+		t.Fatalf("createServer: %v", err)
+	}
+	st.markIssuedCert(id, "10")
+
+	if err := st.renewCert(id, "11"); err != nil {
+		t.Fatalf("renewCert: %v", err)
+	}
+
+	rec, ok := st.get(id)
+	if !ok {
+		t.Fatal("server should still exist")
+	}
+	if rec.CertSerial != "11" {
+		t.Fatalf("cert_serial = %q, want %q", rec.CertSerial, "11")
+	}
+	// The superseded serial must stay valid (not revoked) — renewal must
+	// never lock an agent out mid-rotation.
+	if st.isRevoked("10") {
+		t.Fatal("superseded serial should not be revoked immediately after renewal")
+	}
+	if st.isRevoked("11") {
+		t.Fatal("freshly renewed serial should not be revoked")
+	}
+}
+
+func TestRenewCertRejectsUnknownServer(t *testing.T) {
+	st := newTestStore(t)
+	if err := st.renewCert("srv_doesnotexist", "1"); err == nil {
+		t.Fatal("expected renewCert on an unknown server to fail")
+	}
+}
+
+func TestRevokeServerRevokesEveryHistoricalSerial(t *testing.T) {
+	st := newTestStore(t)
+	id, _, err := st.createServer("web-history", "", nil, time.Hour, "admin@example.com")
+	if err != nil {
+		t.Fatalf("createServer: %v", err)
+	}
+	st.markIssuedCert(id, "20")
+	if err := st.renewCert(id, "21"); err != nil {
+		t.Fatalf("renewCert: %v", err)
+	}
+	if err := st.renewCert(id, "22"); err != nil {
+		t.Fatalf("renewCert: %v", err)
+	}
+	if st.isRevoked("20") || st.isRevoked("21") || st.isRevoked("22") {
+		t.Fatal("no serial should be revoked before revokeServer runs")
+	}
+
+	if err := st.revokeServer(id, "admin@example.com"); err != nil {
+		t.Fatalf("revokeServer: %v", err)
+	}
+
+	// Every certificate ever issued to this server — the original plus
+	// both renewals — must be unusable after an explicit revocation, or a
+	// pre-renewal certificate would still authenticate a "revoked" server.
+	for _, serial := range []string{"20", "21", "22"} {
+		if !st.isRevoked(serial) {
+			t.Fatalf("serial %q should be revoked after revokeServer", serial)
+		}
+	}
+}
+
 func TestRevokeServerRejectsUnknownServer(t *testing.T) {
 	st := newTestStore(t)
 	if err := st.revokeServer("srv_doesnotexist", "admin@example.com"); err == nil {

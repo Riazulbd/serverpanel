@@ -51,7 +51,7 @@ func main() {
 
 	backoff := time.Second
 	for {
-		err := runConnection(ctx, id, reg)
+		err := runConnection(ctx, id, *dataDir, reg)
 		if ctx.Err() != nil {
 			log.Println("shutting down")
 			return
@@ -64,6 +64,19 @@ func main() {
 		}
 		if backoff < 30*time.Second {
 			backoff *= 2
+		}
+
+		// Reload identity from disk before reconnecting: a proactive
+		// certificate renewal (connect.go renewalLoop) may have persisted a
+		// new cert/key pair since the last successful connection — closing
+		// the connection deliberately to force this reload is exactly how
+		// a renewed identity actually gets used. A reload failure here
+		// (e.g. a transient disk error) falls back to the previous
+		// in-memory identity rather than crashing the agent.
+		if fresh, err := loadIdentity(*dataDir); err == nil {
+			id = fresh
+		} else {
+			log.Printf("could not reload identity from %s, retrying with previous identity: %v", *dataDir, err)
 		}
 	}
 }

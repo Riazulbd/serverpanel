@@ -100,6 +100,20 @@ CREATE TABLE IF NOT EXISTS revoked_certs (
 	revoked_at TEXT NOT NULL
 );
 
+-- Every certificate serial ever issued to a server, across both initial
+-- registration and every subsequent renewal (see store.renewCert). This is
+-- what lets revokeServer revoke a server's *entire* certificate history in
+-- one action instead of only whatever the servers.cert_serial column
+-- currently points at — a renewal deliberately leaves the superseded
+-- serial un-revoked (to avoid a lockout race), so without this table a
+-- pre-renewal certificate would stay usable forever, even after the server
+-- was explicitly revoked.
+CREATE TABLE IF NOT EXISTS issued_certs (
+	serial     TEXT PRIMARY KEY,
+	server_id  TEXT NOT NULL,
+	issued_at  TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS audit_log (
 	seq       INTEGER PRIMARY KEY AUTOINCREMENT,
 	at        TEXT NOT NULL,

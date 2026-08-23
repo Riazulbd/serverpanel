@@ -2,6 +2,64 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-23 — Agent certificate auto-renewal (closes the top documented server-agent gap)
+
+- **Implemented proactive agent certificate renewal**, closing the gap flagged as the
+  top known limitation in `SYSTEM.md` §21 and `SECURITY.md` §2: agent client
+  certificates were issued with a fixed 30-day TTL and had no renewal path — every
+  connected server would have silently, permanently disconnected 30 days after
+  registration, requiring manual re-registration with a brand new bootstrap token.
+  - **Protocol**: two new message types on the existing agent↔gateway wire protocol
+    (`packages/proto`) — `MsgRenewRequest` (agent → gateway, carries a fresh CSR) and
+    `MsgRenewResponse` (gateway → agent, carries the new certificate or an error).
+    Renewal rides the agent's *existing, already-authenticated* mTLS session — there's
+    no new HTTP endpoint and no reuse of the original bootstrap token.
+  - **Gateway** (`apps/controlplane/gateway.go` `handleRenewRequest`): signs the CSR
+    with the identity already bound to the live session (never anything the request
+    claims), so a session can't renew itself into a different server's identity.
+  - **Store** (`apps/controlplane/store.go`): added `renewCert`, and a new
+    `issued_certs` table recording every certificate serial ever issued to a server
+    (registration + every renewal). This closes a real security gap that renewal would
+    otherwise have opened: a renewal deliberately leaves the superseded certificate
+    un-revoked (revoking it immediately would race against the agent persisting the
+    new one — a failure in that window would permanently lock the agent out), so
+    without a full history, `revokeServer` would only have revoked a server's *latest*
+    certificate — a pre-renewal certificate would have kept authenticating forever
+    after the server was supposedly revoked. `revokeServer` now revokes every serial on
+    record for that server.
+  - **Agent** (`apps/agent/connect.go`, new `apps/agent/cert.go`): a `renewalLoop`
+    checks its own certificate's validity window (parsed from the cert itself, not a
+    hardcoded TTL) and requests renewal once two-thirds of its lifetime has elapsed,
+    rechecking hourly. On success, the new cert+key are persisted with
+    `persistRenewedCert` — temp-write-then-rename, with the previous certificate backed
+    up and restored if the key rename fails partway through — so a crash or disk error
+    mid-renewal can never leave a mismatched cert/key pair that bricks the agent. The
+    connection is then deliberately closed so the existing reconnect loop (`main.go`,
+    now reloading identity from disk before each reconnect attempt) picks up the
+    renewed identity — TLS has no way to swap a client certificate on an
+    already-handshaked connection.
+  - **Fixed a latent concurrency bug found while making this change**: the agent's
+    heartbeat loop, task-event sender, and (now) renewal requester all write to the
+    same TLS connection from separate goroutines; nothing previously serialized those
+    writes, so concurrent `Encoder.Encode` calls could interleave and corrupt the
+    newline-delimited JSON stream. Added `syncEncoder` (a small mutex-guarded wrapper)
+    on the agent side — the gateway side already had equivalent protection via
+    `agentSession.mu`.
+  - **Tests**: `apps/controlplane/store_test.go` (renewal updates the current serial
+    without revoking the superseded one; `revokeServer` revokes every historical
+    serial); `apps/controlplane/gateway_test.go` (new — real mTLS handshakes against a
+    real gateway listener, not mocked: register → renew over a live session →
+    reconnect with the renewed certificate → revoke → confirm both the pre- and
+    post-renewal certificates are rejected; a malformed-CSR renewal request gets a
+    structured error without corrupting server state); `apps/agent/cert_test.go` (new
+    package — CSR generation actually verifies, certificate-validity parsing, and
+    `persistRenewedCert`'s atomic-swap-with-rollback, including that a failed renewal
+    leaves no stray temp files, private key material included). Also manually smoke
+    -tested as real OS processes: built the actual `controlplane` and `agent`
+    binaries, ran a real registration and connection over real TCP/TLS against a real
+    SQLite-backed control plane, and confirmed the server showed as `connected`.
+    `go test ./... -race` and `gofmt -l .` both clean.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

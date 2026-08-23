@@ -168,8 +168,34 @@ func (s *store) revokeToken(serverID, actor string) {
 }
 
 func (s *store) markIssuedCert(serverID, serial string) {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
 	s.db.Exec(`UPDATE servers SET cert_serial = ?, status = ? WHERE id = ?`, serial, string(statusOffline), serverID)
+	s.db.Exec(`INSERT OR REPLACE INTO issued_certs (serial, server_id, issued_at) VALUES (?, ?, ?)`, serial, serverID, now)
 	s.log(serverID, "", "agent.registered", fmt.Sprintf("cert_serial=%s", serial))
+}
+
+// renewCert records a certificate issued to replace an already-valid one,
+// ahead of its expiry (see gateway.go's handling of proto.MsgRenewRequest).
+// Unlike markIssuedCert it doesn't touch server status — the agent's
+// session is already live — and logs a distinct audit action. The
+// superseded serial is deliberately left un-revoked here: revoking it
+// immediately would race against the agent persisting the new certificate
+// to disk, and a failure in that window would permanently lock the agent
+// out. It's still recorded in issued_certs (via markIssuedCert originally,
+// or a prior renewCert), so an explicit revokeServer still catches it.
+func (s *store) renewCert(serverID, newSerial string) error {
+	if _, ok := s.get(serverID); !ok {
+		return fmt.Errorf("server not found")
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := s.db.Exec(`UPDATE servers SET cert_serial = ? WHERE id = ?`, newSerial, serverID); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`INSERT OR REPLACE INTO issued_certs (serial, server_id, issued_at) VALUES (?, ?, ?)`, newSerial, serverID, now); err != nil {
+		return err
+	}
+	s.log(serverID, "", "agent.cert_renewed", fmt.Sprintf("cert_serial=%s", newSerial))
+	return nil
 }
 
 func (s *store) isRevoked(serial string) bool {
@@ -178,27 +204,54 @@ func (s *store) isRevoked(serial string) bool {
 	return n > 0
 }
 
-// revokeServer revokes the server's issued certificate and marks it
-// disconnected. Re-connecting requires a brand new bootstrap token —
-// there is no path back to trust from a revoked certificate.
+// revokeServer revokes every certificate serial ever issued to this
+// server — not just its current one — and marks it disconnected.
+// Re-connecting requires a brand new bootstrap token; there is no path back
+// to trust from a revoked certificate. Revoking the full history (not just
+// servers.cert_serial) matters once renewCert exists: a renewal leaves the
+// superseded serial cryptographically valid until its own natural expiry,
+// so an explicit revocation must close that gap too, or an attacker
+// holding a pre-renewal certificate could keep connecting after the server
+// was supposedly revoked.
 func (s *store) revokeServer(serverID, actor string) error {
 	rec, ok := s.get(serverID)
 	if !ok {
 		return fmt.Errorf("server not found")
 	}
+
+	rows, err := s.db.Query(`SELECT serial FROM issued_certs WHERE server_id = ?`, serverID)
+	if err != nil {
+		return err
+	}
+	var serials []string
+	for rows.Next() {
+		var serial string
+		if rows.Scan(&serial) == nil {
+			serials = append(serials, serial)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
 	if rec.CertSerial != "" {
-		_, err := s.db.Exec(
+		serials = append(serials, rec.CertSerial)
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	for _, serial := range serials {
+		if _, err := s.db.Exec(
 			`INSERT OR REPLACE INTO revoked_certs (serial, server_id, revoked_at) VALUES (?, ?, ?)`,
-			rec.CertSerial, serverID, time.Now().UTC().Format(time.RFC3339Nano),
-		)
-		if err != nil {
+			serial, serverID, now,
+		); err != nil {
 			return err
 		}
 	}
+
 	if _, err := s.db.Exec(`UPDATE servers SET status = ? WHERE id = ?`, string(statusDisconnected), serverID); err != nil {
 		return err
 	}
-	s.log(serverID, actor, "agent.revoked", fmt.Sprintf("cert_serial=%s", rec.CertSerial))
+	s.log(serverID, actor, "agent.revoked", fmt.Sprintf("cert_serials_revoked=%d", len(serials)))
 	return nil
 }
 
@@ -295,7 +348,9 @@ func scanServer(row rowScanner) (*serverRecord, error) {
 // loadOrCreateAgentCA.
 func (s *store) maxKnownCertSerial() int64 {
 	var max int64
-	rows, err := s.db.Query(`SELECT cert_serial FROM servers WHERE cert_serial != '' UNION SELECT serial FROM revoked_certs`)
+	rows, err := s.db.Query(`SELECT cert_serial FROM servers WHERE cert_serial != ''
+		UNION SELECT serial FROM revoked_certs
+		UNION SELECT serial FROM issued_certs`)
 	if err != nil {
 		return 0
 	}
