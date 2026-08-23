@@ -2,6 +2,52 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-23 — Agent certificate auto-renewal
+
+- **Implemented agent client-certificate auto-renewal**, closing the top-ranked known
+  gap called out across `SYSTEM.md`, `SECURITY.md` §2, `OPERATIONS.md`, and
+  `SERVERAVATAR_PARITY.md` SRV-001: agent client certificates carry a 30-day TTL and,
+  until now, had no renewal path — an agent whose cert expired required a fresh
+  bootstrap token and full manual re-registration, a real operational reliability risk
+  for every managed server.
+  - New wire messages `renew_request`/`renew_response` (`packages/proto/proto.go`),
+    sent over an agent's already-mTLS-authenticated session — never a shared secret.
+  - `apps/agent/connect.go`'s new `renewalLoop` checks certificate expiry every 6
+    hours (and immediately on connect) and requests renewal once less than 10 days
+    (a third of the 30-day TTL) remain, generating a fresh keypair for the new cert
+    rather than reusing the old key. `apps/controlplane/gateway.go`'s new
+    `handleRenewRequest` signs the renewal using the identity from the
+    already-verified peer certificate (never the request body), enforcing a 1-hour
+    per-session cooldown as a backstop against a misbehaving agent.
+  - New `issued_certs` table (`apps/controlplane/db.go`) tracks every certificate
+    serial ever issued to a server, not just the current one. `store.rotateCert`
+    deliberately does **not** revoke the superseded certificate at renewal time — it
+    is authenticated (mTLS session), so leaving it valid until its own natural expiry
+    means a dropped connection between issuance and the agent persisting the new cert
+    can never leave the agent holding only a revoked identity. `revokeServer` was
+    changed to revoke a server's **entire** certificate history instead of only its
+    current serial, so an explicit revoke still fully invalidates a renewed identity.
+  - The renewed certificate is persisted to disk via atomic write-then-rename
+    (`identity.persistRenewedCert`), and the agent proactively reconnects afterward
+    (bypassing its failure backoff, since this isn't a failure) to activate it.
+  - Found and fixed during development: a genuine data race between `renewalLoop`
+    (reads the current cert every tick, on its own goroutine) and the connection's
+    read loop (overwrites it after a successful renewal) — `go test -race` didn't
+    catch it because `apps/agent` had no test files at all before this change. Fixed
+    with mutex-guarded `identity.currentCert()`/`setCert()` accessors, plus a
+    regression test (`TestIdentityCertAccessorsAreRaceSafe`) that reliably trips
+    without them. Also fixed a latent, unrelated busy-loop-on-closed-listener bug in
+    `gateway.serve` (needed to make the accept loop testable at all) by returning
+    cleanly on `net.ErrClosed` instead of retrying the same permanent error forever.
+  - 7 new tests: 2 store-level (`apps/controlplane/store_test.go`), 2 real end-to-end
+    mTLS round trips through the actual `tls.Listen`/`tls.Dial` — not mocked —
+    covering both the renewal itself and the cooldown rejection
+    (`apps/controlplane/gateway_test.go`), and 3 in `apps/agent` (CSR generation,
+    atomic persistence, and the concurrency regression test above). Full suite: 68
+    test functions across three packages, `go vet`/`gofmt` clean, no `-race` failures.
+  - Updated `SYSTEM.md`, `SECURITY.md` §2, `OPERATIONS.md`, `API.md`, `TESTING.md`,
+    and `SERVERAVATAR_PARITY.md` SRV-001 to reflect this as implemented and tested.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

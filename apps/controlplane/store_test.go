@@ -152,6 +152,59 @@ func TestRevokeServerBlocksReuseOfCertSerial(t *testing.T) {
 	}
 }
 
+func TestRotateCertUpdatesCurrentSerialWithoutTouchingStatus(t *testing.T) {
+	st := newTestStore(t)
+	id, _, err := st.createServer("web-renew", "", nil, time.Hour, "admin@example.com")
+	if err != nil {
+		t.Fatalf("createServer: %v", err)
+	}
+	st.markIssuedCert(id, "100")
+	st.db.Exec(`UPDATE servers SET status = ? WHERE id = ?`, string(statusConnected), id)
+
+	st.rotateCert(id, "101")
+
+	rec, ok := st.get(id)
+	if !ok {
+		t.Fatal("server should still exist")
+	}
+	if rec.CertSerial != "101" {
+		t.Fatalf("cert_serial = %q, want %q", rec.CertSerial, "101")
+	}
+	if rec.Status != statusConnected {
+		t.Fatalf("rotateCert changed status to %q, want it left at %q", rec.Status, statusConnected)
+	}
+	if st.isRevoked("100") {
+		t.Fatal("the superseded certificate should not be revoked by rotateCert alone")
+	}
+}
+
+func TestRevokeServerRevokesEveryIssuedSerialIncludingRenewedOnes(t *testing.T) {
+	st := newTestStore(t)
+	id, _, err := st.createServer("web-renew-2", "", nil, time.Hour, "admin@example.com")
+	if err != nil {
+		t.Fatalf("createServer: %v", err)
+	}
+	st.markIssuedCert(id, "200")
+	st.rotateCert(id, "201")
+	st.rotateCert(id, "202")
+
+	for _, serial := range []string{"200", "201", "202"} {
+		if st.isRevoked(serial) {
+			t.Fatalf("serial %s should not be revoked yet", serial)
+		}
+	}
+
+	if err := st.revokeServer(id, "admin@example.com"); err != nil {
+		t.Fatalf("revokeServer: %v", err)
+	}
+
+	for _, serial := range []string{"200", "201", "202"} {
+		if !st.isRevoked(serial) {
+			t.Fatalf("serial %s should be revoked after revokeServer, so a leaked pre-renewal cert can't still authenticate", serial)
+		}
+	}
+}
+
 func TestRevokeServerRejectsUnknownServer(t *testing.T) {
 	st := newTestStore(t)
 	if err := st.revokeServer("srv_doesnotexist", "admin@example.com"); err == nil {

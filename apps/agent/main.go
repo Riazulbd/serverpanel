@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"log"
 	"os"
@@ -55,6 +56,12 @@ func main() {
 		if ctx.Err() != nil {
 			log.Println("shutting down")
 			return
+		}
+		if errors.Is(err, errCertRenewed) {
+			// Not a failure: reconnect immediately with the now-updated
+			// identity, and don't let this count toward backoff growth.
+			backoff = time.Second
+			continue
 		}
 		log.Printf("connection to gateway lost: %v (retrying in %s)", err, backoff)
 		select {

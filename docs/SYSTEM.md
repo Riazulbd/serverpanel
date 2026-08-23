@@ -52,8 +52,9 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | User/organization management | 🚧 single-user model only; no orgs/teams yet |
 | Multiple-server management | ✅ create/list/get/revoke, search/filter in UI |
 | Secure agent install/registration | ✅ bootstrap token → mTLS cert exchange |
-| Agent identity, cert rotation, revocation | 🚧 issuance + revocation done; no
-  auto-renewal before expiry yet (see `SECURITY.md` §2) |
+| Agent identity, cert rotation, revocation | ✅ issuance, agent-driven auto-renewal
+  ahead of the 30-day expiry, and revocation of a server's entire certificate
+  history (not just its current cert) — see `SECURITY.md` §2 |
 | Server health monitoring | ✅ heartbeat: uptime, load, mem%, disk% |
 | Server groups/tags/metadata | ✅ `group`, `tags[]` on server records |
 | Background job queue | ⬜ task dispatch is synchronous request/response today,
@@ -384,7 +385,6 @@ all ⬜, scoped to Phase 2 per `product-plan.md` §9.
 - No backup scheduling/retention policy — backups are on-demand only.
 - No on-disk agent task journal — a task in flight when the agent process restarts is
   lost, not resumed (see `ARCHITECTURE.md` §4 "As built").
-- No agent certificate auto-renewal before its 30-day expiry (see `SECURITY.md` §2).
 - No agent self-update mechanism (see `SECURITY.md` §3).
 - No background job queue — task dispatch is synchronous and bounded by a 120s HTTP
   timeout; this will not scale past a moderate number of concurrent long-running tasks

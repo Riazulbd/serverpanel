@@ -159,6 +159,8 @@ connection carries newline-delimited JSON `Envelope`s in both directions
 {"type": "heartbeat", "heartbeat": {"sent_at": "...", "uptime_secs": 0, "load_avg_1": 0, "mem_used_pct": 0, "disk_used_pct": 0}}
 {"type": "task", "task": {"id": "...", "capability": "...", "params": {}, "issued_at": "..."}}
 {"type": "task_event", "task_event": {"task_id": "...", "status": "queued|running|succeeded|failed|rejected", "message": "...", "detail": "...", "at": "..."}}
+{"type": "renew_request", "renew_request": {"csr_pem": "..."}}
+{"type": "renew_response", "renew_response": {"cert_pem": "..."}}
 {"type": "ack"}
 ```
 
@@ -170,6 +172,23 @@ HTTP handler) until it sees a terminal event for the task ID it sent, or its con
 deadline expires. There is no message type for a free-form command — `capability` must
 be a name in `packages/capabilities`'s fixed registry, or the agent returns `rejected`
 without executing anything.
+
+**Certificate renewal** (`gateway.handleRenewRequest`, `apps/agent/connect.go`
+`renewalLoop`): once every 6 hours (and immediately on connect) the agent checks its
+own certificate's expiry; when less than `certRenewalThreshold` (10 days, a third of
+the 30-day `agentCertTTL`) remains, it generates a fresh keypair and CSR and sends
+`renew_request` over the live session. The gateway signs a new certificate for the
+same server identity — taken from the already-verified peer certificate, never from
+the request body — records it in `issued_certs`, and replies with `renew_response`.
+The agent persists the new cert/key to disk (atomic write-then-rename) and closes the
+connection to reconnect using the new identity. The old certificate is *not* revoked
+by a renewal (see `store.rotateCert`'s doc comment): it simply expires on its own
+original schedule, so an agent that fails to receive/persist the renewal response is
+never left holding only a revoked certificate. `revokeServer` still revokes a server's
+entire certificate history (`issued_certs`), so an explicit revoke fully invalidates a
+renewed identity, old and new certs alike. A per-session cooldown (`renewCooldown`, 1
+hour) rejects a second renewal request arriving too soon, as a backstop against a
+misbehaving agent.
 
 ## 4. Capability reference
 

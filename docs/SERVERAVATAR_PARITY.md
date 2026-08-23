@@ -45,14 +45,14 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Backend service**: `apiServer.handleCreateServer`, `agentCA`, `gateway`.
 - **API endpoint(s)**: `POST /api/v1/servers`, `POST /agents/register`.
 - **Agent command**: n/a (registration precedes capability dispatch).
-- **DB tables**: `servers`, `bootstrap_tokens`, `revoked_certs`.
+- **DB tables**: `servers`, `bootstrap_tokens`, `revoked_certs`, `issued_certs`.
 - **Required permission**: authenticated session (single-user model today — see ORG-001).
-- **Security considerations**: single-use/short-lived hashed bootstrap tokens; certificate identity independently derived from the mTLS handshake, never trusted from agent-asserted data; revocation checked every handshake.
-- **Test coverage**: `apps/controlplane/http_test.go` (`TestServerCreateListRevokeFlow`, `TestRegisterEndpointRejectsBadToken`), `apps/controlplane/store_test.go`.
+- **Security considerations**: single-use/short-lived hashed bootstrap tokens; certificate identity independently derived from the mTLS handshake, never trusted from agent-asserted data; revocation checked every handshake; certificates are short-lived (30 days) and agent-driven auto-renewal keeps a connected agent from ever needing a shared long-lived secret, while `revokeServer` invalidates a server's entire certificate history (not just its current cert) so a renewed-but-still-valid old cert can't outlive an explicit revoke.
+- **Test coverage**: `apps/controlplane/http_test.go` (`TestServerCreateListRevokeFlow`, `TestRegisterEndpointRejectsBadToken`), `apps/controlplane/store_test.go`, `apps/controlplane/gateway_test.go` (real mTLS round trip for renewal + cooldown), `apps/agent/register_test.go`.
 - **Current status**: `COMPLETE`
-- **Completion date**: 2026-08-14
-- **Known differences**: no agent certificate auto-renewal before 30-day expiry yet.
-- **Reason**: scoped out of the initial secure-foundation pass; tracked in `SYSTEM.md` §21.
+- **Completion date**: 2026-08-14 (initial registration); 2026-08-23 (agent-driven certificate auto-renewal)
+- **Known differences**: none remaining for this row.
+- **Reason**: n/a.
 
 ### SRV-002 — Hosting stack installation (LEMP)
 - **Category**: Server Management

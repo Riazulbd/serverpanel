@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -34,20 +35,45 @@ type agentSession struct {
 	enc      *json.Encoder
 	mu       sync.Mutex // guards writes to enc
 	pending  map[string]chan proto.TaskEvent
+
+	renewMu       sync.Mutex
+	lastRenewedAt time.Time
 }
+
+// renewCooldown is the minimum spacing this gateway enforces between two
+// certificate renewals for the same live session. A well-behaved agent
+// only asks once every few hours (see apps/agent/connect.go), so this
+// exists purely as a defensive backstop against a misbehaving or buggy
+// agent hammering the gateway with renewal requests — CSR signing is cheap
+// but not free, and every renewal writes an issued_certs row plus an audit
+// log entry.
+const renewCooldown = time.Hour
 
 func newGateway(ca *agentCA, st *store) *gateway {
 	return &gateway{ca: ca, store: st, sessions: map[string]*agentSession{}}
 }
 
 func (g *gateway) listenAndServe(addr string) error {
-	certPEM, keyPEM, err := g.ca.signServerCert([]string{"localhost", "127.0.0.1", "serverpanel-gateway"})
+	ln, err := g.newTLSListener(addr)
 	if err != nil {
 		return err
 	}
+	log.Printf("agent gateway (mTLS) listening on %s", addr)
+	return g.serve(ln)
+}
+
+// newTLSListener builds the mTLS listener alone, without starting the
+// accept loop — split out from listenAndServe so tests can bind to
+// "127.0.0.1:0", read back the OS-assigned port from the listener, and
+// dial a real mTLS session against it (see gateway_test.go).
+func (g *gateway) newTLSListener(addr string) (net.Listener, error) {
+	certPEM, keyPEM, err := g.ca.signServerCert([]string{"localhost", "127.0.0.1", "serverpanel-gateway"})
+	if err != nil {
+		return nil, err
+	}
 	cert, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	cfg := &tls.Config{
@@ -57,15 +83,22 @@ func (g *gateway) listenAndServe(addr string) error {
 		MinVersion:   tls.VersionTLS13,
 	}
 
-	ln, err := tls.Listen("tcp", addr, cfg)
-	if err != nil {
-		return err
-	}
-	log.Printf("agent gateway (mTLS) listening on %s", addr)
+	return tls.Listen("tcp", addr, cfg)
+}
 
+// serve runs the accept loop against an already-bound listener. A
+// per-connection Accept error is logged and retried (a transient
+// too-many-open-files-style error shouldn't take the whole gateway down),
+// but a closed listener — the deliberate shutdown signal, e.g. from
+// gateway_test.go's t.Cleanup, or a future graceful-shutdown path — returns
+// cleanly instead of busy-looping on the same permanent error forever.
+func (g *gateway) serve(ln net.Listener) error {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				return nil
+			}
 			log.Printf("gateway accept error: %v", err)
 			continue
 		}
@@ -173,7 +206,44 @@ func (g *gateway) handleConn(conn net.Conn) {
 					}
 				}
 			}
+		case proto.MsgRenewRequest:
+			if env.RenewRequest != nil {
+				g.handleRenewRequest(sess, serverID, env.RenewRequest.CSRPEM)
+			}
 		}
+	}
+}
+
+// handleRenewRequest signs a fresh client certificate for an agent that is
+// asking to rotate its identity ahead of its current certificate's
+// expiry (see docs/SECURITY.md §2 and apps/agent/connect.go renewalLoop).
+// The request's only authentication is the live mTLS session it arrived
+// on — serverID here comes from the already-verified peer certificate in
+// handleConn, never from anything the agent asserts in the request body —
+// so no bootstrap token or other secret is involved in a renewal.
+func (g *gateway) handleRenewRequest(sess *agentSession, serverID, csrPEM string) {
+	sess.renewMu.Lock()
+	if !sess.lastRenewedAt.IsZero() && time.Since(sess.lastRenewedAt) < renewCooldown {
+		sess.renewMu.Unlock()
+		log.Printf("rejecting renewal for server_id=%s: cooldown not elapsed", serverID)
+		return
+	}
+	sess.lastRenewedAt = time.Now()
+	sess.renewMu.Unlock()
+
+	certPEM, serial, err := g.ca.signAgentCSR([]byte(csrPEM), serverID, agentCertTTL)
+	if err != nil {
+		log.Printf("renewal for server_id=%s rejected: %v", serverID, err)
+		g.store.log(serverID, "", "agent.cert_renewal_failed", err.Error())
+		return
+	}
+	g.store.rotateCert(serverID, serial.String())
+
+	sess.mu.Lock()
+	err = sess.enc.Encode(proto.Envelope{Type: proto.MsgRenewResponse, RenewResponse: &proto.RenewResponse{CertPEM: string(certPEM)}})
+	sess.mu.Unlock()
+	if err != nil {
+		log.Printf("could not send renewed certificate to server_id=%s: %v", serverID, err)
 	}
 }
 

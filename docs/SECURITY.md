@@ -47,24 +47,33 @@ Properties this guarantees:
 - **Revocable**: an unused token can be revoked from the dashboard (e.g., user made a
   mistake, wants to reissue); an already-exchanged identity is revoked separately (§3).
 
-## 2. Ongoing authentication: mutual TLS — **partially implemented**
+## 2. Ongoing authentication: mutual TLS — **implemented**
 
 - All agent ↔ control-plane traffic (registration excluded, which is TLS + token) uses
   **mTLS**: the gateway only accepts connections presenting a valid, non-revoked
   certificate issued by the internal Agent CA, and the agent verifies the gateway's
   certificate/pinned CA to prevent MITM or connecting to a spoofed endpoint.
   **Implemented as described** — see `apps/controlplane/gateway.go` `handleConn`.
-- Client certs are **short-lived** (e.g. 30–90 days) and **auto-rotated**: before
-  expiry, the agent requests renewal authenticated by its current still-valid cert (no
-  shared long-lived secret is ever reused for renewal). If a renewal window is missed
-  (agent offline past expiry), the agent falls back to a manual re-registration flow
-  requiring a fresh bootstrap token from the dashboard — this is an intentional
-  fail-closed behavior, not silent re-trust.
-  **Not yet implemented**: certs are issued with a fixed 30-day TTL
-  (`apps/controlplane/http.go` `handleRegister`) and there is no renewal
-  capability/endpoint yet — an agent whose cert expires must be manually
-  re-registered with a fresh bootstrap token today. Auto-rotation before expiry is
-  tracked as a known gap in `SYSTEM.md`.
+- Client certs are **short-lived** (30 days, `apps/controlplane/ca.go` `agentCertTTL`)
+  and **auto-rotated**: before expiry, the agent requests renewal authenticated by its
+  current still-valid cert (no shared long-lived secret is ever reused for renewal). If
+  a renewal window is missed (agent offline past expiry), the agent falls back to a
+  manual re-registration flow requiring a fresh bootstrap token from the dashboard —
+  this is an intentional fail-closed behavior, not silent re-trust.
+  **Implemented as described** — see `apps/agent/connect.go` `renewalLoop` (checks
+  every 6 hours, and immediately on connect, whether less than
+  `certRenewalThreshold` (10 days) of validity remains) and
+  `apps/controlplane/gateway.go` `handleRenewRequest` (signs the renewal over the
+  live mTLS session, using the identity from the already-verified peer certificate,
+  never from the request body). The superseded certificate is deliberately left
+  un-revoked at renewal time — see `store.rotateCert`'s doc comment — so a dropped
+  connection between issuance and the agent persisting the new cert can never brick
+  the agent's identity; `revokeServer` revokes a server's *entire* certificate
+  history (`issued_certs`), so an explicit revoke still fully invalidates a renewed
+  identity. Covered by `apps/controlplane/gateway_test.go` (a real mTLS round trip
+  through the actual TLS listener, not a mock) and `apps/agent/register_test.go`
+  (including a regression test for a concurrent-access data race found and fixed
+  during development — `TestIdentityCertAccessorsAreRaceSafe`).
 - The Agent CA's private key is held in a dedicated, tightly access-controlled service
   (e.g. `step-ca` or HSM-backed KMS in later stages), separate from the general
   application database, so a control-plane app-tier compromise doesn't automatically

@@ -6,6 +6,8 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -20,6 +22,21 @@ import (
 
 const agentVersion = "0.1.0-dev"
 
+// certRenewalThreshold is how far ahead of its own certificate's expiry the
+// agent starts asking the gateway to renew it (see renewalLoop below and
+// docs/SECURITY.md §2). A third of the 30-day certificate TTL (ca.go
+// agentCertTTL) leaves generous room to retry across a multi-day network or
+// gateway outage before the cert actually expires and the agent falls back
+// to requiring manual re-registration with a fresh bootstrap token.
+const certRenewalThreshold = 10 * 24 * time.Hour
+
+// errCertRenewed is returned by runConnection when it deliberately closes
+// its own connection after installing a renewed certificate, so main.go's
+// reconnect loop can redial immediately (using the now-updated identity)
+// instead of waiting out its failure backoff — this is a routine, expected
+// disconnect, not an error condition.
+var errCertRenewed = errors.New("certificate renewed, reconnecting to activate it")
+
 // runConnection maintains one mTLS session to the gateway: sends Hello,
 // then loops sending periodic heartbeats and executing any Task the
 // gateway sends, replying with TaskEvents. The hosted services the agent
@@ -27,7 +44,8 @@ const agentVersion = "0.1.0-dev"
 // this connection — see docs/architecture.md §2 — so a dropped connection
 // here degrades orchestration/observability only, never site serving.
 func runConnection(ctx context.Context, id *identity, reg capabilities.Registry) error {
-	cert, err := tls.X509KeyPair(id.CertPEM, id.KeyPEM)
+	certPEM, keyPEM := id.currentCert()
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
 		return err
 	}
@@ -70,18 +88,114 @@ func runConnection(ctx context.Context, id *identity, reg capabilities.Registry)
 	}
 	log.Printf("connected to gateway %s as %s", id.GatewayAddr, id.ServerID)
 
-	go heartbeatLoop(ctx, enc)
+	// Scoped to this one connection (not the agent's whole-process ctx),
+	// and always cancelled when runConnection returns, so heartbeatLoop and
+	// renewalLoop from a stale connection never keep running — and keep
+	// writing to a closed conn's encoder — after a reconnect has already
+	// started a fresh pair on the new one.
+	connCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	go heartbeatLoop(connCtx, enc)
+	renewKeyCh := make(chan []byte, 1)
+	go renewalLoop(connCtx, enc, id, renewKeyCh)
 
 	for {
 		var env proto.Envelope
 		if err := dec.Decode(&env); err != nil {
 			return err
 		}
-		if env.Type != proto.MsgTask || env.Task == nil {
-			continue
+		switch env.Type {
+		case proto.MsgTask:
+			if env.Task != nil {
+				go handleTask(ctx, enc, reg, *env.Task)
+			}
+		case proto.MsgRenewResponse:
+			if env.RenewResponse == nil {
+				continue
+			}
+			select {
+			case keyPEM := <-renewKeyCh:
+				if err := id.persistRenewedCert([]byte(env.RenewResponse.CertPEM), keyPEM); err != nil {
+					log.Printf("certificate renewal: %v (keeping current certificate)", err)
+					continue
+				}
+				id.setCert([]byte(env.RenewResponse.CertPEM), keyPEM)
+				log.Printf("certificate renewed, reconnecting to activate it")
+				return errCertRenewed
+			default:
+				log.Printf("received a renewal response with no matching request in flight, ignoring")
+			}
 		}
-		go handleTask(ctx, enc, reg, *env.Task)
 	}
+}
+
+// renewalLoop periodically checks whether id's current certificate is
+// nearing expiry and, if so, asks the gateway to renew it over this
+// already-authenticated session (see docs/SECURITY.md §2 and
+// gateway.go handleRenewRequest). It only ever writes to enc; the response
+// is read back on runConnection's single reader goroutine and matched up
+// with the private key generated here via renewKeyCh — reserving the
+// channel's one slot before sending doubles as an in-flight guard so a
+// slow-to-answer gateway doesn't get a second, redundant request every tick.
+func renewalLoop(ctx context.Context, enc *json.Encoder, id *identity, renewKeyCh chan []byte) {
+	ticker := time.NewTicker(6 * time.Hour)
+	defer ticker.Stop()
+
+	checkAndRenew := func() {
+		certPEM, _ := id.currentCert()
+		notAfter, err := certNotAfter(certPEM)
+		if err != nil {
+			log.Printf("certificate renewal: could not read current certificate expiry: %v", err)
+			return
+		}
+		if time.Until(notAfter) > certRenewalThreshold {
+			return
+		}
+		csrPEM, keyPEM, err := generateKeyAndCSR()
+		if err != nil {
+			log.Printf("certificate renewal: could not generate request: %v", err)
+			return
+		}
+		select {
+		case renewKeyCh <- keyPEM:
+			if err := enc.Encode(proto.Envelope{Type: proto.MsgRenewRequest, RenewRequest: &proto.RenewRequest{CSRPEM: string(csrPEM)}}); err != nil {
+				log.Printf("certificate renewal: could not send request: %v", err)
+				<-renewKeyCh // free the slot; nothing is actually in flight
+			}
+		default:
+			// A renewal request is already in flight awaiting a response.
+		}
+	}
+
+	// Check once right away, not only after the first tick: an agent that
+	// was offline and just reconnected close to (or past) its threshold
+	// shouldn't have to wait up to 6 more hours to start renewing.
+	checkAndRenew()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			checkAndRenew()
+		}
+	}
+}
+
+// certNotAfter parses the NotAfter timestamp out of a PEM-encoded
+// certificate, without requiring the caller to pull in a full TLS/CA
+// context — the agent only ever needs this one field to decide whether
+// it's time to ask for a renewal.
+func certNotAfter(certPEM []byte) (time.Time, error) {
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		return time.Time{}, fmt.Errorf("invalid certificate PEM")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return cert.NotAfter, nil
 }
 
 func handleTask(ctx context.Context, enc *json.Encoder, reg capabilities.Registry, task proto.Task) {

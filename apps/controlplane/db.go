@@ -100,6 +100,17 @@ CREATE TABLE IF NOT EXISTS revoked_certs (
 	revoked_at TEXT NOT NULL
 );
 
+-- Every certificate serial ever issued to a server, initial registration
+-- and every renewal alike (see rotateCert). servers.cert_serial only ever
+-- holds the *current* one; this table is what lets revokeServer invalidate
+-- a server's whole certificate history, not just whichever cert happens to
+-- be current at the moment of revocation.
+CREATE TABLE IF NOT EXISTS issued_certs (
+	serial     TEXT PRIMARY KEY,
+	server_id  TEXT NOT NULL,
+	issued_at  TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS audit_log (
 	seq       INTEGER PRIMARY KEY AUTOINCREMENT,
 	at        TEXT NOT NULL,
