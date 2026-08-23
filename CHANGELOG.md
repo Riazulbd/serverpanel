@@ -2,6 +2,56 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-23 — Agent certificate auto-renewal
+
+- **Closed the last open item in `docs/SECURITY.md` §2**: client certificates now
+  auto-renew before their 30-day expiry, exactly as that section's trust-model design
+  already described but the code hadn't implemented yet. An agent whose certificate is
+  within 7 days of expiring sends a `renew_cert` request over its already-open,
+  already-authenticated mTLS session; the gateway signs a fresh certificate bound to the
+  identity it independently derived from that connection's own peer certificate (never
+  anything the request claims) and replies with `renew_cert_result`. No bootstrap token,
+  no new connection, no shared long-lived secret reused for renewal.
+- New wire protocol messages (`packages/proto/proto.go`): `MsgRenewCert`/
+  `MsgRenewCertResult`, `RenewCert{CSRPEM}`, `RenewCertResult{CertPEM, Error}`.
+- `apps/controlplane/gateway.go`: `handleRenewCert` signs the CSR via the existing
+  `ca.signAgentCSR` (same `agentCertTTL` constant — now shared, previously duplicated
+  as a literal `30*24*time.Hour` in `http.go` — between initial registration and
+  renewal) and replies over the same session; a malformed CSR gets an error result, not
+  a closed connection. `listenAndServe` was split into `listen`/`serve` so tests can
+  bind an ephemeral port and dial in with a real client certificate.
+- `apps/agent/renew.go` (new): `certRenewer` tracks one in-flight renewal (guarded by a
+  mutex that also protects `identity.CertPEM`/`KeyPEM` against the genuine
+  cross-goroutine race this feature introduces — see below), checks expiry via
+  `certExpiry`, builds a CSR via `buildCSR`, and on success persists the new cert/key to
+  the agent's data directory and updates the in-memory identity for the connection's
+  *next* dial — deliberately without forcing the current, still-valid session to
+  reconnect early.
+- **Two real bugs found and fixed while building this** (see `docs/TESTING.md` §4 for
+  the full writeup): (1) `heartbeatLoop` — and, unfixed, the new `renewalLoop` — was
+  scoped to the agent process's lifetime context rather than one connection's, so every
+  dropped connection leaked that goroutine running forever against a dead socket; fixed
+  with a per-connection `context.WithCancel` in `runConnection`. (2) Reusing
+  `markIssuedCert` to record a renewed certificate's serial would have reset a live,
+  connected server's dashboard status to "offline" on every renewal (that function
+  unconditionally sets status alongside the serial, correct only at initial
+  registration before any connection exists); fixed with a dedicated
+  `updateCertSerial` store method that touches only the serial column.
+- Added 10 new tests: `apps/controlplane/gateway_test.go` (2 tests, dialing a real
+  `gateway.listen`/`serve` instance with a genuine client certificate — renewal issues a
+  correctly-bound fresh certificate while leaving a live session's connected status
+  untouched, and a malformed CSR is rejected without closing the session) and
+  `apps/agent/renew_test.go` (8 tests — this package's first test file — covering
+  expiry parsing, the renewal-threshold/no-double-send decision logic, and all three
+  outcomes of handling a renewal result, including a real `tls.X509KeyPair` check that
+  a persisted renewal's key actually pairs with its certificate). `go test ./...` now
+  covers 78 test functions (was 68) across three packages (was two), all passing under
+  `-race`; `go vet`/`gofmt -l` clean.
+- Updated `docs/SECURITY.md` (§2 now "mostly implemented" instead of "partially"),
+  `docs/SYSTEM.md` (§2 core-platform table, §7 agent lifecycle, §21 known limitations),
+  `docs/API.md` (§3 wire protocol), `docs/TESTING.md` (counts, coverage, bug list), and
+  `docs/SERVERAVATAR_PARITY.md` (SRV-001's "Known differences" closed out).
+
 ## 2026-08-23 — Database management: control-plane persistence + dashboard UI
 
 - **Closed the DB-005 parity gap** flagged in the previous entry's tracker

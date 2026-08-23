@@ -26,7 +26,7 @@ const agentVersion = "0.1.0-dev"
 // manages (nginx, php-fpm, mariadb, ...) run under systemd independent of
 // this connection — see docs/architecture.md §2 — so a dropped connection
 // here degrades orchestration/observability only, never site serving.
-func runConnection(ctx context.Context, id *identity, reg capabilities.Registry) error {
+func runConnection(ctx context.Context, id *identity, dataDir string, reg capabilities.Registry) error {
 	cert, err := tls.X509KeyPair(id.CertPEM, id.KeyPEM)
 	if err != nil {
 		return err
@@ -70,17 +70,38 @@ func runConnection(ctx context.Context, id *identity, reg capabilities.Registry)
 	}
 	log.Printf("connected to gateway %s as %s", id.GatewayAddr, id.ServerID)
 
-	go heartbeatLoop(ctx, enc)
+	// connCtx (not the outer, process-lifetime ctx) bounds the background
+	// loops below to this one connection's lifetime: without this, a
+	// dropped connection would leave the previous attempt's
+	// heartbeat/renewal goroutines running forever (they'd keep firing
+	// against a closed conn until process shutdown), and a leaked
+	// renewalLoop would keep touching id's certificate fields concurrently
+	// with the next successful connection's own renewer — exactly the kind
+	// of cross-goroutine data race certRenewer's mutex is meant to prevent
+	// within one connection, not across leaked ones.
+	connCtx, cancelConn := context.WithCancel(ctx)
+	defer cancelConn()
+
+	go heartbeatLoop(connCtx, enc)
+
+	renewer := &certRenewer{}
+	go renewalLoop(connCtx, enc, id, renewer)
 
 	for {
 		var env proto.Envelope
 		if err := dec.Decode(&env); err != nil {
 			return err
 		}
-		if env.Type != proto.MsgTask || env.Task == nil {
-			continue
+		switch env.Type {
+		case proto.MsgTask:
+			if env.Task != nil {
+				go handleTask(ctx, enc, reg, *env.Task)
+			}
+		case proto.MsgRenewCertResult:
+			if env.RenewCertResult != nil {
+				renewer.handleRenewResult(id, dataDir, *env.RenewCertResult)
+			}
 		}
-		go handleTask(ctx, enc, reg, *env.Task)
 	}
 }
 
@@ -109,6 +130,31 @@ func handleTask(ctx context.Context, enc *json.Encoder, reg capabilities.Registr
 		return
 	}
 	send(proto.TaskEvent{Status: proto.TaskSucceeded, Message: "ok", Detail: detail})
+}
+
+// renewalLoop periodically checks whether id's client certificate is
+// nearing expiry and, if so, asks the gateway to renew it over this
+// already-authenticated session (see certRenewer.maybeRequestRenewal). An
+// initial check runs immediately (not just after the first tick) so an
+// agent that reconnects after being offline close to its cert's expiry
+// renews right away rather than waiting up to renewCheckInterval first.
+func renewalLoop(ctx context.Context, enc *json.Encoder, id *identity, renewer *certRenewer) {
+	send := func(csrPEM string) error {
+		return enc.Encode(proto.Envelope{Type: proto.MsgRenewCert, RenewCert: &proto.RenewCert{CSRPEM: csrPEM}})
+	}
+
+	renewer.maybeRequestRenewal(id, send)
+
+	ticker := time.NewTicker(renewCheckInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			renewer.maybeRequestRenewal(id, send)
+		}
+	}
 }
 
 func heartbeatLoop(ctx context.Context, enc *json.Encoder) {

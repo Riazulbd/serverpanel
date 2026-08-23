@@ -52,8 +52,9 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | User/organization management | 🚧 single-user model only; no orgs/teams yet |
 | Multiple-server management | ✅ create/list/get/revoke, search/filter in UI |
 | Secure agent install/registration | ✅ bootstrap token → mTLS cert exchange |
-| Agent identity, cert rotation, revocation | 🚧 issuance + revocation done; no
-  auto-renewal before expiry yet (see `SECURITY.md` §2) |
+| Agent identity, cert rotation, revocation | ✅ issuance, revocation, and auto-renewal
+  (agent-initiated `renew_cert` over its existing mTLS session, ~7 days before its
+  30-day cert expires — see `SECURITY.md` §2) |
 | Server health monitoring | ✅ heartbeat: uptime, load, mem%, disk% |
 | Server groups/tags/metadata | ✅ `group`, `tags[]` on server records |
 | Background job queue | ⬜ task dispatch is synchronous request/response today,
@@ -235,6 +236,17 @@ Unix-socket MySQL driver (no cgo, no external runtime deps). Lifecycle:
    `TaskEvent`s.
 3. **Reconnect**: on any connection loss, `main.go`'s loop retries with exponential
    backoff (1s → 30s cap) until the process is signaled to stop (`SIGTERM`/`SIGINT`).
+4. **Certificate renewal**: `connect.go`'s `renewalLoop` (started per-connection,
+   `apps/agent/renew.go`) checks the current certificate's expiry roughly hourly and,
+   once within 7 days of it, sends a `renew_cert` request over the same already-open
+   mTLS session (never a separate connection or the bootstrap-token flow). On a
+   successful `renew_cert_result` it persists the new cert/key to `-data-dir` (the same
+   files loaded at startup) and updates the in-memory identity for the *next* dial —
+   deliberately not forcing the current, still-valid connection to reconnect early. Both
+   the per-connection renewal loop and the heartbeat loop are scoped to that
+   connection's own context (not the process-lifetime one), so a dropped connection
+   stops them immediately rather than leaking a goroutine that keeps retrying against a
+   dead socket into the next reconnect attempt.
 
 The agent has **no shell-exec entry point in its protocol or code** — see §8.
 
@@ -391,7 +403,6 @@ all ⬜, scoped to Phase 2 per `product-plan.md` §9.
 - No backup scheduling/retention policy — backups are on-demand only.
 - No on-disk agent task journal — a task in flight when the agent process restarts is
   lost, not resumed (see `ARCHITECTURE.md` §4 "As built").
-- No agent certificate auto-renewal before its 30-day expiry (see `SECURITY.md` §2).
 - No agent self-update mechanism (see `SECURITY.md` §3).
 - No background job queue — task dispatch is synchronous and bounded by a 120s HTTP
   timeout; this will not scale past a moderate number of concurrent long-running tasks

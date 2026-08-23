@@ -189,6 +189,8 @@ connection carries newline-delimited JSON `Envelope`s in both directions
 {"type": "heartbeat", "heartbeat": {"sent_at": "...", "uptime_secs": 0, "load_avg_1": 0, "mem_used_pct": 0, "disk_used_pct": 0}}
 {"type": "task", "task": {"id": "...", "capability": "...", "params": {}, "issued_at": "..."}}
 {"type": "task_event", "task_event": {"task_id": "...", "status": "queued|running|succeeded|failed|rejected", "message": "...", "detail": "...", "at": "..."}}
+{"type": "renew_cert", "renew_cert": {"csr_pem": "..."}}
+{"type": "renew_cert_result", "renew_cert_result": {"cert_pem": "...", "error": "..."}}
 {"type": "ack"}
 ```
 
@@ -200,6 +202,19 @@ HTTP handler) until it sees a terminal event for the task ID it sent, or its con
 deadline expires. There is no message type for a free-form command — `capability` must
 be a name in `packages/capabilities`'s fixed registry, or the agent returns `rejected`
 without executing anything.
+
+`renew_cert`/`renew_cert_result` implement agent-initiated certificate renewal
+(`gateway.handleRenewCert`, `apps/agent/renew.go`): the agent periodically checks its
+own certificate's expiry (`apps/agent/renew.go` `renewalLoop`, every hour, starting a
+renewal once within 7 days of expiry) and, over its already-open mTLS session, sends a
+fresh CSR. The gateway signs it bound to the identity it already derived from *this
+connection's* peer certificate — never anything in the CSR or the request — with the
+same `agentCertTTL` (30 days) initial registration uses, and replies with the new
+certificate. On success the agent persists the new cert/key to its data directory (the
+same files `loadIdentity` reads) and adopts them for its *next* dial — the current,
+still-valid session is left untouched, never force-closed just to switch certificates
+early. A malformed CSR gets `renew_cert_result.error` set instead of `cert_pem`; this
+does not close the session, and the agent simply retries roughly an hour later.
 
 ## 4. Capability reference
 

@@ -47,7 +47,7 @@ Properties this guarantees:
 - **Revocable**: an unused token can be revoked from the dashboard (e.g., user made a
   mistake, wants to reissue); an already-exchanged identity is revoked separately (§3).
 
-## 2. Ongoing authentication: mutual TLS — **partially implemented**
+## 2. Ongoing authentication: mutual TLS — **mostly implemented**
 
 - All agent ↔ control-plane traffic (registration excluded, which is TLS + token) uses
   **mTLS**: the gateway only accepts connections presenting a valid, non-revoked
@@ -60,11 +60,20 @@ Properties this guarantees:
   (agent offline past expiry), the agent falls back to a manual re-registration flow
   requiring a fresh bootstrap token from the dashboard — this is an intentional
   fail-closed behavior, not silent re-trust.
-  **Not yet implemented**: certs are issued with a fixed 30-day TTL
-  (`apps/controlplane/http.go` `handleRegister`) and there is no renewal
-  capability/endpoint yet — an agent whose cert expires must be manually
-  re-registered with a fresh bootstrap token today. Auto-rotation before expiry is
-  tracked as a known gap in `SYSTEM.md`.
+  **Implemented as described**: certs are issued with a fixed 30-day TTL
+  (`agentCertTTL`, `apps/controlplane/ca.go`) both at initial registration
+  (`handleRegister`) and at renewal. Renewal is a new wire message pair —
+  `renew_cert`/`renew_cert_result` — sent over the agent's already-open,
+  already-authenticated mTLS session (`apps/agent/renew.go`, `gateway.go`
+  `handleRenewCert`): the agent checks its own certificate's expiry roughly hourly
+  and, once within 7 days of it, sends a fresh CSR; the gateway signs it bound to the
+  identity it already derived from *that connection's* peer certificate — never
+  anything the request itself claims — and the agent persists the result for its
+  *next* dial, without disrupting the current session. If the agent is offline past
+  its cert's actual expiry, the next connection attempt fails mTLS verification
+  outright (as intended) and requires the manual re-registration flow, exactly as
+  designed. **Not yet implemented**: the CA private key rotation/isolation this
+  section's third bullet describes (a separate concern from cert renewal) — see below.
 - The Agent CA's private key is held in a dedicated, tightly access-controlled service
   (e.g. `step-ca` or HSM-backed KMS in later stages), separate from the general
   application database, so a control-plane app-tier compromise doesn't automatically

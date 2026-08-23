@@ -40,19 +40,19 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Documentation page**: Server Management → "Installation (Direct Method)"
 - **Short description**: Connect a VPS to the control plane via a one-time install command.
 - **Expected behavior** (per ServerAvatar's documented workflow): operator creates a server record, gets an install command, runs it on a clean VPS, server appears connected.
-- **Our implementation**: bootstrap-token → mTLS client-certificate exchange (`POST /agents/register`); agent connects outbound to the gateway, no inbound port required.
+- **Our implementation**: bootstrap-token → mTLS client-certificate exchange (`POST /agents/register`); agent connects outbound to the gateway, no inbound port required. The issued certificate (30-day `agentCertTTL`) auto-renews itself before expiry: the agent sends a `renew_cert` request over its already-open mTLS session roughly a week ahead of expiry, and the gateway signs a fresh certificate bound to the identity it independently derived from that connection's peer certificate — see SRV-001's "Agent certificate auto-renewal" note below and `SECURITY.md` §2.
 - **Frontend**: `web/index.html` "+ New server" modal, server list/detail views.
-- **Backend service**: `apiServer.handleCreateServer`, `agentCA`, `gateway`.
-- **API endpoint(s)**: `POST /api/v1/servers`, `POST /agents/register`.
-- **Agent command**: n/a (registration precedes capability dispatch).
+- **Backend service**: `apiServer.handleCreateServer`, `agentCA`, `gateway` (`handleConn`'s registration path and `handleRenewCert`'s renewal path).
+- **API endpoint(s)**: `POST /api/v1/servers`, `POST /agents/register`; renewal itself is not HTTP — it's the `renew_cert`/`renew_cert_result` gateway wire messages (see `API.md` §3).
+- **Agent command**: n/a (registration precedes capability dispatch; renewal is a protocol-level message, not a dispatched capability).
 - **DB tables**: `servers`, `bootstrap_tokens`, `revoked_certs`.
-- **Required permission**: authenticated session (single-user model today — see ORG-001).
-- **Security considerations**: single-use/short-lived hashed bootstrap tokens; certificate identity independently derived from the mTLS handshake, never trusted from agent-asserted data; revocation checked every handshake.
-- **Test coverage**: `apps/controlplane/http_test.go` (`TestServerCreateListRevokeFlow`, `TestRegisterEndpointRejectsBadToken`), `apps/controlplane/store_test.go`.
+- **Required permission**: authenticated session (single-user model today — see ORG-001) for registration; renewal requires no session — it is authenticated entirely by the agent's own still-valid mTLS certificate, by design (no shared long-lived secret is ever reused for renewal).
+- **Security considerations**: single-use/short-lived hashed bootstrap tokens; certificate identity independently derived from the mTLS handshake, never trusted from agent-asserted data; revocation checked every handshake. Renewal never trusts the CSR's requested identity either — the gateway binds the new cert to `serverID` from the live connection's own peer certificate, the same defense `signAgentCSR` applies at registration. A renewal failure (e.g. malformed CSR) is reported back over the session and logged, never closes an otherwise-healthy connection.
+- **Test coverage**: `apps/controlplane/http_test.go` (`TestServerCreateListRevokeFlow`, `TestRegisterEndpointRejectsBadToken`), `apps/controlplane/store_test.go`, `apps/controlplane/gateway_test.go` (`TestGatewayRenewCertIssuesFreshCertAndPreservesConnectedStatus`, `TestGatewayRenewCertRejectsMalformedCSRWithoutClosingSession` — real mTLS dial against a real `gateway.listen`/`serve`, not a mocked transport), `apps/agent/renew_test.go` (7 tests: expiry parsing, the renewal-threshold/no-double-send decision logic, and persisting a successful renewal to disk with a real cert/key-pairing check).
 - **Current status**: `COMPLETE`
-- **Completion date**: 2026-08-14
-- **Known differences**: no agent certificate auto-renewal before 30-day expiry yet.
-- **Reason**: scoped out of the initial secure-foundation pass; tracked in `SYSTEM.md` §21.
+- **Completion date**: 2026-08-23 (agent certificate auto-renewal; registration itself completed 2026-08-14)
+- **Known differences**: none remaining for this feature's documented scope.
+- **Reason**: n/a.
 
 ### SRV-002 — Hosting stack installation (LEMP)
 - **Category**: Server Management
@@ -313,7 +313,7 @@ capability surface (per task-brief §3/§101), not just what's already built.
 
 | Status | Count (detailed entries) | Count (summary-table rows) |
 |---|---|---|
-| `COMPLETE` | 4 (SRV-001, BAK-002, ACC-001, DB-005) | 1 (PROV-006) |
+| `COMPLETE` | 4 (SRV-001 — now including agent certificate auto-renewal, BAK-002, ACC-001, DB-005) | 1 (PROV-006) |
 | `PARTIAL` | 3 (SRV-002, APP-001, APP-002, DB-001, BAK-001 — 5 total, see note) | 6 |
 | `NOT_STARTED` | 0 | ~54 |
 | `BLOCKED_EXTERNAL` | 0 (sub-scoped within BAK-001/BAK-002/DB-001's db/full-scope or agent-side MariaDB verification) | 0 |
@@ -372,6 +372,17 @@ establish the tracking process and close the single highest-priority gap
 
 ## Change history
 
+- **2026-08-23**: closed SRV-001's remaining gap (agent certificate auto-renewal) — the
+  new `renew_cert`/`renew_cert_result` gateway wire messages let an agent renew its
+  30-day client certificate over its already-open mTLS session roughly a week before
+  expiry, without a bootstrap token or a connection interruption. Also fixed a latent
+  bug this work surfaced: reusing `markIssuedCert` for renewal would have reset a live,
+  connected server's dashboard status to "offline" on every renewal — a new
+  `updateCertSerial` store method updates only the recorded certificate serial. Also
+  scoped the per-connection heartbeat/renewal background goroutines to a connection-
+  local context instead of the process-lifetime one, closing a pre-existing goroutine
+  leak on every reconnect (each dropped connection previously left its heartbeat
+  goroutine running forever against a dead socket).
 - **2026-08-23**: closed DB-005 (control-plane persistence + dashboard UI for
   databases) — the gap DB-001 flagged as the next candidate. `db.create` now returns a
   parseable JSON result (matching the `siteResult` pattern), a `databases` table and
