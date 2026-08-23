@@ -2,7 +2,7 @@
 
 ## 1. Current automated coverage
 
-`go test ./...` — 61 test functions across two packages, all passing, no `-race`
+`go test ./...` — 68 test functions across three packages, all passing, no `-race`
 failures, `go vet` clean, `gofmt -l` clean:
 
 ```
@@ -15,8 +15,9 @@ go test ./... -race
 
 | Package | Tests | What they cover |
 |---|---|---|
-| `apps/controlplane` | 27 | Auth/session lifecycle (create, MFA-verify, expiry, delete), bcrypt password rules, email normalization/uniqueness, TOTP round-trip/skew/rejection, bootstrap-token single-use/expiry/unknown-token, server create/list/get, revocation (cert-serial blocking + status transitions, including that a stray disconnect can't resurrect a revoked server), heartbeat recording, audit-log append, site create/list, `getSite`'s cross-server scoping, backup create/list/get round trip and its own cross-server scoping, and 6 full HTTP integration tests through `routes()` with `httptest` covering signup→login→protected-route, the full 2FA enroll→logout→login→MFA-challenge→access flow, server create/list/revoke, agent registration with a bad token, the backup endpoints' not-found boundaries, and backup-request validation (bad scope, missing `db_name`, and confirming validation runs before dispatch) |
+| `apps/controlplane` | 30 | Auth/session lifecycle (create, MFA-verify, expiry, delete), bcrypt password rules, email normalization/uniqueness, TOTP round-trip/skew/rejection, bootstrap-token single-use/expiry/unknown-token, server create/list/get, revocation (cert-serial blocking + status transitions, including that a stray disconnect can't resurrect a revoked server), heartbeat recording, audit-log append, site create/list, `getSite`'s cross-server scoping, backup create/list/get round trip and its own cross-server scoping, agent certificate renewal (`handleRenew`'s same-server_id/fresh-serial/later-expiry invariants, that it never clobbers a live connection's status the way registration's `markIssuedCert` deliberately does, invalid-CSR rejection, and one real end-to-end test that drives the actual mTLS wire protocol — real TCP, real handshake, real JSON envelopes — through Hello→Ack→RenewRequest→RenewResponse against a live `gateway.serve` listener), and 6 full HTTP integration tests through `routes()` with `httptest` covering signup→login→protected-route, the full 2FA enroll→logout→login→MFA-challenge→access flow, server create/list/revoke, agent registration with a bad token, the backup endpoints' not-found boundaries, and backup-request validation (bad scope, missing `db_name`, and confirming validation runs before dispatch) |
 | `packages/capabilities` | 34 | Capability dispatch (unknown name rejected, `system.ping` works, nil `Progress` doesn't panic, the registry has a handler for every declared `Cap*` constant), `service.control`'s allow-list boundary (unit, action, and an explicit shell-metacharacter-injection attempt, all rejected before `systemctl` is ever invoked), the file manager's path-traversal and symlink-escape defenses (`resolveScopedPath`), oversized-read/write rejection, refusal to delete the site root itself, a real list+write round trip against a real filesystem, log redaction (token/password query params, `Authorization: Bearer`/`Basic`), `logs.tail`'s input validation, domain-name validation (including injection-shaped inputs), `systemUserForDomain`'s bounding/sanitization, the deterministic php-fpm-pool/socket/vhost path builders, `backup.run`'s scope validation and a real files-backup-and-checksum round trip, and `backup.restore`'s archive-location/checksum validation, a real files backup→corrupt→restore round trip (with a real throwaway system user, verifying both content restoration and pre-restore checkpoint creation), and `extractTarGzSafely`'s rejection of path-traversal entries, absolute-path entries, and oversized archives |
+| `apps/agent` | 4 | `certExpiringSoon`'s renewal-window decision against real self-signed certificates at three expiry points (safely inside, inside the window, already expired) plus invalid-PEM rejection, `generateKeyAndCSR` produces a properly self-signed CSR whose public key actually matches the returned private key, and `writeFileAtomic` replaces existing content cleanly with no leftover temp file |
 
 None of this is mocked where a cheap real implementation was possible: sessions/users/
 servers/audit run against a real temp-file SQLite database with the real schema (not
@@ -95,9 +96,33 @@ From the prior session's manual integration pass:
 - Heartbeats only ever populated uptime; load/memory/disk were implemented via
   `/proc/loadavg`, `/proc/meminfo`, and `syscall.Statfs`.
 
-This session's automated-test pass (see §1) found **no new defects** — every test
-passed on the first correctly-written attempt, which is consistent with (not
-independent proof beyond) the prior manual pass having been genuine.
+From this session's certificate-auto-renewal work (see `SECURITY.md` §2, `CHANGELOG.md`):
+- `apps/agent/connect.go`'s `heartbeatLoop` (and, if added the same way, the new
+  renewal loop) was scoped to the reconnect loop's long-lived outer context rather
+  than to the individual connection attempt — a caught-in-review latent goroutine
+  leak (each reconnect started a new heartbeat goroutine while every previous
+  connection's own goroutine kept running forever, silently failing writes against
+  an already-closed socket, until process shutdown). Fixed by deriving a
+  per-connection `context.WithCancel` and tying both background loops to it.
+- The gateway's mTLS accept loop (`gateway.go`, formerly `listenAndServe`, now split
+  into `listenAndServe`/`serve`) looped forever on any `Accept()` error with no
+  backoff or exit condition — a busy-spin that would have pegged a CPU core and
+  spammed logs indefinitely on any permanent listener failure. Caught while writing
+  `TestGatewayRenewalOverRealMTLSConnection` (closing the test listener triggered it
+  immediately). Fixed to return the error, matching `net/http`'s `Server.Serve`
+  convention and what `main.go` already expected (`log.Fatalf` on a non-nil return).
+- `apps/controlplane/store.go`'s `markIssuedCert` unconditionally forces connection
+  status to `"offline"` — correct at initial registration (the agent hasn't
+  connected yet) but wrong for a renewal, which happens *during* an already-live
+  session; reusing it there would have shown a connected agent as offline until its
+  next reconnect. Kept `markIssuedCert` for registration and added a separate
+  `updateCertSerial` for renewal that leaves status untouched — caught by writing
+  `TestHandleRenewIssuesFreshCertBoundToSameServerID` before wiring up the gateway
+  handler that would have used the wrong one.
+
+Earlier sessions' automated-test passes found **no new defects** beyond what's listed
+above — every test passed on the first correctly-written attempt, which is consistent
+with (not independent proof beyond) the prior manual pass having been genuine.
 
 ## 5. Known gaps / recommended next testing investment, in priority order
 

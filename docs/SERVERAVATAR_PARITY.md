@@ -48,11 +48,11 @@ actually exists — expand a row into a full block the moment work on it begins
 - **DB tables**: `servers`, `bootstrap_tokens`, `revoked_certs`.
 - **Required permission**: authenticated session (single-user model today — see ORG-001).
 - **Security considerations**: single-use/short-lived hashed bootstrap tokens; certificate identity independently derived from the mTLS handshake, never trusted from agent-asserted data; revocation checked every handshake.
-- **Test coverage**: `apps/controlplane/http_test.go` (`TestServerCreateListRevokeFlow`, `TestRegisterEndpointRejectsBadToken`), `apps/controlplane/store_test.go`.
+- **Test coverage**: `apps/controlplane/http_test.go` (`TestServerCreateListRevokeFlow`, `TestRegisterEndpointRejectsBadToken`), `apps/controlplane/store_test.go`, plus (2026-08-23) `apps/controlplane/gateway_test.go`'s certificate-renewal tests, which cover the ongoing identity-maintenance half of this feature — see the renewal note below.
 - **Current status**: `COMPLETE`
-- **Completion date**: 2026-08-14
-- **Known differences**: no agent certificate auto-renewal before 30-day expiry yet.
-- **Reason**: scoped out of the initial secure-foundation pass; tracked in `SYSTEM.md` §21.
+- **Completion date**: 2026-08-14 (initial registration); 2026-08-23 (certificate auto-renewal — see `SECURITY.md` §2, `API.md` §3).
+- **Known differences**: none remaining for this item — the CA itself is still in-process rather than an isolated signing service (`SECURITY.md` §2's separate, still-open gap), and there is still no agent self-update mechanism (`SECURITY.md` §3), but both are tracked as their own items, not a known difference of SRV-001.
+- **Reason**: n/a — auto-renewal, previously the one open gap in this item, is now implemented and tested.
 
 ### SRV-002 — Hosting stack installation (LEMP)
 - **Category**: Server Management
@@ -359,3 +359,11 @@ establish the tracking process and close the single highest-priority gap
   BAK-001/BAK-002 reflecting this session's backup-restore implementation. ~60
   capabilities enumerated overall (detailed + summary), the large majority honestly
   `NOT_STARTED`.
+- **2026-08-23**: closed SRV-001's one remaining known gap — agent certificate
+  auto-renewal (`apps/agent/renew.go`, `gateway.handleRenew`, new `renew_request`/
+  `renew_response` wire messages) — so client certificates now rotate themselves ahead
+  of their 30-day expiry over the existing authenticated session, with no bootstrap
+  token or dashboard action needed, matching `SECURITY.md` §2's originally-documented
+  design. Also fixed two defects surfaced while building and testing it (a background-
+  goroutine lifecycle leak on reconnect, and a busy-spin in the gateway's accept loop on
+  a permanent listener error) — see `TESTING.md` §4 and `CHANGELOG.md`.

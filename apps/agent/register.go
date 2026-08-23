@@ -2,11 +2,7 @@ package main
 
 import (
 	"bytes"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -70,16 +66,10 @@ func loadIdentity(dataDir string) (*identity, error) {
 // token is read once from the caller-supplied value and is never written to
 // disk or logged; only the resulting certificate and identifiers persist.
 func register(apiAddr, token, dataDir string) (*identity, error) {
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	key, csrPEM, err := generateKeyAndCSR("pending-registration")
 	if err != nil {
-		return nil, fmt.Errorf("generate key: %w", err)
+		return nil, err
 	}
-	csrTmpl := &x509.CertificateRequest{Subject: pkix.Name{CommonName: "pending-registration"}}
-	csrDER, err := x509.CreateCertificateRequest(rand.Reader, csrTmpl, key)
-	if err != nil {
-		return nil, fmt.Errorf("create CSR: %w", err)
-	}
-	csrPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
 
 	reqBody, _ := json.Marshal(map[string]string{"token": token, "csr_pem": string(csrPEM)})
 	httpClient := &http.Client{Timeout: 30 * time.Second}
@@ -113,17 +103,17 @@ func register(apiAddr, token, dataDir string) (*identity, error) {
 		return nil, fmt.Errorf("create data dir: %w", err)
 	}
 	certPath, keyPath, caPath, metaPath := identityPaths(dataDir)
-	if err := os.WriteFile(certPath, []byte(rr.CertPEM), 0600); err != nil {
+	if err := writeFileAtomic(certPath, []byte(rr.CertPEM), 0600); err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(keyPath, keyPEM, 0600); err != nil {
+	if err := writeFileAtomic(keyPath, keyPEM, 0600); err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(caPath, []byte(rr.CAPEM), 0600); err != nil {
+	if err := writeFileAtomic(caPath, []byte(rr.CAPEM), 0600); err != nil {
 		return nil, err
 	}
 	metaBytes, _ := json.Marshal(map[string]string{"server_id": rr.ServerID, "gateway_addr": rr.GatewayAddr})
-	if err := os.WriteFile(metaPath, metaBytes, 0600); err != nil {
+	if err := writeFileAtomic(metaPath, metaBytes, 0600); err != nil {
 		return nil, err
 	}
 

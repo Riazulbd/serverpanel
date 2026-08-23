@@ -54,17 +54,24 @@ Properties this guarantees:
   certificate issued by the internal Agent CA, and the agent verifies the gateway's
   certificate/pinned CA to prevent MITM or connecting to a spoofed endpoint.
   **Implemented as described** — see `apps/controlplane/gateway.go` `handleConn`.
-- Client certs are **short-lived** (e.g. 30–90 days) and **auto-rotated**: before
-  expiry, the agent requests renewal authenticated by its current still-valid cert (no
-  shared long-lived secret is ever reused for renewal). If a renewal window is missed
-  (agent offline past expiry), the agent falls back to a manual re-registration flow
-  requiring a fresh bootstrap token from the dashboard — this is an intentional
-  fail-closed behavior, not silent re-trust.
-  **Not yet implemented**: certs are issued with a fixed 30-day TTL
-  (`apps/controlplane/http.go` `handleRegister`) and there is no renewal
-  capability/endpoint yet — an agent whose cert expires must be manually
-  re-registered with a fresh bootstrap token today. Auto-rotation before expiry is
-  tracked as a known gap in `SYSTEM.md`.
+- Client certs are **short-lived** (30 days, `agentCertTTL` in `apps/controlplane/ca.go`,
+  shared by both issuance paths) and **auto-rotated**: before expiry, the agent
+  requests renewal authenticated by its current still-valid cert (no shared long-lived
+  secret is ever reused for renewal). If a renewal window is missed (agent offline past
+  expiry), the agent falls back to a manual re-registration flow requiring a fresh
+  bootstrap token from the dashboard — this is an intentional fail-closed behavior, not
+  silent re-trust.
+  **Implemented**: `apps/agent/renew.go` checks the current certificate's expiry every
+  hour; once within 7 days of `NotAfter` it sends a fresh CSR as a `renew_request` over
+  the live mTLS session (`packages/proto` `MsgRenewRequest`/`MsgRenewResponse`), which
+  `gateway.handleRenew` (`apps/controlplane/gateway.go`) signs — binding the new
+  certificate to the *session's already-verified* `server_id`, exactly like the initial
+  registration path, never to anything the renewal request itself claims. The agent
+  persists the new identity atomically and reconnects to start using it; a rejected or
+  timed-out renewal attempt is retried on the next hourly check rather than tearing down
+  the still-valid session. See `API.md` §3 for the full flow and `TESTING.md` for its
+  coverage (including a real end-to-end mTLS round trip, not just the handler in
+  isolation).
 - The Agent CA's private key is held in a dedicated, tightly access-controlled service
   (e.g. `step-ca` or HSM-backed KMS in later stages), separate from the general
   application database, so a control-plane app-tier compromise doesn't automatically

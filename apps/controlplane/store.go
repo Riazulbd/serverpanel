@@ -172,6 +172,19 @@ func (s *store) markIssuedCert(serverID, serial string) {
 	s.log(serverID, "", "agent.registered", fmt.Sprintf("cert_serial=%s", serial))
 }
 
+// updateCertSerial records a renewed certificate's serial without touching
+// connection status. This is deliberately a separate method from
+// markIssuedCert: that one forces status to "offline" because a fresh
+// registration always happens before the agent has connected to the
+// gateway, but a renewal happens *during* an already-live session — forcing
+// status offline there would fight with the gateway's own
+// setConnected(true) and leave a connected agent shown as offline until its
+// next reconnect.
+func (s *store) updateCertSerial(serverID, serial string) {
+	s.db.Exec(`UPDATE servers SET cert_serial = ? WHERE id = ?`, serial, serverID)
+	s.log(serverID, "", "agent.cert_renewed", fmt.Sprintf("cert_serial=%s", serial))
+}
+
 func (s *store) isRevoked(serial string) bool {
 	var n int
 	s.db.QueryRow(`SELECT COUNT(1) FROM revoked_certs WHERE serial = ?`, serial).Scan(&n)

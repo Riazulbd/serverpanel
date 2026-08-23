@@ -2,6 +2,61 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-23 — Agent certificate auto-renewal, two latent bugs fixed
+
+- **Implemented agent client-certificate auto-renewal**, closing SRV-001's one
+  remaining documented gap (`SECURITY.md` §2 had described this design since the
+  security-model doc was written, but no code implemented it — client certs were
+  issued with a fixed 30-day TTL and, without this, every connected agent in the fleet
+  would have silently lost connectivity 30 days after registration with no automated
+  recovery path). New wire messages `renew_request`/`renew_response`
+  (`packages/proto/proto.go`); the agent (`apps/agent/renew.go`) checks its current
+  certificate's expiry every hour and, once within 7 days of `NotAfter`, sends a fresh
+  CSR over the *already-authenticated* mTLS session — no bootstrap token, no new
+  registration. The gateway (`gateway.handleRenew`, `apps/controlplane/gateway.go`)
+  signs the replacement bound to the session's already-verified `server_id` (never
+  anything the request itself claims, same invariant the initial registration path
+  already enforced), records the new serial via a new `store.updateCertSerial` (kept
+  deliberately separate from `markIssuedCert`, which also forces status to "offline" —
+  correct at registration, wrong mid-session), and replies. The agent persists the new
+  identity atomically (`writeFileAtomic`, shared with a refactored `register.go`) and
+  closes the connection so the very next reconnect — which now reloads identity from
+  disk before each redial (`main.go`) — picks up the new cert immediately, instead of
+  it sitting unused until some unrelated reconnect. A failed/rejected/timed-out
+  renewal never tears down the still-valid live session; it just retries on the next
+  hourly check.
+- Extracted CSR/keypair generation (`generateKeyAndCSR`) and atomic file writes
+  (`writeFileAtomic`) out of `register.go` into a shared `apps/agent/csr.go`, used by
+  both the registration and renewal paths, so the two issuance flows can't drift apart.
+- **Fixed a latent goroutine leak**: `heartbeatLoop` (and now the renewal loop) were
+  scoped to the reconnect loop's long-lived outer `context.Context` rather than to the
+  individual connection attempt, so every reconnect left the previous connection's own
+  background goroutines running forever, silently failing writes against an
+  already-closed socket, for the life of the process. Fixed by deriving a
+  per-connection `context.WithCancel` in `runConnection` and tying both loops to it.
+- **Fixed a busy-spin bug** in the gateway's mTLS accept loop: any `Accept()` error
+  (e.g. the listener being closed) looped forever with no backoff or exit condition —
+  caught immediately while writing the new end-to-end test below, since closing the
+  test's listener triggered it. `gateway.go`'s `listenAndServe` is now split into
+  `listenAndServe` (binds the real address) and `serve` (runs the accept loop against
+  an already-bound `net.Listener`, also letting tests bind an OS-assigned port and
+  discover the real address); `serve` now returns the error instead of looping,
+  matching `net/http`'s `Server.Serve` convention and what `main.go` already expected
+  (`log.Fatalf` on a non-nil return).
+- Added 7 new tests: 3 in `apps/controlplane/gateway_test.go` (same-`server_id`/
+  fresh-serial/later-expiry renewal invariants, that renewal never clobbers a live
+  connection's status the way registration's `markIssuedCert` deliberately does,
+  invalid-CSR rejection, and — the only test in the suite exercising the actual wire
+  protocol rather than calling a handler directly — a real end-to-end mTLS round trip
+  through Hello→Ack→RenewRequest→RenewResponse against a live `gateway.serve`
+  listener) and 4 in a new `apps/agent` test package (`certExpiringSoon`'s
+  renewal-window decision against real self-signed certificates, `generateKeyAndCSR`,
+  `writeFileAtomic`) — `apps/agent` previously had zero automated test coverage.
+  `go test ./... -race` and `go vet ./...` both clean.
+- Docs updated: `SECURITY.md` §2 (implemented, no longer "not yet"), `API.md` §3 (new
+  message types + the renewal flow), `SYSTEM.md` (§2 feature table, §11, §21),
+  `SERVERAVATAR_PARITY.md` (SRV-001), `TESTING.md` (§1 coverage table, §4 bug list).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

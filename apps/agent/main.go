@@ -51,7 +51,7 @@ func main() {
 
 	backoff := time.Second
 	for {
-		err := runConnection(ctx, id, reg)
+		err := runConnection(ctx, *dataDir, id, reg, &backoff)
 		if ctx.Err() != nil {
 			log.Println("shutting down")
 			return
@@ -64,6 +64,17 @@ func main() {
 		}
 		if backoff < 30*time.Second {
 			backoff *= 2
+		}
+
+		// Reload identity from disk before redialing: a certificate renewal
+		// during the previous connection (see renew.go) persists a new
+		// cert/key to dataDir, and this is what picks it up. If reload fails
+		// (e.g. a transient disk error) fall back to the in-memory identity
+		// rather than crashing the agent over it — renewalLoop also updates
+		// id in place on a successful renewal, so the in-memory copy is
+		// already correct in the common case anyway.
+		if fresh, ferr := loadIdentity(*dataDir); ferr == nil {
+			id = fresh
 		}
 	}
 }

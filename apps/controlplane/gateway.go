@@ -41,6 +41,18 @@ func newGateway(ca *agentCA, st *store) *gateway {
 }
 
 func (g *gateway) listenAndServe(addr string) error {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	return g.serve(ln)
+}
+
+// serve runs the mTLS accept loop against an already-bound listener. Split
+// out from listenAndServe so tests can bind an OS-assigned port (":0") and
+// learn the real address before connecting, instead of guessing a fixed
+// port — see gateway_test.go.
+func (g *gateway) serve(ln net.Listener) error {
 	certPEM, keyPEM, err := g.ca.signServerCert([]string{"localhost", "127.0.0.1", "serverpanel-gateway"})
 	if err != nil {
 		return err
@@ -57,17 +69,19 @@ func (g *gateway) listenAndServe(addr string) error {
 		MinVersion:   tls.VersionTLS13,
 	}
 
-	ln, err := tls.Listen("tcp", addr, cfg)
-	if err != nil {
-		return err
-	}
-	log.Printf("agent gateway (mTLS) listening on %s", addr)
+	tlsLn := tls.NewListener(ln, cfg)
+	log.Printf("agent gateway (mTLS) listening on %s", ln.Addr())
 
 	for {
-		conn, err := ln.Accept()
+		conn, err := tlsLn.Accept()
 		if err != nil {
-			log.Printf("gateway accept error: %v", err)
-			continue
+			// A closed/broken listener is permanent, not a per-connection
+			// hiccup — looping on Accept() here would busy-spin forever
+			// (0% chance of ever accepting again) instead of surfacing the
+			// failure. Returning matches main.go's expectation
+			// (log.Fatalf on a non-nil error from this call) and how
+			// net/http's Server.Serve behaves for the same reason.
+			return fmt.Errorf("gateway accept: %w", err)
 		}
 		go g.handleConn(conn)
 	}
@@ -173,8 +187,32 @@ func (g *gateway) handleConn(conn net.Conn) {
 					}
 				}
 			}
+		case proto.MsgRenewRequest:
+			if env.RenewRequest != nil {
+				resp := g.handleRenew(serverID, env.RenewRequest.CSRPEM)
+				sess.mu.Lock()
+				_ = sess.enc.Encode(proto.Envelope{Type: proto.MsgRenewResponse, RenewResponse: &resp})
+				sess.mu.Unlock()
+			}
 		}
 	}
+}
+
+// handleRenew issues a fresh client certificate for an already-authenticated
+// agent session, ahead of its current certificate's expiry (see
+// docs/SECURITY.md §2). serverID is the caller's already-verified mTLS
+// identity from handleConn, never taken from the request itself, so an
+// agent can only ever renew its own identity — same invariant signAgentCSR
+// already enforces for the initial registration path (http.go
+// handleRegister). A failed renewal never tears down the live session: the
+// agent's current certificate is still valid, so it just retries later.
+func (g *gateway) handleRenew(serverID, csrPEM string) proto.RenewResponse {
+	certPEM, serial, err := g.ca.signAgentCSR([]byte(csrPEM), serverID, agentCertTTL)
+	if err != nil {
+		return proto.RenewResponse{Error: err.Error()}
+	}
+	g.store.updateCertSerial(serverID, serial.String())
+	return proto.RenewResponse{CertPEM: string(certPEM)}
 }
 
 // dispatch sends a task to a connected agent and waits (bounded by ctx) for

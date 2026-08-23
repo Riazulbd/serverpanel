@@ -31,6 +31,12 @@ type agentCA struct {
 	nextSN   int64
 }
 
+// agentCertTTL is the lifetime of every client certificate this CA issues to
+// an agent, at both initial registration (http.go handleRegister) and every
+// subsequent renewal (gateway.go handleRenew) — one constant so the two
+// issuance paths can never silently drift apart.
+const agentCertTTL = 30 * 24 * time.Hour
+
 func newAgentCA() (*agentCA, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {

@@ -159,6 +159,8 @@ connection carries newline-delimited JSON `Envelope`s in both directions
 {"type": "heartbeat", "heartbeat": {"sent_at": "...", "uptime_secs": 0, "load_avg_1": 0, "mem_used_pct": 0, "disk_used_pct": 0}}
 {"type": "task", "task": {"id": "...", "capability": "...", "params": {}, "issued_at": "..."}}
 {"type": "task_event", "task_event": {"task_id": "...", "status": "queued|running|succeeded|failed|rejected", "message": "...", "detail": "...", "at": "..."}}
+{"type": "renew_request", "renew_request": {"csr_pem": "..."}}
+{"type": "renew_response", "renew_response": {"cert_pem": "...", "error": ""}}
 {"type": "ack"}
 ```
 
@@ -170,6 +172,24 @@ HTTP handler) until it sees a terminal event for the task ID it sent, or its con
 deadline expires. There is no message type for a free-form command — `capability` must
 be a name in `packages/capabilities`'s fixed registry, or the agent returns `rejected`
 without executing anything.
+
+**Certificate renewal** (`apps/agent/renew.go`, `gateway.handleRenew`, see
+`SECURITY.md` §2): once every hour the agent checks its own certificate's expiry; once
+within 7 days of expiry (against the 30-day `agentCertTTL` both issuance paths share —
+`apps/controlplane/ca.go`) it sends `renew_request` with a fresh CSR over the
+*existing, already-authenticated* session — no bootstrap token or new registration is
+involved. The gateway signs a new certificate bound to the same `server_id` the
+session's client certificate already identified (never anything the request itself
+claims), records the new serial (`store.updateCertSerial` — deliberately distinct from
+`markIssuedCert`, which also forces connection status to "offline" and would be wrong
+mid-session), and replies with `renew_response`. The agent persists the new cert/key
+to disk (atomic write, `writeFileAtomic`) and then closes the connection so the next
+reconnect — which reloads identity from disk (`main.go`) — picks it up; a renewal
+failure (`renew_response.error` set) is not fatal, since the current certificate is
+still valid and the agent just retries on its next hourly check. If an agent is ever
+offline past its cert's actual expiry, there is no recovery via this path — it falls
+back to a fresh bootstrap-token registration, matching the fail-closed behavior
+`SECURITY.md` §1 describes.
 
 ## 4. Capability reference
 
