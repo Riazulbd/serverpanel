@@ -2,6 +2,43 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-23 — Cron job management (SRV-005), the first Phase 2 capability
+
+- **Implemented `cron.apply`** (`packages/capabilities/cron.go`), the first capability
+  from `product-plan.md`'s Phase 2 ("professional server management") to ship
+  end-to-end. Rather than incremental `cron.create`/`cron.delete` capabilities, every
+  mutation (create, edit, enable/disable, delete) rewrites a site system user's
+  *entire* crontab from the control plane's current job list via
+  `crontab -u <user> -`, fed over stdin — never a shell-interpolated argv or a temp
+  file. This keeps the `cron_jobs` table and the live crontab from ever drifting apart,
+  and lets `crontab(1)` itself reject a malformed generated file without touching the
+  one already installed. Schedules are validated against a strict cron-field allow-list
+  (or a fixed `@alias` list) and commands are rejected if they contain a newline (which
+  would otherwise inject an unvalidated extra crontab line) or exceed 2000 characters,
+  all before anything is rendered.
+- Wired `cron.apply` into the control plane end-to-end: a new `cron_jobs` table and
+  store methods (`createCronJob`/`listCronJobs`/`getCronJob`/`updateCronJob`/
+  `deleteCronJob`, each scoped by server ID + site ID the same way backups are), four
+  new endpoints (`GET`/`POST /api/v1/servers/{id}/sites/{siteId}/cron`,
+  `PATCH`/`DELETE .../cron/{cronId}`) that build the proposed full job list and
+  dispatch `cron.apply` *before* touching the database — so a rejected schedule/command
+  or an unreachable agent never leaves a phantom DB record — and a "Cron jobs" panel
+  per site in the dashboard (job table, "New cron job" modal, per-row enable/disable and
+  delete).
+- Added 9 new capability-layer tests (schedule/command validation including
+  injection-shaped and overlong inputs, crontab-content rendering for enabled/disabled
+  jobs, comment-newline collapsing, and out-of-namespace/malformed-job-entry rejection)
+  and 5 new control-plane tests (full CRUD round trip with cross-server scoping, 404s
+  for a nonexistent site/job, 400s for invalid schedule/command, and confirming that a
+  failed dispatch never persists a job) — 12 tests total across both packages, taking
+  `go test ./...` from 61 to 73. Also manually smoke-tested against a live-running
+  control plane binary over real HTTP.
+- Updated `docs/SERVERAVATAR_PARITY.md` (SRV-005 moved from the Phase 2 "not started"
+  summary table to a full `COMPLETE` detail entry; `installCrontab`'s real `crontab`
+  invocation is `BLOCKED_EXTERNAL` in this sandbox, which has no `cron` package
+  installed), `docs/SYSTEM.md` (§2/§3/§8/§9/§12), `docs/API.md` (§1/§2/§3/§4), and
+  `docs/TESTING.md` (§1/§2/§5).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

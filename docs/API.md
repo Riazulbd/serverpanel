@@ -46,6 +46,10 @@ protected route; there is no route that skips it by omission.
 | `GET` | `/api/v1/servers/{id}/sites/{siteId}/backups` | List backups for a site, newest first |
 | `POST` | `/api/v1/servers/{id}/sites/{siteId}/backups` | Dispatch `backup.run` and persist the resulting backup record |
 | `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a previously recorded backup |
+| `GET` | `/api/v1/servers/{id}/sites/{siteId}/cron` | List a site's cron jobs |
+| `POST` | `/api/v1/servers/{id}/sites/{siteId}/cron` | Add a cron job: dispatch `cron.apply` with the full proposed job list, persist only on success |
+| `PATCH` | `/api/v1/servers/{id}/sites/{siteId}/cron/{cronId}` | Edit a cron job (schedule/command/comment/enabled), same dispatch-then-persist pattern |
+| `DELETE` | `/api/v1/servers/{id}/sites/{siteId}/cron/{cronId}` | Remove a cron job, same dispatch-then-persist pattern |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -137,6 +141,44 @@ isn't connected; `422` if `backup.restore` itself failed on the agent (the agent
 error message explains why, and any checkpoint already taken is named in it so it's
 never a silent loss).
 
+### `GET /api/v1/servers/{id}/sites/{siteId}/cron`
+→ `200` with an array of `cronJobRecord` (`ID`, `ServerID`, `SiteID`, `Schedule`,
+`Command`, `Comment`, `Enabled`, `CreatedAt`, `UpdatedAt`), created-oldest-first (the
+same order `cron.apply` renders them in). `404` if the site doesn't exist on that
+server.
+
+### `POST /api/v1/servers/{id}/sites/{siteId}/cron`
+```json
+{"schedule": "0 3 * * *", "command": "php artisan schedule:run", "comment": "nightly"}
+```
+`schedule` must be a valid 5-field cron expression or a standard `@alias` (`@daily`,
+`@hourly`, ...); `command` must be non-empty, contain no newline, and be under 2000
+characters. `enabled` defaults to `true` if omitted. The handler builds the *proposed*
+full job list (this site's existing jobs plus the new one) and dispatches `cron.apply`
+with it *before* writing anything to the database — only on the agent reporting success
+is the new `cron_jobs` row persisted, so a rejected schedule/command or an unreachable
+agent never leaves a phantom job record the live crontab doesn't reflect. → `201` with
+the `cronJobRecord` JSON. `404` if the site doesn't exist on that server; `400` for an
+invalid schedule or command; `422` if the site already has 100 cron jobs; `502` if the
+agent isn't connected or `cron.apply` itself failed on the agent.
+
+### `PATCH /api/v1/servers/{id}/sites/{siteId}/cron/{cronId}`
+```json
+{"enabled": false}
+```
+Every field (`schedule`, `command`, `comment`, `enabled`) is optional — an omitted field
+keeps its current stored value, which is how a client toggles just `enabled` without
+resending the schedule/command. Same dispatch-before-persist pattern as create: the
+full job list (with this one job's fields updated) is sent to `cron.apply` first, and
+the `cron_jobs` row is only updated afterward. → `200` with the updated
+`cronJobRecord`. `404` if the site or the cron job doesn't exist on that server; `400`
+for an invalid resulting schedule/command; `502` on dispatch/agent failure.
+
+### `DELETE /api/v1/servers/{id}/sites/{siteId}/cron/{cronId}`
+No request body. Dispatches `cron.apply` with the site's remaining jobs (this one
+excluded) *before* deleting the `cron_jobs` row. → `200 {"deleted": true}`. `404` if the
+site or the cron job doesn't exist on that server; `502` on dispatch/agent failure.
+
 ### `POST /agents/register`
 ```json
 {"token": "<bootstrap token>", "csr_pem": "<PEM-encoded CSR>"}
@@ -178,7 +220,7 @@ The full allow-listed capability names `packages/capabilities.Default()` registe
 `diagnostics.basic`, `stack.install`, `site.create`, `site.set_php_version`,
 `site.set_status`, `app.wordpress_install`, `ssl.issue_letsencrypt`,
 `ssl.install_custom`, `db.create`, `db.delete`, `db.list`, `file.list`, `file.read`,
-`file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`.
+`file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`, `cron.apply`.
 
 ### `backup.restore`
 ```json
@@ -197,3 +239,19 @@ database or site files, a fresh checkpoint backup of the *current* state is take
 `backup.run` — its path is returned in the result's `checkpoints`, so a restore is
 always recoverable, never a one-way trip. Returns
 `{"scope", "archive_path", "checkpoints": [...], "restored_at"}` on success.
+
+### `cron.apply`
+```json
+{"system_user": "site_example",
+ "jobs": [{"schedule": "0 3 * * *", "command": "php artisan schedule:run", "comment": "nightly", "enabled": true}]}
+```
+Replaces `system_user`'s *entire* crontab with the given job list — never an
+incremental single-line edit. `system_user` must be in the `site_` namespace
+`site.create` assigns (never an arbitrary OS user); each job's `schedule` is validated
+against a strict `[0-9*/,-]` field allow-list (or a fixed `@alias` list) and each
+`command` is rejected if it contains a newline or exceeds 2000 characters, before any
+of it is rendered into a crontab line. The rendered file is installed via
+`crontab -u <user> -`, fed over the child process's stdin (never a shell-interpolated
+argv or a temp-file path) — `crontab(1)` itself validates the result and refuses a
+malformed file without disturbing the previously installed one. Returns a plain status
+string (job count applied) on success.

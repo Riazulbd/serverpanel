@@ -163,6 +163,24 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Known differences**: same-server restore only — there is no capability to restore a backup onto a *different* server (that needs a transfer step first).
 - **Reason**: cross-server restore is coupled to cross-server migration/cloning, both explicitly Phase 2 (`product-plan.md` §9); tracked as a follow-up, not silently dropped.
 
+### SRV-005 — Cron job management
+- **Category**: Server Management
+- **Documentation page**: Server Management → "Cron Jobs"
+- **Short description**: Create, edit, enable/disable, and delete scheduled commands ("cron jobs") that run as one of the applications on a server.
+- **Our implementation**: `cron.apply` (agent) — rewrites a site's isolated system user's *entire* crontab from the job list the control plane supplies (never an incremental add/edit of a single crontab line), via `crontab -u <user> -` fed over stdin. There is deliberately no `cron.create`/`cron.delete` capability: every mutation (create, update, enable/disable, delete) is a full regeneration, so the control plane's `cron_jobs` table and the live crontab can never drift apart, and a bad generated file is rejected by `crontab(1)` itself without touching the previously installed one. Jobs run as the site's own already-isolated, unprivileged system user (see APP-001) — the security boundary is that existing per-site isolation, the same one `file.write`/`db.create` rely on, not a restriction on job command content.
+- **Frontend**: site-detail "Cron jobs" panel — job table (schedule/command/comment/status), "New cron job" modal, per-row Enable/Disable and Delete.
+- **Backend service**: `apiServer.handleListCronJobs` / `handleCreateCronJob` / `handleUpdateCronJob` / `handleDeleteCronJob` (`apps/controlplane/cron.go`); all three mutating handlers build the *proposed* full job list in memory and dispatch `cron.apply` before writing anything to `cron_jobs`, so a rejected schedule/command or an unreachable agent never leaves a DB record the live crontab doesn't actually reflect (same dispatch-before-persist pattern as APP-001/BAK-001).
+- **API endpoint(s)**: `GET /api/v1/servers/{id}/sites/{siteId}/cron`, `POST /api/v1/servers/{id}/sites/{siteId}/cron`, `PATCH /api/v1/servers/{id}/sites/{siteId}/cron/{cronId}`, `DELETE /api/v1/servers/{id}/sites/{siteId}/cron/{cronId}`.
+- **Agent command**: `cron.apply`.
+- **DB tables**: `cron_jobs` (`server_id`, `site_id`, `schedule`, `command`, `comment`, `enabled`, `created_at`, `updated_at`), both scoped by `server_id`+`site_id` on every read/write so a cron job can never be addressed under the wrong site or server.
+- **Required permission**: authenticated session; a site's system user (and therefore which OS-level user a job runs as) is read server-side from the stored `sites` row, never accepted as client input.
+- **Security considerations**: schedule fields are validated against a strict `[0-9*/,-]` allow-list (or a fixed `@alias` list) before ever being rendered into a crontab line — no letters, no shell metacharacters; commands are rejected if they contain a newline (which would otherwise inject an extra, unvalidated crontab entry) or exceed a fixed length; a site's cron jobs are capped at 100 per site. `crontab -u <user> -` is invoked with a fixed argv and the generated content only ever reaches the child process via stdin, never as a shell-interpolated string.
+- **Test coverage**: `packages/capabilities/cron_test.go` (schedule/command validation, crontab-content rendering for enabled/disabled jobs, rejection of an out-of-namespace `system_user` and of a malformed job entry). `apps/controlplane/store_test.go` (`TestCronJobCreateListUpdateDeleteRoundTrip` — full CRUD round trip plus cross-server scoping). `apps/controlplane/http_test.go`/`cron_test.go` (404 on a nonexistent site/job, 400 on invalid schedule/command, 502 — not a validation error — when a request is well-formed but no agent is connected, and that a failed dispatch never persists a job). Also manually smoke-tested against a live-running control plane binary over real HTTP (list, create-reject, create-502, list-still-empty). The real `crontab(1)` invocation itself (`installCrontab`) is not exercised by `go test` in this environment (no `cron`/`crontab` binary in the sandbox) — `BLOCKED_EXTERNAL` for that one step; every path up to and including the exact argv/stdin it's given is covered.
+- **Current status**: `COMPLETE` (validation, storage, dispatch wiring, and UI); `installCrontab`'s real `crontab -u ... -` execution is `BLOCKED_EXTERNAL` for end-to-end verification on a real Ubuntu host with `cron` installed.
+- **Completion date**: 2026-08-23.
+- **Known differences**: no execution history/output logging per run (ServerAvatar's docs mention this as a nice-to-have; it would require either parsing `/var/log/syslog`'s CRON lines or wrapping every command, neither implemented yet); no per-job timezone setting (the crontab runs in the system's configured timezone only).
+- **Reason**: execution history and per-job timezones are additive on top of this CRUD/apply foundation, not blockers to it; tracked as a follow-up rather than silently dropped.
+
 ### ACC-001 — Authentication, 2FA, session management
 - **Category**: Account Management
 - **Documentation page**: Account Management → "Update Account Info"
@@ -229,7 +247,6 @@ capability surface (per task-brief §3/§101), not just what's already built.
 |---|---|---|---|
 | SRV-003 | SSH/SFTP management, key management, port/root-login controls | `NOT_STARTED` | `product-plan.md` Phase 2 |
 | SRV-004 | Firewall (UFW) rule editing UI, Fail2Ban jail management | `PARTIAL` | Installed with safe defaults by `stack.install`; no rule-editing capability/UI yet |
-| SRV-005 | Cron job management | `NOT_STARTED` | |
 | SRV-006 | Supervisor/PM2 worker management | `NOT_STARTED` | |
 | SRV-007 | Process list / kill | `NOT_STARTED` | |
 | SRV-008 | Historical monitoring (CPU/RAM/disk/network graphs, alerts) | `PARTIAL` | Heartbeat carries current uptime/load/mem%/disk%; no history retention or alerting yet |
@@ -295,9 +312,9 @@ capability surface (per task-brief §3/§101), not just what's already built.
 
 | Status | Count (detailed entries) | Count (summary-table rows) |
 |---|---|---|
-| `COMPLETE` | 3 (SRV-001, BAK-002, ACC-001) | 1 (PROV-006) |
+| `COMPLETE` | 4 (SRV-001, BAK-002, ACC-001, SRV-005) | 1 (PROV-006) |
 | `PARTIAL` | 3 (SRV-002, APP-001, APP-002, DB-001, BAK-001 — 5 total, see note) | 6 |
-| `NOT_STARTED` | 0 | ~55 |
+| `NOT_STARTED` | 0 | ~54 |
 | `BLOCKED_EXTERNAL` | 0 (sub-scoped within BAK-001/BAK-002's db/full-scope MariaDB verification) | 0 |
 | `INTENTIONALLY_NOT_APPLICABLE` | 0 | 1 |
 
@@ -315,12 +332,12 @@ and `product-plan.md` for the estimates behind it.
 
 No feature is currently blocked *purely* on missing external credentials in a way that
 would justify a top-level `BLOCKED_EXTERNAL` status (the sub-scoped MariaDB gap in
-BAK-001/BAK-002 is an environment limitation of *this* session, not a missing
-credential — a real Ubuntu host with MariaDB installed, per `INSTALLATION.md`, resolves
-it without any external account). This section will be populated as provider
-integrations (Cloudflare, cloud storage, cloud compute, payment processors) are
-implemented and reach the point where only real credentials stand between "implemented"
-and "verified end-to-end."
+BAK-001/BAK-002, and the sub-scoped `cron`/`crontab` binary gap in SRV-005, are
+environment limitations of *this* sandbox, not missing credentials — a real Ubuntu host
+with MariaDB and `cron` installed, per `INSTALLATION.md`, resolves both without any
+external account). This section will be populated as provider integrations (Cloudflare,
+cloud storage, cloud compute, payment processors) are implemented and reach the point
+where only real credentials stand between "implemented" and "verified end-to-end."
 
 ## 5. INTENTIONALLY_NOT_APPLICABLE detail
 

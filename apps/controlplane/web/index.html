@@ -65,6 +65,9 @@
   .badge.connected { background: var(--ok-bg); color: var(--ok); }
   .badge.offline { background: var(--warn-bg); color: var(--warn); }
   .badge.disconnected, .badge.pending { background: var(--gray-bg); color: var(--muted); }
+  .badge.ok { background: var(--ok-bg); color: var(--ok); }
+  .mono { font-family: var(--mono); font-size: 12.5px; }
+  .field p.hint { color: var(--muted); font-size: 11px; margin: 4px 0 0; }
   .tag { display: inline-block; background: var(--gray-bg); border-radius: 6px; padding: 1px 8px; margin-right: 4px; font-size: 12px; color: var(--muted); }
   pre.code {
     background: #0f172a; color: #e2e8f0; padding: 14px; border-radius: 8px; overflow-x: auto;
@@ -189,6 +192,13 @@
         </div>
         <div id="backupResult" class="task-result hidden"></div>
         <div id="backupsList" class="muted">No backups yet.</div>
+
+        <div class="section-title" style="display:flex;justify-content:space-between;align-items:center">
+          <span>Cron jobs</span>
+          <button onclick="openNewCronJobModal()">+ New cron job</button>
+        </div>
+        <div id="cronResult" class="task-result hidden"></div>
+        <div id="cronJobsList" class="muted">No cron jobs yet.</div>
       </div>
     </div>
 
@@ -468,6 +478,7 @@ async function openSiteDetail(siteId) {
   const site = (state.sites || []).find(s => s.ID === siteId);
   showTab('siteDetail');
   document.getElementById('backupResult').classList.add('hidden');
+  document.getElementById('cronResult').classList.add('hidden');
   const server = (state.servers || []).find(s => s.ID === state.selectedServerId);
   document.getElementById('siteDetailServerName').textContent = server ? server.Name : 'Server';
   if (site) {
@@ -476,6 +487,7 @@ async function openSiteDetail(siteId) {
       site.AppType + (site.PHPVersion ? (' · PHP ' + site.PHPVersion) : '') + ' · ' + site.Status;
   }
   await refreshBackups();
+  await refreshCronJobs();
 }
 
 async function refreshBackups() {
@@ -567,6 +579,110 @@ async function restoreBackup(backupId) {
   } catch (e) {
     box.className = 'task-result fail';
     box.textContent = 'Restore failed: ' + e.message;
+  }
+}
+
+function cronBase() {
+  return API + '/servers/' + state.selectedServerId + '/sites/' + state.selectedSiteId + '/cron';
+}
+
+async function refreshCronJobs() {
+  try {
+    const jobs = await api(cronBase()) || [];
+    renderCronJobs(jobs);
+  } catch (e) {}
+}
+
+function renderCronJobs(jobs) {
+  const el = document.getElementById('cronJobsList');
+  if (!jobs.length) { el.textContent = 'No cron jobs yet.'; return; }
+  el.innerHTML = '<table><thead><tr><th>Schedule</th><th>Command</th><th>Comment</th><th>Status</th><th></th></tr></thead><tbody>' +
+    jobs.map(j => `
+      <tr>
+        <td class="mono">${escapeHtml(j.Schedule)}</td>
+        <td class="mono" title="${escapeHtml(j.Command)}">${escapeHtml(j.Command.length > 40 ? j.Command.slice(0, 40) + '…' : j.Command)}</td>
+        <td class="muted">${escapeHtml(j.Comment || '—')}</td>
+        <td>${j.Enabled ? '<span class="badge ok">enabled</span>' : '<span class="badge">disabled</span>'}</td>
+        <td>
+          <button onclick="toggleCronJob('${j.ID}', ${!j.Enabled})">${j.Enabled ? 'Disable' : 'Enable'}</button>
+          <button class="danger" onclick="deleteCronJob('${j.ID}')">Delete</button>
+        </td>
+      </tr>`).join('') +
+    '</tbody></table>';
+}
+
+function openNewCronJobModal() {
+  const root = document.getElementById('modalRoot');
+  root.innerHTML = `
+    <div class="modal-backdrop" onclick="if(event.target===this) closeModal()">
+      <div class="modal">
+        <h2>New cron job</h2>
+        <div class="field">
+          <label>Schedule</label>
+          <input id="newCronSchedule" placeholder="e.g. 0 3 * * * or @daily" value="0 3 * * *">
+          <p class="hint">Standard 5-field cron syntax (minute hour day month weekday), or an @alias like @daily, @hourly.</p>
+        </div>
+        <div class="field">
+          <label>Command</label>
+          <input id="newCronCommand" placeholder="e.g. php /home/sites/.../artisan schedule:run">
+        </div>
+        <div class="field">
+          <label>Comment (optional)</label>
+          <input id="newCronComment" placeholder="e.g. Laravel scheduler">
+        </div>
+        <button class="primary" style="width:100%" onclick="createCronJob()">Create cron job</button>
+        <div class="error" id="newCronError"></div>
+        <p class="muted" id="newCronStatus"></p>
+      </div>
+    </div>`;
+}
+
+async function createCronJob() {
+  const schedule = document.getElementById('newCronSchedule').value.trim();
+  const command = document.getElementById('newCronCommand').value.trim();
+  const comment = document.getElementById('newCronComment').value.trim();
+  const err = document.getElementById('newCronError');
+  const status = document.getElementById('newCronStatus');
+  err.textContent = '';
+  status.textContent = 'Applying crontab on the server...';
+  try {
+    await api(cronBase(), { method: 'POST', body: JSON.stringify({ schedule, command, comment }) });
+    closeModalNoRefresh();
+    await refreshCronJobs();
+  } catch (e) {
+    status.textContent = '';
+    err.textContent = e.message;
+  }
+}
+
+async function toggleCronJob(cronId, enabled) {
+  const box = document.getElementById('cronResult');
+  box.className = 'task-result running';
+  box.textContent = (enabled ? 'Enabling' : 'Disabling') + ' cron job...';
+  box.classList.remove('hidden');
+  try {
+    await api(cronBase() + '/' + cronId, { method: 'PATCH', body: JSON.stringify({ enabled }) });
+    box.classList.add('hidden');
+    await refreshCronJobs();
+  } catch (e) {
+    box.className = 'task-result fail';
+    box.textContent = 'Update failed: ' + e.message;
+  }
+}
+
+async function deleteCronJob(cronId) {
+  if (!confirm('Delete this cron job? It will be removed from the server\'s crontab immediately.')) return;
+  const box = document.getElementById('cronResult');
+  box.className = 'task-result running';
+  box.textContent = 'Removing cron job...';
+  box.classList.remove('hidden');
+  try {
+    await api(cronBase() + '/' + cronId, { method: 'DELETE' });
+    box.classList.add('hidden');
+    await refreshCronJobs();
+  } catch (e) {
+    box.className = 'task-result fail';
+    box.textContent = 'Delete failed: ' + e.message;
   }
 }
 

@@ -485,6 +485,130 @@ func scanBackup(row rowScanner) (*backupRecord, error) {
 	return &rec, nil
 }
 
+type cronJobRecord struct {
+	ID        string
+	ServerID  string
+	SiteID    string
+	Schedule  string
+	Command   string
+	Comment   string
+	Enabled   bool
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// listCronJobs returns a site's cron jobs, oldest first — this is also the
+// order cron.apply renders them in, so the rendered crontab's job order is
+// stable across edits.
+func (s *store) listCronJobs(serverID, siteID string) []*cronJobRecord {
+	rows, err := s.db.Query(
+		`SELECT id, server_id, site_id, schedule, command, comment, enabled, created_at, updated_at
+		 FROM cron_jobs WHERE server_id = ? AND site_id = ? ORDER BY created_at ASC`, serverID, siteID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var out []*cronJobRecord
+	for rows.Next() {
+		rec, err := scanCronJob(rows)
+		if err != nil {
+			continue
+		}
+		out = append(out, rec)
+	}
+	return out
+}
+
+// getCronJob looks up one cron job scoped to both serverID and siteID, so a
+// caller can never address a job belonging to a different site or server.
+func (s *store) getCronJob(serverID, siteID, cronID string) (*cronJobRecord, bool) {
+	row := s.db.QueryRow(
+		`SELECT id, server_id, site_id, schedule, command, comment, enabled, created_at, updated_at
+		 FROM cron_jobs WHERE id = ? AND server_id = ? AND site_id = ?`, cronID, serverID, siteID)
+	rec, err := scanCronJob(row)
+	if err != nil {
+		return nil, false
+	}
+	return rec, true
+}
+
+// createCronJob persists a cron job record. Like createBackup, this is only
+// ever called after cron.apply has already succeeded on the agent (see
+// cron.go handleCreateCronJob) — the table records jobs the live crontab
+// actually reflects, never attempted-but-failed ones.
+func (s *store) createCronJob(serverID, siteID, schedule, command, comment string, enabled bool) (*cronJobRecord, error) {
+	now := time.Now().UTC()
+	rec := &cronJobRecord{
+		ID: randID("cron"), ServerID: serverID, SiteID: siteID, Schedule: schedule, Command: command,
+		Comment: comment, Enabled: enabled, CreatedAt: now, UpdatedAt: now,
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO cron_jobs (id, server_id, site_id, schedule, command, comment, enabled, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		rec.ID, rec.ServerID, rec.SiteID, rec.Schedule, rec.Command, rec.Comment, boolToInt(rec.Enabled),
+		rec.CreatedAt.Format(time.RFC3339Nano), rec.UpdatedAt.Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return nil, err
+	}
+	return rec, nil
+}
+
+// updateCronJob overwrites an existing cron job's fields, scoped to
+// serverID+siteID for the same cross-tenant-addressing reason getCronJob is.
+func (s *store) updateCronJob(serverID, siteID, cronID, schedule, command, comment string, enabled bool) (*cronJobRecord, error) {
+	now := time.Now().UTC()
+	res, err := s.db.Exec(
+		`UPDATE cron_jobs SET schedule = ?, command = ?, comment = ?, enabled = ?, updated_at = ?
+		 WHERE id = ? AND server_id = ? AND site_id = ?`,
+		schedule, command, comment, boolToInt(enabled), now.Format(time.RFC3339Nano), cronID, serverID, siteID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, fmt.Errorf("cron job not found")
+	}
+	rec, ok := s.getCronJob(serverID, siteID, cronID)
+	if !ok {
+		return nil, fmt.Errorf("cron job not found after update")
+	}
+	return rec, nil
+}
+
+func (s *store) deleteCronJob(serverID, siteID, cronID string) error {
+	res, err := s.db.Exec(`DELETE FROM cron_jobs WHERE id = ? AND server_id = ? AND site_id = ?`, cronID, serverID, siteID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("cron job not found")
+	}
+	return nil
+}
+
+func scanCronJob(row rowScanner) (*cronJobRecord, error) {
+	var rec cronJobRecord
+	var createdAt, updatedAt string
+	var enabled int
+	if err := row.Scan(&rec.ID, &rec.ServerID, &rec.SiteID, &rec.Schedule, &rec.Command, &rec.Comment,
+		&enabled, &createdAt, &updatedAt); err != nil {
+		return nil, err
+	}
+	rec.Enabled = enabled != 0
+	rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+	rec.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedAt)
+	return &rec, nil
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
 func randID(prefix string) string {
 	n, _ := rand.Int(rand.Reader, big.NewInt(1<<62))
 	return fmt.Sprintf("%s_%x", prefix, n)

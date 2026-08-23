@@ -297,3 +297,51 @@ func TestBackupCreateListGetRoundTrip(t *testing.T) {
 		t.Fatal("expected getBackup to refuse a backup ID under the wrong server")
 	}
 }
+
+func TestCronJobCreateListUpdateDeleteRoundTrip(t *testing.T) {
+	st := newTestStore(t)
+	serverID, _, _ := st.createServer("web-11", "", nil, time.Hour, "admin@example.com")
+	site, err := st.createSite(serverID, "cron.example.com", "site_cron", "/home/sites/site_cron", "php", "8.3")
+	if err != nil {
+		t.Fatalf("createSite: %v", err)
+	}
+
+	job, err := st.createCronJob(serverID, site.ID, "0 3 * * *", "php artisan schedule:run", "nightly", true)
+	if err != nil {
+		t.Fatalf("createCronJob: %v", err)
+	}
+	if job.ID == "" || !job.Enabled {
+		t.Fatalf("unexpected cron job record: %+v", job)
+	}
+
+	list := st.listCronJobs(serverID, site.ID)
+	if len(list) != 1 || list[0].Command != job.Command {
+		t.Fatalf("listCronJobs = %+v, want one entry matching the created job", list)
+	}
+
+	updated, err := st.updateCronJob(serverID, site.ID, job.ID, "0 4 * * *", "php artisan schedule:run", "nightly (moved)", false)
+	if err != nil {
+		t.Fatalf("updateCronJob: %v", err)
+	}
+	if updated.Schedule != "0 4 * * *" || updated.Enabled {
+		t.Fatalf("updateCronJob did not apply changes: %+v", updated)
+	}
+
+	otherServer, _, _ := st.createServer("web-12", "", nil, time.Hour, "admin@example.com")
+	if _, ok := st.getCronJob(otherServer, site.ID, job.ID); ok {
+		t.Fatal("expected getCronJob to refuse a job ID under the wrong server")
+	}
+	if _, err := st.updateCronJob(otherServer, site.ID, job.ID, "* * * * *", "echo hi", "", true); err == nil {
+		t.Fatal("expected updateCronJob to refuse a job ID under the wrong server")
+	}
+
+	if err := st.deleteCronJob(serverID, site.ID, job.ID); err != nil {
+		t.Fatalf("deleteCronJob: %v", err)
+	}
+	if len(st.listCronJobs(serverID, site.ID)) != 0 {
+		t.Fatal("expected listCronJobs to be empty after delete")
+	}
+	if err := st.deleteCronJob(serverID, site.ID, job.ID); err == nil {
+		t.Fatal("expected deleteCronJob to fail for an already-deleted job")
+	}
+}
