@@ -2,6 +2,41 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-23 — Database control-plane persistence and dashboard UI
+
+- **Closed the DB-001 gap flagged in the previous session** ("good candidate for the
+  next iteration"): databases created via `db.create` are now durably recorded and
+  manageable from the dashboard, the same way sites and backups already were, instead
+  of only existing as a side effect of generic capability dispatch.
+- New `databases` control-plane table (`server_id`, `name`, `owner_user`, `engine`,
+  `status`, `created_at`, `UNIQUE(server_id, name)`) and `store` methods
+  (`createDatabaseRecord`/`listDatabases`/`getDatabaseRecord`/`deleteDatabaseRecord`),
+  all scoped by server ID so a database record — and therefore a delete — can never be
+  addressed under the wrong server, matching the existing `getSite`/`getBackup` pattern.
+- Three new endpoints (`apps/controlplane/databases.go`): `POST`/`GET
+  /api/v1/servers/{id}/databases`, `DELETE /api/v1/servers/{id}/databases/{dbId}`.
+  Create follows the established dispatch-then-persist-on-success pattern — a `databases`
+  row is written only after `db.create` actually succeeds on the agent — and rejects a
+  duplicate name with `409` before ever dispatching. The owner password is generated
+  server-side with `crypto/rand`, returned exactly once in the create response, and
+  never stored or logged, the same shown-once pattern `POST /api/v1/servers` already
+  uses for bootstrap tokens.
+- Exported `capabilities.IdentifierRe` (was package-private `identifierRe`) so the
+  control-plane API layer validates database/user names against the same allow-list
+  before ever dispatching to an agent, not only agent-side — defense in depth, same
+  reasoning already applied to backup scope/db-name validation.
+- New "Databases" panel on the server-detail dashboard view (`web/index.html`): create
+  modal (name + optional owner user, showing the generated password once), table with
+  per-row delete + confirmation.
+- Tests: `TestDatabaseCreateListDeleteRoundTrip`,
+  `TestCreateDatabaseRecordRejectsDuplicateNameOnSameServer` (store layer);
+  `TestCreateDatabaseValidatesAndDispatches`, `TestDeleteDatabaseRequiresARealRecord`
+  (HTTP layer, proving validation happens before dispatch and destructive delete is
+  record-scoped, not free-form). `go test ./...` and `gofmt -l .` both clean.
+- Docs: `docs/SERVERAVATAR_PARITY.md` (DB-001 updated, new DB-005 `COMPLETE` entry),
+  `docs/SYSTEM.md` (§8 schema table, §9 API summary, new "Database management" feature
+  table), `docs/API.md` (new endpoint docs).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

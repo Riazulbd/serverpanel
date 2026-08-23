@@ -9,12 +9,12 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 )
 
-// identifierRe is the allow-list for database/user names. MySQL has no
+// IdentifierRe is the allow-list for database/user names. MySQL has no
 // placeholder syntax for identifiers (only for values), so the standard
 // safe approach — used here — is to validate against a strict charset
 // before backtick-quoting and interpolating, never to accept an arbitrary
 // string into a CREATE DATABASE/USER statement.
-var identifierRe = regexp.MustCompile(`^[a-z][a-z0-9_]{0,30}$`)
+var IdentifierRe = regexp.MustCompile(`^[a-z][a-z0-9_]{0,30}$`)
 
 func mariaDBConn() (*sql.DB, error) {
 	// Connects as root over the local Unix socket, matching MariaDB's
@@ -39,11 +39,11 @@ func handleDBCreate(ctx context.Context, params map[string]any, progress Progres
 	owner, _ := params["owner_user"].(string)
 	password, _ := params["owner_password"].(string)
 
-	if !identifierRe.MatchString(name) {
-		return "", fmt.Errorf("invalid database name %q (must match %s)", name, identifierRe.String())
+	if !IdentifierRe.MatchString(name) {
+		return "", fmt.Errorf("invalid database name %q (must match %s)", name, IdentifierRe.String())
 	}
-	if !identifierRe.MatchString(owner) {
-		return "", fmt.Errorf("invalid owner_user %q (must match %s)", owner, identifierRe.String())
+	if !IdentifierRe.MatchString(owner) {
+		return "", fmt.Errorf("invalid owner_user %q (must match %s)", owner, IdentifierRe.String())
 	}
 	if len(password) < 16 {
 		return "", fmt.Errorf("owner_password must be at least 16 characters")
@@ -81,7 +81,7 @@ func handleDBCreate(ctx context.Context, params map[string]any, progress Progres
 func handleDBDelete(ctx context.Context, params map[string]any, progress Progress) (string, error) {
 	name, _ := params["name"].(string)
 	owner, _ := params["owner_user"].(string)
-	if !identifierRe.MatchString(name) {
+	if !IdentifierRe.MatchString(name) {
 		return "", fmt.Errorf("invalid database name %q", name)
 	}
 
@@ -95,7 +95,7 @@ func handleDBDelete(ctx context.Context, params map[string]any, progress Progres
 		return "", fmt.Errorf("drop database: %w", err)
 	}
 	if owner != "" {
-		if !identifierRe.MatchString(owner) {
+		if !IdentifierRe.MatchString(owner) {
 			return "", fmt.Errorf("invalid owner_user %q", owner)
 		}
 		db.ExecContext(ctx, fmt.Sprintf("DROP USER IF EXISTS `%s`@'localhost'", owner))
