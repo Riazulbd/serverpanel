@@ -173,7 +173,37 @@ func (g *gateway) handleConn(conn net.Conn) {
 					}
 				}
 			}
+		case proto.MsgRenewRequest:
+			g.handleRenewRequest(sess, serverID, env.RenewRequest)
 		}
+	}
+}
+
+// handleRenewRequest signs a fresh certificate for an agent that is
+// proactively rotating its credential before the current one expires (see
+// apps/agent/renew.go). The identity the new certificate is bound to
+// (serverID) comes from the already-mTLS-authenticated connection's peer
+// certificate — never from the request body — so an agent cannot use
+// renewal to obtain a certificate for any identity but its own. Unlike
+// first-time registration, no bootstrap token is involved: possession of a
+// still-valid client certificate is the credential.
+func (g *gateway) handleRenewRequest(sess *agentSession, serverID string, req *proto.RenewRequest) {
+	if req == nil || req.CSRPEM == "" {
+		return
+	}
+	certPEM, serial, err := g.ca.signAgentCSR([]byte(req.CSRPEM), serverID, agentCertTTL)
+	if err != nil {
+		g.store.log(serverID, "", "agent.cert_renewal_failed", err.Error())
+		return
+	}
+	g.store.updateCertSerial(serverID, serial.String())
+	g.store.log(serverID, "", "agent.cert_renewed", fmt.Sprintf("cert_serial=%s", serial.String()))
+
+	sess.mu.Lock()
+	sendErr := sess.enc.Encode(proto.Envelope{Type: proto.MsgRenewResponse, RenewResponse: &proto.RenewResponse{CertPEM: string(certPEM)}})
+	sess.mu.Unlock()
+	if sendErr != nil {
+		log.Printf("send renewal response to server_id=%s: %v", serverID, sendErr)
 	}
 }
 

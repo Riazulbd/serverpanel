@@ -26,7 +26,7 @@ const agentVersion = "0.1.0-dev"
 // manages (nginx, php-fpm, mariadb, ...) run under systemd independent of
 // this connection — see docs/architecture.md §2 — so a dropped connection
 // here degrades orchestration/observability only, never site serving.
-func runConnection(ctx context.Context, id *identity, reg capabilities.Registry) error {
+func runConnection(ctx context.Context, id *identity, reg capabilities.Registry, dataDir string) error {
 	cert, err := tls.X509KeyPair(id.CertPEM, id.KeyPEM)
 	if err != nil {
 		return err
@@ -70,17 +70,51 @@ func runConnection(ctx context.Context, id *identity, reg capabilities.Registry)
 	}
 	log.Printf("connected to gateway %s as %s", id.GatewayAddr, id.ServerID)
 
-	go heartbeatLoop(ctx, enc)
+	// connCtx is scoped to this one connection, not the process lifetime:
+	// it's cancelled the instant runConnection returns (for any reason —
+	// a dropped socket, a deliberate renewal-triggered reconnect, ...), so
+	// the background loops below never outlive the connection they're
+	// writing to. Without this, a loop from a previous, already-dead
+	// connection would keep running against a closed conn indefinitely,
+	// and (for renewalLoop specifically) would keep reading the *identity
+	// this call captured even after main.go has moved on to a freshly
+	// reloaded one for the next attempt.
+	connCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	go heartbeatLoop(connCtx, enc)
+	rs := &renewalState{}
+	go renewalLoop(connCtx, enc, id, rs)
 
 	for {
 		var env proto.Envelope
 		if err := dec.Decode(&env); err != nil {
 			return err
 		}
-		if env.Type != proto.MsgTask || env.Task == nil {
-			continue
+		switch env.Type {
+		case proto.MsgTask:
+			if env.Task != nil {
+				go handleTask(ctx, enc, reg, *env.Task)
+			}
+		case proto.MsgRenewResponse:
+			if env.RenewResponse == nil {
+				continue
+			}
+			rs.mu.Lock()
+			key := rs.pendingKey
+			rs.pendingKey = nil
+			rs.mu.Unlock()
+			if key == nil {
+				log.Printf("received certificate renewal response with no matching pending request; ignoring")
+				continue
+			}
+			if err := applyRenewal(dataDir, key, []byte(env.RenewResponse.CertPEM)); err != nil {
+				log.Printf("certificate renewal: failed to persist new certificate: %v", err)
+				continue
+			}
+			log.Printf("certificate renewed; reconnecting to use it")
+			return errCertRenewed
 		}
-		go handleTask(ctx, enc, reg, *env.Task)
 	}
 }
 

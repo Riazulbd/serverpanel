@@ -159,6 +159,8 @@ connection carries newline-delimited JSON `Envelope`s in both directions
 {"type": "heartbeat", "heartbeat": {"sent_at": "...", "uptime_secs": 0, "load_avg_1": 0, "mem_used_pct": 0, "disk_used_pct": 0}}
 {"type": "task", "task": {"id": "...", "capability": "...", "params": {}, "issued_at": "..."}}
 {"type": "task_event", "task_event": {"task_id": "...", "status": "queued|running|succeeded|failed|rejected", "message": "...", "detail": "...", "at": "..."}}
+{"type": "renew_request", "renew_request": {"csr_pem": "..."}}
+{"type": "renew_response", "renew_response": {"cert_pem": "..."}}
 {"type": "ack"}
 ```
 
@@ -170,6 +172,20 @@ HTTP handler) until it sees a terminal event for the task ID it sent, or its con
 deadline expires. There is no message type for a free-form command — `capability` must
 be a name in `packages/capabilities`'s fixed registry, or the agent returns `rejected`
 without executing anything.
+
+Separately, and asynchronously with respect to any task, the agent may send
+`renew_request` at any point once its current certificate is within 10 days of expiry
+(`apps/agent/renew.go` `certRenewalWindow`) — a fresh CSR for a newly generated
+keypair. The gateway signs it (`apps/controlplane/gateway.go` `handleRenewRequest`),
+binding the new certificate to `serverID` **from the connection's already-verified
+peer certificate**, never from the CSR's requested subject or anything else in the
+message — the same trust rule `POST /agents/register` applies to a CSR's requested
+subject, just re-derived from an existing mTLS session instead of a bootstrap token.
+It replies with `renew_response`. The agent persists the new certificate to disk, then
+deliberately closes the connection and reconnects (a live TLS session's client
+certificate can't be swapped without a new handshake) — so one `renew_request` /
+`renew_response` exchange is always immediately followed by a fresh `hello` on a new
+connection, not a continuation of the same one.
 
 ## 4. Capability reference
 

@@ -52,8 +52,12 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | User/organization management | 🚧 single-user model only; no orgs/teams yet |
 | Multiple-server management | ✅ create/list/get/revoke, search/filter in UI |
 | Secure agent install/registration | ✅ bootstrap token → mTLS cert exchange |
-| Agent identity, cert rotation, revocation | 🚧 issuance + revocation done; no
-  auto-renewal before expiry yet (see `SECURITY.md` §2) |
+| Agent identity, cert rotation, revocation | ✅ issuance, revocation, and proactive
+  auto-renewal (agent requests a fresh cert 10 days before its current one expires,
+  over the already-mTLS-authenticated connection) all implemented; see `SECURITY.md`
+  §2. Remaining gap: no automated alert/fallback if a renewal window is missed
+  entirely (agent offline past its cert's actual expiry) — that needs a manual
+  re-registration today. |
 | Server health monitoring | ✅ heartbeat: uptime, load, mem%, disk% |
 | Server groups/tags/metadata | ✅ `group`, `tags[]` on server records |
 | Background job queue | ⬜ task dispatch is synchronous request/response today,
@@ -164,11 +168,12 @@ Phase boundaries and full milestone/estimate tables are in `product-plan.md` §6
 is the condensed status:
 
 - **Phase 1 — secure working foundation:** ~90% of the *capability* surface exists and
-  is tested per-capability (see the tables above); the biggest real gaps are backup
-  **restore**, an automated test suite (now added, see `TESTING.md`), SSL auto-renewal,
-  and agent cert auto-rotation. Not "GA-ready" yet, but the architecture and security
-  primitives it depends on (mTLS, allow-listed capabilities, per-app isolation, audit
-  log) are real and proven, not stubs.
+  is tested per-capability (see the tables above); backup **restore** and agent
+  **cert auto-rotation** are now both implemented and tested. The remaining real gap
+  is SSL auto-renewal (certbot's own renewal timer is not yet wired up by
+  `stack.install`). Not "GA-ready" yet, but the architecture and security primitives
+  it depends on (mTLS, allow-listed capabilities, per-app isolation, audit log) are
+  real and proven, not stubs.
 - **Phase 2 — professional server management:** not started. Git deployment,
   cron/process management, SSH/firewall management UI, remote backups, cross-server
   migration all remain ⬜.
@@ -279,7 +284,12 @@ See `SECURITY.md` in full. Summary: single-use, short-lived (15 min default),
 hashed-at-rest bootstrap tokens exchanged exactly once for a 30-day mTLS client
 certificate bound (by `CommonName`) to the server's ID; the gateway independently
 derives identity from the certificate on every connection (never trusts anything the
-agent asserts in-band) and checks a revocation list on every handshake.
+agent asserts in-band) and checks a revocation list on every handshake. 10 days before
+its certificate expires, the agent proactively renews: a fresh CSR is sent over the
+already-authenticated connection (`proto.MsgRenewRequest`/`MsgRenewResponse`), and the
+gateway binds the new certificate to the identity the *connection* already proved —
+never to anything the CSR itself claims — exactly the same trust rule as first
+registration, just re-derived from an mTLS session instead of a bootstrap token.
 
 ## 12. Privileged operations and allow-list
 
@@ -384,7 +394,10 @@ all ⬜, scoped to Phase 2 per `product-plan.md` §9.
 - No backup scheduling/retention policy — backups are on-demand only.
 - No on-disk agent task journal — a task in flight when the agent process restarts is
   lost, not resumed (see `ARCHITECTURE.md` §4 "As built").
-- No agent certificate auto-renewal before its 30-day expiry (see `SECURITY.md` §2).
+- Agent certificate auto-renewal exists (10 days before its 30-day expiry, see
+  `SECURITY.md` §2), but there is no automated alert/fallback if that window is missed
+  entirely (agent offline past its cert's actual expiry) — reconnects then fail the
+  mTLS handshake indefinitely until an operator manually re-registers it.
 - No agent self-update mechanism (see `SECURITY.md` §3).
 - No background job queue — task dispatch is synchronous and bounded by a 120s HTTP
   timeout; this will not scale past a moderate number of concurrent long-running tasks
@@ -420,9 +433,10 @@ all ⬜, scoped to Phase 2 per `product-plan.md` §9.
 
 See `TESTING.md` for the full breakdown (what's automated, what was manually verified
 against a real Ubuntu 24.04 host, and why). Summary: `go test ./...` covers
-auth/session/TOTP/bootstrap-token/revocation logic and the capability allow-list
-boundary (including path-traversal/symlink-escape defenses) with real SQLite and real
-filesystem operations — no mocks for anything that has a cheap real implementation.
+auth/session/TOTP/bootstrap-token/revocation/cert-renewal logic and the capability
+allow-list boundary (including path-traversal/symlink-escape defenses) with real
+SQLite and real filesystem operations — no mocks for anything that has a cheap real
+implementation.
 Capabilities that require actual system services (package installs, systemd, real
 DNS-backed Let's Encrypt issuance) are documented as manually verified in a real
 container in a prior session, not re-verified by the automated suite, and that

@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"log"
 	"os"
@@ -51,12 +52,37 @@ func main() {
 
 	backoff := time.Second
 	for {
-		err := runConnection(ctx, id, reg)
+		start := time.Now()
+		err := runConnection(ctx, id, reg, *dataDir)
 		if ctx.Err() != nil {
 			log.Println("shutting down")
 			return
 		}
-		log.Printf("connection to gateway lost: %v (retrying in %s)", err, backoff)
+
+		if errors.Is(err, errCertRenewed) {
+			// The connection was closed deliberately, having already
+			// persisted a valid new certificate to disk — reload it so the
+			// next dial uses it. loadIdentity failing here would mean the
+			// renewal write we just did is somehow unreadable; fall back to
+			// the (still valid, just older) in-memory identity rather than
+			// crashing the agent over it.
+			if fresh, loadErr := loadIdentity(*dataDir); loadErr != nil {
+				log.Printf("certificate was renewed but reloading identity failed, retrying with previous credential: %v", loadErr)
+			} else {
+				id = fresh
+			}
+		} else {
+			log.Printf("connection to gateway lost: %v (retrying in %s)", err, backoff)
+		}
+
+		// A connection that stayed up a while was a real, healthy session
+		// (including the common case of a renewal-triggered reconnect
+		// after weeks of uptime) — don't let backoff stay stuck near its
+		// cap from a long time ago for what is effectively a fresh start.
+		if time.Since(start) > 30*time.Second {
+			backoff = time.Second
+		}
+
 		select {
 		case <-ctx.Done():
 			return

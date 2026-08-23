@@ -48,11 +48,11 @@ actually exists — expand a row into a full block the moment work on it begins
 - **DB tables**: `servers`, `bootstrap_tokens`, `revoked_certs`.
 - **Required permission**: authenticated session (single-user model today — see ORG-001).
 - **Security considerations**: single-use/short-lived hashed bootstrap tokens; certificate identity independently derived from the mTLS handshake, never trusted from agent-asserted data; revocation checked every handshake.
-- **Test coverage**: `apps/controlplane/http_test.go` (`TestServerCreateListRevokeFlow`, `TestRegisterEndpointRejectsBadToken`), `apps/controlplane/store_test.go`.
+- **Test coverage**: `apps/controlplane/http_test.go` (`TestServerCreateListRevokeFlow`, `TestRegisterEndpointRejectsBadToken`), `apps/controlplane/store_test.go`, `apps/controlplane/gateway_test.go` (renewal: `TestHandleRenewRequestIssuesFreshCertBoundToConnectionIdentity`, `TestHandleRenewRequestDoesNotFlipConnectedStatusOffline`, `TestHandleRenewRequestRejectsInvalidCSR`, `TestHandleRenewRequestIgnoresEmptyRequest`), `apps/agent/renew_test.go`.
 - **Current status**: `COMPLETE`
-- **Completion date**: 2026-08-14
-- **Known differences**: no agent certificate auto-renewal before 30-day expiry yet.
-- **Reason**: scoped out of the initial secure-foundation pass; tracked in `SYSTEM.md` §21.
+- **Completion date**: 2026-08-14 (agent certificate auto-renewal added 2026-08-23)
+- **Known differences**: agent certificate auto-renewal is implemented (agent requests a fresh cert 10 days before its current one expires, over the already-authenticated mTLS connection — see `SECURITY.md` §2), but there is no automated alert/fallback if that window is missed entirely; a fully-expired, never-renewed agent still needs manual re-registration.
+- **Reason**: the missed-window fallback is a monitoring/alerting feature ("server offline > N days"), tracked separately under Log Monitoring/Alerts, not a gap in the renewal mechanism itself.
 
 ### SRV-002 — Hosting stack installation (LEMP)
 - **Category**: Server Management

@@ -2,6 +2,55 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-23 — Agent certificate auto-rotation
+
+- **Implemented proactive agent certificate renewal**, closing the top-priority
+  security gap flagged in `SECURITY.md` §2 and `SERVERAVATAR_PARITY.md` SRV-001:
+  agent client certificates were issued with a fixed 30-day TTL and had no renewal
+  path at all — an agent whose cert expired required manual re-registration with a
+  fresh bootstrap token, with no automated recovery in between.
+- Added two new wire-protocol messages (`packages/proto`): `renew_request` (agent →
+  gateway, a freshly generated CSR) and `renew_response` (gateway → agent, the newly
+  issued certificate). Sent over the connection already authenticated by the agent's
+  *current* still-valid certificate — no shared long-lived secret is ever reused for
+  renewal, matching the same trust model as the original bootstrap-token exchange.
+- `apps/agent/renew.go`: `renewalLoop` checks every 6 hours whether the connection's
+  current certificate is within 10 days of expiry (a third of the 30-day TTL, leaving
+  multiple retry windows) and, if so, generates a new keypair/CSR and sends
+  `renew_request`. On `renew_response`, the new certificate is persisted to disk
+  (temp-file-then-rename, so a crash mid-write can never leave a half-written
+  cert/key), and the connection is deliberately closed and redialed — a live TLS
+  session can't have its client certificate swapped in place — with `main.go`
+  reloading the identity from disk before the next dial.
+- `apps/controlplane/gateway.go`: `handleRenewRequest` signs the CSR and binds the new
+  certificate to the identity from the **connection's already-verified peer
+  certificate** — never anything the CSR itself claims — and records the new serial
+  via a new `store.updateCertSerial` (deliberately separate from `markIssuedCert`,
+  which also flips status to `offline`; a renewal happens over a connection that is,
+  by definition, already `connected`, and must not make it look otherwise).
+- Fixed a related latent issue while touching the agent's reconnect loop
+  (`apps/agent/main.go`): per-connection background goroutines (heartbeat, and now
+  renewal) previously ran on the process-lifetime context instead of one scoped to
+  their own connection, meaning a dead connection's heartbeat loop kept retrying
+  writes to a closed socket forever; and reconnect backoff never reset after a long
+  healthy connection, so a fleet running long enough would have every future
+  reconnect — including transient blips — start at the 30s cap. Both fixed: each
+  `runConnection` call now gets its own cancelable context, and backoff resets to 1s
+  after any connection that stayed up more than 30s.
+- Added 4 new control-plane tests (`apps/controlplane/gateway_test.go`, exercising
+  `handleRenewRequest` over an in-memory `net.Pipe`: identity binding ignores a CSR
+  requesting a different identity, renewal never flips a connected server's status to
+  offline, an invalid CSR is rejected without touching the stored serial, a nil/empty
+  request is a no-op) and 3 new agent tests (`apps/agent/renew_test.go`: `certExpiry`
+  parsing, and `applyRenewal`'s atomic persist-then-`loadIdentity` round trip). Full
+  suite: 68 test functions across three packages, `go vet`/`gofmt`/`-race` clean.
+- Updated `SECURITY.md` §2, `API.md` §3 (wire protocol), `SYSTEM.md` (§2 table, §11,
+  §21, §23, Phase 1 summary), `TESTING.md`, and `SERVERAVATAR_PARITY.md` SRV-001 to
+  reflect renewal as implemented. Remaining, explicitly documented gap: no automated
+  alert/fallback if the renewal window is missed entirely (agent offline past its
+  cert's actual expiry) — that's a monitoring/alerting feature, not a renewal-protocol
+  gap, and is tracked separately.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

@@ -54,17 +54,26 @@ Properties this guarantees:
   certificate issued by the internal Agent CA, and the agent verifies the gateway's
   certificate/pinned CA to prevent MITM or connecting to a spoofed endpoint.
   **Implemented as described** — see `apps/controlplane/gateway.go` `handleConn`.
-- Client certs are **short-lived** (e.g. 30–90 days) and **auto-rotated**: before
-  expiry, the agent requests renewal authenticated by its current still-valid cert (no
-  shared long-lived secret is ever reused for renewal). If a renewal window is missed
-  (agent offline past expiry), the agent falls back to a manual re-registration flow
-  requiring a fresh bootstrap token from the dashboard — this is an intentional
-  fail-closed behavior, not silent re-trust.
-  **Not yet implemented**: certs are issued with a fixed 30-day TTL
-  (`apps/controlplane/http.go` `handleRegister`) and there is no renewal
-  capability/endpoint yet — an agent whose cert expires must be manually
-  re-registered with a fresh bootstrap token today. Auto-rotation before expiry is
-  tracked as a known gap in `SYSTEM.md`.
+- Client certs are **short-lived** (30 days, `apps/controlplane/ca.go` `agentCertTTL`)
+  and **auto-rotated**: 10 days before its current certificate expires, the agent
+  generates a fresh keypair and sends a CSR over the already-open, already-mTLS
+  -authenticated connection (`proto.MsgRenewRequest` — see `apps/agent/renew.go`
+  `renewalLoop`). No shared long-lived secret is ever reused for renewal: the
+  gateway derives the identity to bind the new certificate to from the *connection's
+  peer certificate*, never from anything the request asserts
+  (`apps/controlplane/gateway.go` `handleRenewRequest` — covered by
+  `TestHandleRenewRequestIssuesFreshCertBoundToConnectionIdentity`, which asserts a
+  CSR requesting a different identity is ignored). The agent persists the new
+  certificate to disk (temp-file-then-rename) before ever using it, then closes and
+  re-dials the connection so the new certificate takes effect on a fresh TLS
+  handshake — a live TLS session can't have its client certificate swapped in place.
+  **Not yet implemented**: there is no automated fallback if a renewal window is
+  *missed entirely* (agent offline for more than the ~10-day renewal window, past
+  its certificate's actual expiry) — today that just means every reconnect attempt
+  fails the mTLS handshake indefinitely (fail-closed, not silent re-trust, but not
+  self-healing either) until an operator notices and manually re-registers the agent
+  with a fresh bootstrap token. A dashboard alert on "server offline longer than N
+  days" would close this gap and is tracked in `SYSTEM.md`.
 - The Agent CA's private key is held in a dedicated, tightly access-controlled service
   (e.g. `step-ca` or HSM-backed KMS in later stages), separate from the general
   application database, so a control-plane app-tier compromise doesn't automatically
