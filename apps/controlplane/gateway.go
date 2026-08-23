@@ -104,6 +104,10 @@ func (g *gateway) handleConn(conn net.Conn) {
 		conn.Close()
 		return
 	}
+	// The agent is demonstrably running on serial `serial` right now, so if
+	// a prior renewal left an older serial pending revocation, it's safe to
+	// finalize that revocation — see store.promotePendingRevocation.
+	g.store.promotePendingRevocation(serverID, serial)
 
 	sess := &agentSession{
 		serverID: serverID,
@@ -173,8 +177,42 @@ func (g *gateway) handleConn(conn net.Conn) {
 					}
 				}
 			}
+		case proto.MsgRenewRequest:
+			if env.RenewRequest != nil {
+				resp := g.renewAgentCert(serverID, serial, env.RenewRequest)
+				sess.mu.Lock()
+				err := sess.enc.Encode(proto.Envelope{Type: proto.MsgRenewResponse, RenewResponse: resp})
+				sess.mu.Unlock()
+				if err != nil {
+					return
+				}
+			}
 		}
 	}
+}
+
+// renewAgentCert issues a fresh client certificate for an already-connected
+// agent, ahead of its current certificate's expiry (see docs/SECURITY.md
+// §2). serverID and currentSerial come from the *already-verified* mTLS
+// peer certificate on this connection (handleConn), never from the request
+// body — an agent can only ever renew its own identity, never claim
+// another server's, matching signAgentCSR's own CommonName-from-serverID
+// behavior. The certificate being replaced is not revoked here (see
+// store.rotateCertSerial for why) — only staged for revocation once the
+// agent is actually seen using the new one. Split out from handleConn so
+// it can be unit-tested without a real TLS connection (see gateway_test.go).
+func (g *gateway) renewAgentCert(serverID, currentSerial string, req *proto.RenewRequest) *proto.RenewResponse {
+	certPEM, serial, err := g.ca.signAgentCSR([]byte(req.CSRPEM), serverID, agentCertTTL)
+	if err != nil {
+		g.store.log(serverID, "", "agent.cert_renew_failed", err.Error())
+		return &proto.RenewResponse{Error: err.Error()}
+	}
+	if err := g.store.rotateCertSerial(serverID, currentSerial, serial.String()); err != nil {
+		g.store.log(serverID, "", "agent.cert_renew_failed", err.Error())
+		return &proto.RenewResponse{Error: "could not record renewed certificate"}
+	}
+	g.store.log(serverID, "", "agent.cert_renewed", fmt.Sprintf("old_serial=%s new_serial=%s", currentSerial, serial.String()))
+	return &proto.RenewResponse{CertPEM: string(certPEM), CAPEM: string(g.ca.CAPEM())}
 }
 
 // dispatch sends a task to a connected agent and waits (bounded by ctx) for

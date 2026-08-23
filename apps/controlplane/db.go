@@ -43,7 +43,16 @@ func openDB(path string) (*sql.DB, error) {
 // first — this is what keeps re-running openDB against an already-migrated
 // database a safe no-op instead of an error.
 func runMigrations(db *sql.DB) error {
-	return addColumnIfMissing(db, "backups", "db_name", "TEXT NOT NULL DEFAULT ''")
+	if err := addColumnIfMissing(db, "backups", "db_name", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	// pending_revoke_serial supports certificate-renewal rotation (see
+	// store.rotateCertSerial / promotePendingRevocation): the serial being
+	// replaced is held here, not revoked immediately, until the agent is
+	// actually seen connecting with its newly issued certificate — closing
+	// the "old cert stays silently valid forever" gap without risking a
+	// self-inflicted lockout if the agent never picks up the new one.
+	return addColumnIfMissing(db, "servers", "pending_revoke_serial", "TEXT NOT NULL DEFAULT ''")
 }
 
 func addColumnIfMissing(db *sql.DB, table, column, decl string) error {

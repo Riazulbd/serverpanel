@@ -160,6 +160,8 @@ connection carries newline-delimited JSON `Envelope`s in both directions
 {"type": "task", "task": {"id": "...", "capability": "...", "params": {}, "issued_at": "..."}}
 {"type": "task_event", "task_event": {"task_id": "...", "status": "queued|running|succeeded|failed|rejected", "message": "...", "detail": "...", "at": "..."}}
 {"type": "ack"}
+{"type": "renew_request", "renew_request": {"csr_pem": "..."}}
+{"type": "renew_response", "renew_response": {"cert_pem": "...", "ca_pem": "...", "error": ""}}
 ```
 
 Flow: gateway accepts → verifies cert → sends `ack` → agent sends `hello`, then
@@ -170,6 +172,19 @@ HTTP handler) until it sees a terminal event for the task ID it sent, or its con
 deadline expires. There is no message type for a free-form command — `capability` must
 be a name in `packages/capabilities`'s fixed registry, or the agent returns `rejected`
 without executing anything.
+
+**Certificate renewal** (`renew_request`/`renew_response`, `apps/agent/connect.go`
+`renewalLoop` / `apps/controlplane/gateway.go` `renewAgentCert`): once less than 7 days
+remain on the agent's current 30-day client certificate, it sends `renew_request` with
+a fresh CSR over this same already-authenticated connection — no bootstrap token
+involved. The gateway signs a new certificate bound to the `server_id` it already
+derived from the connection's peer certificate (the CSR's requested subject is never
+trusted) and replies with `renew_response`. On success the agent persists the new
+cert/key to disk and switches to it on its *next* reconnect; the certificate being
+replaced is not revoked until the agent is actually seen connecting with the new one
+(`store.promotePendingRevocation`), so a disk-write failure mid-renewal can't strand the
+agent with no valid credential. On failure (e.g. malformed CSR), `renew_response.error`
+is set and the agent keeps using its current certificate, retrying on the next check.
 
 ## 4. Capability reference
 

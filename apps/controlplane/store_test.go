@@ -297,3 +297,60 @@ func TestBackupCreateListGetRoundTrip(t *testing.T) {
 		t.Fatal("expected getBackup to refuse a backup ID under the wrong server")
 	}
 }
+
+func TestRotateCertSerialDoesNotRevokeUntilNewCertSeen(t *testing.T) {
+	st := newTestStore(t)
+	id, _, err := st.createServer("web-9", "", nil, time.Hour, "admin@example.com")
+	if err != nil {
+		t.Fatalf("createServer: %v", err)
+	}
+	st.markIssuedCert(id, "100")
+
+	if err := st.rotateCertSerial(id, "100", "101"); err != nil {
+		t.Fatalf("rotateCertSerial: %v", err)
+	}
+	rec, ok := st.get(id)
+	if !ok || rec.CertSerial != "101" {
+		t.Fatalf("cert_serial = %+v, want 101", rec)
+	}
+	// The superseded cert must not be revoked yet — only once the agent is
+	// actually seen using the new one (see promotePendingRevocation) — so a
+	// disk write failure on the agent's side can't strand it with neither
+	// cert valid.
+	if st.isRevoked("100") {
+		t.Fatal("old serial should not be revoked immediately after rotation")
+	}
+
+	// Reconnecting with the *old* serial (renewal issued but never adopted)
+	// must not revoke anything either.
+	st.promotePendingRevocation(id, "100")
+	if st.isRevoked("100") {
+		t.Fatal("old serial should not be revoked while the agent is still using it")
+	}
+
+	// Reconnecting with the new serial proves the rotation worked — now the
+	// old one is safe to revoke.
+	st.promotePendingRevocation(id, "101")
+	if !st.isRevoked("100") {
+		t.Fatal("old serial should be revoked once the agent connects with the new one")
+	}
+	if st.isRevoked("101") {
+		t.Fatal("the new serial itself must never be revoked by promotePendingRevocation")
+	}
+}
+
+func TestPromotePendingRevocationNoOpWithoutPendingRotation(t *testing.T) {
+	st := newTestStore(t)
+	id, _, err := st.createServer("web-10", "", nil, time.Hour, "admin@example.com")
+	if err != nil {
+		t.Fatalf("createServer: %v", err)
+	}
+	st.markIssuedCert(id, "200")
+
+	// No rotation ever happened, so a normal connection with the same
+	// serial must be a complete no-op (nothing to revoke).
+	st.promotePendingRevocation(id, "200")
+	if st.isRevoked("200") {
+		t.Fatal("promotePendingRevocation must never revoke the serial actively in use with no pending rotation")
+	}
+}

@@ -172,6 +172,64 @@ func (s *store) markIssuedCert(serverID, serial string) {
 	s.log(serverID, "", "agent.registered", fmt.Sprintf("cert_serial=%s", serial))
 }
 
+// rotateCertSerial records a renewed certificate's serial as the server's
+// new cert_serial, and stashes the certificate it replaces in
+// pending_revoke_serial rather than revoking it immediately. Immediate
+// revocation would be unsafe: renewal happens over the *old* cert's live
+// connection, before the agent has necessarily persisted or ever
+// reconnected with the new one — if the agent's disk write then failed
+// (full disk, permissions), revoking the old cert right away would strand
+// it with no valid credential at all (self-inflicted lockout). Instead,
+// promotePendingRevocation finalizes the revocation only once the agent is
+// actually seen using the new cert, at its next successful handshake.
+// Unlike markIssuedCert (first-time registration, where "just issued, not
+// yet connected" is accurate), this never touches connection status or
+// writes an "agent.registered" line — renewal happens on an agent that is
+// already connected and mid-session, so flipping it to offline here would
+// be actively wrong. The caller (gateway.renewAgentCert) writes its own
+// "agent.cert_renewed" audit entry.
+func (s *store) rotateCertSerial(serverID, oldSerial, newSerial string) error {
+	_, err := s.db.Exec(`UPDATE servers SET cert_serial = ?, pending_revoke_serial = ? WHERE id = ?`,
+		newSerial, oldSerial, serverID)
+	return err
+}
+
+// promotePendingRevocation is called on every gateway handshake
+// (gateway.handleConn). If this server has a certificate pending
+// revocation (set by rotateCertSerial) and the agent is connecting with
+// some *other* serial than that one, the rotation has just been proven to
+// work — the agent really is running on its newly issued cert — so it's
+// finally safe to revoke the one it replaced. If the agent is still
+// connecting with the pending serial itself (renewal was issued but never
+// adopted — e.g. the agent crashed before persisting it, or simply hasn't
+// reconnected yet), nothing is revoked: the old cert stays valid rather
+// than risking that lockout.
+func (s *store) promotePendingRevocation(serverID, connectingSerial string) {
+	var pending string
+	if err := s.db.QueryRow(`SELECT pending_revoke_serial FROM servers WHERE id = ?`, serverID).Scan(&pending); err != nil {
+		return
+	}
+	if pending == "" || pending == connectingSerial {
+		return
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(
+		`INSERT OR REPLACE INTO revoked_certs (serial, server_id, revoked_at) VALUES (?, ?, ?)`,
+		pending, serverID, time.Now().UTC().Format(time.RFC3339Nano),
+	); err != nil {
+		return
+	}
+	if _, err := tx.Exec(`UPDATE servers SET pending_revoke_serial = '' WHERE id = ?`, serverID); err != nil {
+		return
+	}
+	tx.Commit()
+}
+
 func (s *store) isRevoked(serial string) bool {
 	var n int
 	s.db.QueryRow(`SELECT COUNT(1) FROM revoked_certs WHERE serial = ?`, serial).Scan(&n)

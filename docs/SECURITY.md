@@ -60,11 +60,22 @@ Properties this guarantees:
   (agent offline past expiry), the agent falls back to a manual re-registration flow
   requiring a fresh bootstrap token from the dashboard — this is an intentional
   fail-closed behavior, not silent re-trust.
-  **Not yet implemented**: certs are issued with a fixed 30-day TTL
-  (`apps/controlplane/http.go` `handleRegister`) and there is no renewal
-  capability/endpoint yet — an agent whose cert expires must be manually
-  re-registered with a fresh bootstrap token today. Auto-rotation before expiry is
-  tracked as a known gap in `SYSTEM.md`.
+  **Implemented as described**: certs are issued with a fixed 30-day TTL
+  (`agentCertTTL`, `apps/controlplane/ca.go`). Once less than 7 days remain
+  (`certRenewalWindow`, `apps/agent/connect.go`), `renewalLoop` sends a
+  `proto.MsgRenewRequest` over the agent's *existing* mTLS session — authenticated
+  purely by that connection's already-verified client certificate, no bootstrap token
+  involved — and `gateway.renewAgentCert` (`apps/controlplane/gateway.go`) signs a
+  fresh certificate bound to the same `server_id` (never trusting the CSR's requested
+  subject). The certificate being replaced is *not* revoked immediately: it's staged in
+  `servers.pending_revoke_serial` and only actually added to `revoked_certs` once the
+  agent is observed connecting with the new serial (`store.promotePendingRevocation`,
+  called on every `gateway.handleConn`) — so a failed disk write on the agent's side
+  during renewal leaves it still able to reconnect with its old (still valid, not yet
+  revoked) certificate, rather than stranding it with neither cert valid. If the agent
+  never reconnects with a new cert at all (offline past its old cert's natural expiry),
+  it falls back to the same manual re-registration flow as before, exactly as this
+  section originally specified. See `SERVERAVATAR_PARITY.md` SRV-001 for test coverage.
 - The Agent CA's private key is held in a dedicated, tightly access-controlled service
   (e.g. `step-ca` or HSM-backed KMS in later stages), separate from the general
   application database, so a control-plane app-tier compromise doesn't automatically

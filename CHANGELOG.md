@@ -2,6 +2,51 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-23 — Agent certificate auto-renewal
+
+- **Implemented agent client-certificate auto-renewal** (`docs/SECURITY.md` §2,
+  `docs/SYSTEM.md` §21), closing the last open item from the initial registration/mTLS
+  work. Previously an agent whose 30-day certificate expired had no recovery path
+  short of manual re-registration with a fresh bootstrap token — now, once less than 7
+  days remain, `apps/agent/connect.go`'s `renewalLoop` requests a fresh certificate over
+  the agent's *existing*, already-authenticated mTLS session (new
+  `proto.MsgRenewRequest`/`MsgRenewResponse` wire messages) — no bootstrap token
+  involved, matching the security-trust-model design that was written but not yet
+  built.
+- `gateway.renewAgentCert` (`apps/controlplane/gateway.go`) signs the new certificate
+  bound to the `server_id` it already derived from the connection's verified peer
+  certificate — never from the CSR's requested subject, so an agent can only ever renew
+  its own identity.
+- The certificate being replaced is **not** revoked immediately. It's staged in a new
+  `servers.pending_revoke_serial` column (idempotent migration in `db.go`) and only
+  actually added to `revoked_certs` once the agent is observed reconnecting with its
+  new serial (`store.promotePendingRevocation`, called on every `gateway.handleConn`).
+  This closes a real security gap (an old-but-not-yet-expired certificate silently
+  staying valid forever after rotation, invisible to a later "revoke this server")
+  without introducing a new one (a disk-write failure mid-renewal stranding the agent
+  with no valid credential at all) — deliberately mirroring the "never apply a
+  possibly-lockout change as a single irreversible step" principle `SECURITY.md` §5
+  already established for the (still Phase 2) SSH/firewall commit-confirm flow, in a
+  simpler form suited to this specific risk.
+- Fixed a latent concurrency bug surfaced while adding the renewal request as a third
+  writer on the agent's connection: `heartbeatLoop`, `handleTask`, and now
+  `renewalLoop` all write to the same `net.Conn` from independent goroutines, but
+  nothing previously serialized those writes — concurrent `json.Encoder.Encode` calls
+  could have interleaved and corrupted the wire protocol. Introduced `envelopeSender`
+  (a small mutex-guarded wrapper) and a `sync.WaitGroup` that `runConnection` now waits
+  on before returning, so the identity fields a renewal may mutate in place are never
+  read by the next reconnect attempt while a background goroutine could still be
+  writing them.
+- Added 9 new tests: `apps/controlplane/gateway_test.go`
+  (`TestRenewAgentCertIssuesFreshCertBoundToServerID`,
+  `TestRenewAgentCertRejectsMalformedCSR`), two new `store_test.go` cases covering the
+  stage-then-promote revocation sequencing, and `apps/agent/register_test.go` (new file
+  — the agent binary previously had no test coverage at all) covering CSR generation,
+  atomic identity-file persistence, the renewal-window threshold, and certificate
+  expiry parsing. `go test -race ./...` passes.
+- Updated `docs/SECURITY.md`, `docs/API.md` (new wire messages), `docs/SYSTEM.md`, and
+  `docs/SERVERAVATAR_PARITY.md` (SRV-001) to match.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

@@ -64,22 +64,60 @@ func loadIdentity(dataDir string) (*identity, error) {
 	return &identity{ServerID: meta.ServerID, CertPEM: certPEM, KeyPEM: keyPEM, CAPEM: caPEM, GatewayAddr: meta.GatewayAddr}, nil
 }
 
+// generateKeyAndCSR creates a fresh ECDSA (P-256) key pair and a CSR for it.
+// commonName is whatever the caller wants to request — the control plane
+// never honors it (both handleRegister and gateway.renewAgentCert set the
+// issued certificate's CommonName from the server_id they've independently
+// authenticated, ignoring the CSR's requested subject entirely), so this is
+// purely a human-readable placeholder for anyone inspecting the CSR itself.
+func generateKeyAndCSR(commonName string) (*ecdsa.PrivateKey, []byte, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, nil, fmt.Errorf("generate key: %w", err)
+	}
+	csrTmpl := &x509.CertificateRequest{Subject: pkix.Name{CommonName: commonName}}
+	csrDER, err := x509.CreateCertificateRequest(rand.Reader, csrTmpl, key)
+	if err != nil {
+		return nil, nil, fmt.Errorf("create CSR: %w", err)
+	}
+	csrPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
+	return key, csrPEM, nil
+}
+
+// writeIdentityFiles atomically (write-temp-then-rename) persists a cert/key
+// pair to dataDir, so a process crash or power loss mid-write can never
+// leave the agent with a half-written, unusable certificate file — the
+// rename is the only step that can be observed as "done" by anything else
+// reading these paths (loadIdentity, or the agent's own next restart).
+func writeIdentityFiles(dataDir string, certPEM, keyPEM []byte) error {
+	certPath, keyPath, _, _ := identityPaths(dataDir)
+	if err := atomicWriteFile(certPath, certPEM, 0600); err != nil {
+		return fmt.Errorf("persist certificate: %w", err)
+	}
+	if err := atomicWriteFile(keyPath, keyPEM, 0600); err != nil {
+		return fmt.Errorf("persist key: %w", err)
+	}
+	return nil
+}
+
+func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, perm); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
 // register performs the one-time bootstrap-token-for-certificate exchange
 // against the control plane's public API (plain server-TLS; the agent has
 // no client cert yet — that's the whole point of this call). The bootstrap
 // token is read once from the caller-supplied value and is never written to
 // disk or logged; only the resulting certificate and identifiers persist.
 func register(apiAddr, token, dataDir string) (*identity, error) {
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	key, csrPEM, err := generateKeyAndCSR("pending-registration")
 	if err != nil {
-		return nil, fmt.Errorf("generate key: %w", err)
+		return nil, err
 	}
-	csrTmpl := &x509.CertificateRequest{Subject: pkix.Name{CommonName: "pending-registration"}}
-	csrDER, err := x509.CreateCertificateRequest(rand.Reader, csrTmpl, key)
-	if err != nil {
-		return nil, fmt.Errorf("create CSR: %w", err)
-	}
-	csrPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
 
 	reqBody, _ := json.Marshal(map[string]string{"token": token, "csr_pem": string(csrPEM)})
 	httpClient := &http.Client{Timeout: 30 * time.Second}
@@ -112,13 +150,10 @@ func register(apiAddr, token, dataDir string) (*identity, error) {
 	if err := os.MkdirAll(dataDir, 0700); err != nil {
 		return nil, fmt.Errorf("create data dir: %w", err)
 	}
-	certPath, keyPath, caPath, metaPath := identityPaths(dataDir)
-	if err := os.WriteFile(certPath, []byte(rr.CertPEM), 0600); err != nil {
+	if err := writeIdentityFiles(dataDir, []byte(rr.CertPEM), keyPEM); err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(keyPath, keyPEM, 0600); err != nil {
-		return nil, err
-	}
+	_, _, caPath, metaPath := identityPaths(dataDir)
 	if err := os.WriteFile(caPath, []byte(rr.CAPEM), 0600); err != nil {
 		return nil, err
 	}
