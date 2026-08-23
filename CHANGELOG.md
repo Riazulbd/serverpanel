@@ -2,6 +2,47 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-23 — Agent certificate auto-renewal (SRV-001 known gap closed)
+
+- **Implemented proactive agent certificate renewal**, closing the top documented gap
+  in the mTLS trust model (`SECURITY.md` §2): agent client certificates were issued
+  with a fixed 30-day TTL and, until now, had no renewal path at all — an agent whose
+  certificate expired had to be manually re-registered with a fresh bootstrap token.
+- Added a new protocol exchange (`packages/proto`: `MsgRenewCSR`/`MsgRenewCert`,
+  `proto.AgentCertTTL`, `proto.AgentCertRenewalWindow`) carried over an agent's
+  *existing, already-authenticated* mTLS session — deliberately not a separate HTTP
+  endpoint or credential, matching the trust model's own stated design: the session
+  itself, already verified against the certificate being renewed, is the only
+  credential. The CA (`gateway.handleRenewCSR`) ignores the CSR's requested Subject
+  and binds the new certificate to the `server_id` it already derived from the current
+  certificate, exactly like initial registration.
+- `apps/agent/renew.go`: a per-connection loop checks the current certificate's expiry
+  hourly; once inside the 10-day renewal window it generates a fresh key/CSR, requests
+  renewal, and — on success — persists the new cert+key to disk (write-temp-then-
+  rename, so a crash mid-write can't leave a truncated file) and closes the connection
+  to force `apps/agent/main.go`'s existing reconnect loop to redial with the new
+  identity (that loop now reloads identity from disk before every redial). A failed
+  renewal attempt is logged and retried next cycle; the current certificate and
+  connection are left alone either way.
+- Added `cert_expires_at` to the `servers` table (schema + idempotent migration) so
+  expiry is now visible via `store.get`/`store.list`, not just implicit in the
+  certificate bytes.
+- `apps/controlplane/gateway.go`'s TLS listener setup was split into
+  `newTLSListener`/`serve` (behavior unchanged for `main.go`) specifically so tests
+  could bind an ephemeral port and drive the gateway with a real TLS client — the
+  gateway/agent wire protocol previously had zero automated coverage at the transport
+  layer (only the HTTP `/agents/register` endpoint was tested). New
+  `apps/controlplane/gateway_test.go` dials the real listener with real client
+  certificates end to end, covering a full renewal issuing a new serial for the same
+  `server_id`, and a malformed renewal request being rejected without dropping the
+  session.
+- Full suite: 64 test functions (up from 61), `go vet`/`gofmt` clean, `go test
+  ./... -race` clean.
+- Updated `SYSTEM.md`, `SECURITY.md`, `TESTING.md`, and
+  `docs/SERVERAVATAR_PARITY.md` (SRV-001) to reflect auto-renewal as implemented and
+  tested; the CA's isolation as its own trust boundary (a separate, pre-existing gap)
+  remains open.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

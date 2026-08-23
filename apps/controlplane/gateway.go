@@ -41,13 +41,25 @@ func newGateway(ca *agentCA, st *store) *gateway {
 }
 
 func (g *gateway) listenAndServe(addr string) error {
-	certPEM, keyPEM, err := g.ca.signServerCert([]string{"localhost", "127.0.0.1", "serverpanel-gateway"})
+	ln, err := g.newTLSListener(addr)
 	if err != nil {
 		return err
 	}
+	log.Printf("agent gateway (mTLS) listening on %s", ln.Addr())
+	return g.serve(ln)
+}
+
+// newTLSListener builds the mTLS listener without starting the accept loop,
+// so tests can bind an ephemeral port (":0") and discover the real address
+// via ln.Addr() before calling serve.
+func (g *gateway) newTLSListener(addr string) (net.Listener, error) {
+	certPEM, keyPEM, err := g.ca.signServerCert([]string{"localhost", "127.0.0.1", "serverpanel-gateway"})
+	if err != nil {
+		return nil, err
+	}
 	cert, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	cfg := &tls.Config{
@@ -57,17 +69,17 @@ func (g *gateway) listenAndServe(addr string) error {
 		MinVersion:   tls.VersionTLS13,
 	}
 
-	ln, err := tls.Listen("tcp", addr, cfg)
-	if err != nil {
-		return err
-	}
-	log.Printf("agent gateway (mTLS) listening on %s", addr)
+	return tls.Listen("tcp", addr, cfg)
+}
 
+// serve runs the accept loop against an already-bound listener. It returns
+// once Accept starts failing (e.g. the listener was closed), rather than
+// looping on a permanently broken listener forever.
+func (g *gateway) serve(ln net.Listener) error {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			log.Printf("gateway accept error: %v", err)
-			continue
+			return err
 		}
 		go g.handleConn(conn)
 	}
@@ -173,8 +185,46 @@ func (g *gateway) handleConn(conn net.Conn) {
 					}
 				}
 			}
+		case proto.MsgRenewCSR:
+			if env.RenewCSR != nil {
+				g.handleRenewCSR(sess, serverID, env.RenewCSR.CSRPEM)
+			}
 		}
 	}
+}
+
+// handleRenewCSR issues a fresh client certificate for an already-connected
+// agent, replacing the one it authenticated this very session with. Trust
+// for this comes entirely from the caller already having passed mTLS
+// handshake verification against a non-revoked certificate (handleConn,
+// above) — there is no separate credential to check, matching the rotation
+// model in docs/SECURITY.md §2. The CSR's own requested Subject is ignored,
+// exactly like initial registration (ca.signAgentCSR): the issued
+// certificate's identity always comes from serverID, the value the gateway
+// itself derived from the current, already-trusted certificate, never from
+// anything the agent asserts in the request.
+//
+// A failure here (malformed CSR, CA error) is reported back to the agent
+// and logged, but never closes the session or revokes the still-valid
+// certificate it's using right now — a renewal attempt that fails must
+// leave the agent exactly as connected as it was before trying.
+func (g *gateway) handleRenewCSR(sess *agentSession, serverID, csrPEM string) {
+	reply := proto.Envelope{Type: proto.MsgRenewCert, RenewCert: &proto.RenewCert{}}
+
+	certPEM, serial, err := g.ca.signAgentCSR([]byte(csrPEM), serverID, proto.AgentCertTTL)
+	if err != nil {
+		g.store.log(serverID, "", "agent.cert_renewal_failed", err.Error())
+		reply.RenewCert.Error = err.Error()
+	} else {
+		notAfter := time.Now().UTC().Add(proto.AgentCertTTL)
+		g.store.markRenewedCert(serverID, serial.String(), notAfter)
+		reply.RenewCert.CertPEM = string(certPEM)
+		reply.RenewCert.NotAfter = notAfter
+	}
+
+	sess.mu.Lock()
+	_ = sess.enc.Encode(reply)
+	sess.mu.Unlock()
 }
 
 // dispatch sends a task to a connected agent and waits (bounded by ctx) for

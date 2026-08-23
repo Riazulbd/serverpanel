@@ -18,6 +18,8 @@ const (
 	MsgTask      MessageType = "task"       // gateway -> agent, requests a capability run
 	MsgTaskEvent MessageType = "task_event" // agent -> gateway, progress/result of a task
 	MsgAck       MessageType = "ack"        // either direction, generic acknowledgement
+	MsgRenewCSR  MessageType = "renew_csr"  // agent -> gateway, requests a fresh client cert over the already-authenticated session
+	MsgRenewCert MessageType = "renew_cert" // gateway -> agent, terminal reply to a renew_csr (new cert, or an error)
 )
 
 // Envelope is the outer message wrapper. Exactly one of the typed payload
@@ -28,7 +30,45 @@ type Envelope struct {
 	Heartbeat *Heartbeat  `json:"heartbeat,omitempty"`
 	Task      *Task       `json:"task,omitempty"`
 	TaskEvent *TaskEvent  `json:"task_event,omitempty"`
+	RenewCSR  *RenewCSR   `json:"renew_csr,omitempty"`
+	RenewCert *RenewCert  `json:"renew_cert,omitempty"`
 }
+
+// RenewCSR is sent by the agent, over its existing mTLS session, when its
+// current client certificate is approaching expiry. It carries no
+// credential of its own — trust for the renewal comes entirely from the
+// fact that this message arrives on a connection the gateway already
+// authenticated via the agent's *current, still-valid* certificate (see
+// gateway.handleConn), matching the documented rotation model in
+// docs/SECURITY.md §2. There is deliberately no separate renewal HTTP
+// endpoint: the mTLS session itself is the credential.
+type RenewCSR struct {
+	CSRPEM string `json:"csr_pem"`
+}
+
+// RenewCert is the terminal reply to a RenewCSR: either a freshly issued
+// certificate for the same server identity, or an error the agent should
+// log and retry later (its current certificate remains valid and the
+// connection stays up either way).
+type RenewCert struct {
+	CertPEM  string    `json:"cert_pem,omitempty"`
+	NotAfter time.Time `json:"not_after,omitempty"`
+	Error    string    `json:"error,omitempty"`
+}
+
+// AgentCertTTL is the validity period of an agent client certificate,
+// applied identically at initial registration (apiServer.handleRegister)
+// and at every subsequent renewal (gateway.handleRenewCSR) — renewal
+// issues a same-length certificate, it does not extend validity further
+// into the future than a fresh registration would.
+const AgentCertTTL = 30 * 24 * time.Hour
+
+// AgentCertRenewalWindow is how long before expiry an agent proactively
+// requests a renewed certificate (see docs/SECURITY.md §2). It must leave
+// enough margin that a control plane or network outage lasting several
+// days doesn't turn into a missed renewal and a forced manual
+// re-registration.
+const AgentCertRenewalWindow = 10 * 24 * time.Hour
 
 // Hello is sent by the agent immediately after the mTLS handshake completes,
 // confirming which server identity it believes it is (the gateway also

@@ -54,17 +54,28 @@ Properties this guarantees:
   certificate issued by the internal Agent CA, and the agent verifies the gateway's
   certificate/pinned CA to prevent MITM or connecting to a spoofed endpoint.
   **Implemented as described** — see `apps/controlplane/gateway.go` `handleConn`.
-- Client certs are **short-lived** (e.g. 30–90 days) and **auto-rotated**: before
-  expiry, the agent requests renewal authenticated by its current still-valid cert (no
-  shared long-lived secret is ever reused for renewal). If a renewal window is missed
-  (agent offline past expiry), the agent falls back to a manual re-registration flow
-  requiring a fresh bootstrap token from the dashboard — this is an intentional
-  fail-closed behavior, not silent re-trust.
-  **Not yet implemented**: certs are issued with a fixed 30-day TTL
-  (`apps/controlplane/http.go` `handleRegister`) and there is no renewal
-  capability/endpoint yet — an agent whose cert expires must be manually
-  re-registered with a fresh bootstrap token today. Auto-rotation before expiry is
-  tracked as a known gap in `SYSTEM.md`.
+- Client certs are **short-lived** (`proto.AgentCertTTL` = 30 days) and
+  **auto-rotated**: `proto.AgentCertRenewalWindow` (10 days) before expiry, the agent
+  requests renewal over its *existing* mTLS session (`proto.MsgRenewCSR` /
+  `gateway.handleRenewCSR`, `apps/agent/renew.go`) — no shared long-lived secret is
+  reused, and there is no separate renewal HTTP endpoint at all: the session itself,
+  already authenticated by the certificate being renewed, is the only credential. The
+  CA ignores the CSR's requested Subject and binds the new certificate to the
+  `server_id` the gateway independently derived from the *current* certificate, exactly
+  like initial registration. If a renewal window is missed (agent offline past expiry,
+  or every renewal attempt during the window failed), the certificate simply expires
+  and the agent falls back to a manual re-registration flow requiring a fresh bootstrap
+  token from the dashboard — this is an intentional fail-closed behavior, not silent
+  re-trust. **Implemented as described** — see `apps/controlplane/gateway_test.go` for
+  the real-mTLS integration tests (successful renewal bound to the same `server_id`
+  with a new serial; a malformed renewal request rejected without dropping the
+  session).
+  **Known gap**: the new certificate/key are persisted to disk as two separate atomic
+  (write-temp-then-rename) file operations, not a single transaction — a crash on the
+  agent host in the narrow window between the two renames could in principle leave a
+  mismatched cert/key pair. Recovery from that state is the same manual
+  re-registration fallback already described above, not a new failure mode, but it
+  hasn't been exercised by an actual fault-injection test.
 - The Agent CA's private key is held in a dedicated, tightly access-controlled service
   (e.g. `step-ca` or HSM-backed KMS in later stages), separate from the general
   application database, so a control-plane app-tier compromise doesn't automatically

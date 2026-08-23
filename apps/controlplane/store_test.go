@@ -132,7 +132,7 @@ func TestRevokeServerBlocksReuseOfCertSerial(t *testing.T) {
 	if err != nil {
 		t.Fatalf("createServer: %v", err)
 	}
-	st.markIssuedCert(id, "42")
+	st.markIssuedCert(id, "42", time.Now().Add(30*24*time.Hour))
 
 	if st.isRevoked("42") {
 		t.Fatal("cert should not be revoked yet")
@@ -152,6 +152,34 @@ func TestRevokeServerBlocksReuseOfCertSerial(t *testing.T) {
 	}
 }
 
+func TestMarkRenewedCertUpdatesSerialAndExpiryWithoutChangingStatus(t *testing.T) {
+	st := newTestStore(t)
+	id, _, err := st.createServer("web-renew", "", nil, time.Hour, "admin@example.com")
+	if err != nil {
+		t.Fatalf("createServer: %v", err)
+	}
+	firstExpiry := time.Now().Add(30 * 24 * time.Hour)
+	st.markIssuedCert(id, "100", firstExpiry)
+	st.setConnected(id, true)
+
+	secondExpiry := time.Now().Add(60 * 24 * time.Hour)
+	st.markRenewedCert(id, "101", secondExpiry)
+
+	rec, ok := st.get(id)
+	if !ok {
+		t.Fatal("server should still exist after renewal")
+	}
+	if rec.CertSerial != "101" {
+		t.Fatalf("cert_serial = %q, want %q", rec.CertSerial, "101")
+	}
+	if rec.Status != statusConnected {
+		t.Fatalf("status = %q, want %q (renewal must not change connection status)", rec.Status, statusConnected)
+	}
+	if got, want := rec.CertExpiresAt.Unix(), secondExpiry.Unix(); got != want {
+		t.Fatalf("cert_expires_at = %d, want %d", got, want)
+	}
+}
+
 func TestRevokeServerRejectsUnknownServer(t *testing.T) {
 	st := newTestStore(t)
 	if err := st.revokeServer("srv_doesnotexist", "admin@example.com"); err == nil {
@@ -165,7 +193,7 @@ func TestSetConnectedPreservesRevokedStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("createServer: %v", err)
 	}
-	st.markIssuedCert(id, "7")
+	st.markIssuedCert(id, "7", time.Now().Add(30*24*time.Hour))
 	if err := st.revokeServer(id, "admin@example.com"); err != nil {
 		t.Fatalf("revokeServer: %v", err)
 	}

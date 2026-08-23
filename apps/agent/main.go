@@ -51,7 +51,7 @@ func main() {
 
 	backoff := time.Second
 	for {
-		err := runConnection(ctx, id, reg)
+		err := runConnection(ctx, id, *dataDir, reg)
 		if ctx.Err() != nil {
 			log.Println("shutting down")
 			return
@@ -64,6 +64,16 @@ func main() {
 		}
 		if backoff < 30*time.Second {
 			backoff *= 2
+		}
+
+		// Reload identity from disk before redialing: a certificate
+		// renewal (renew.go) persists a new cert+key to disk and then
+		// deliberately closes the connection to force exactly this
+		// reconnect. Reusing the in-memory `id` from before the loop
+		// started would mean redialing with the certificate that was
+		// just renewed away from, instead of the freshly issued one.
+		if fresh, loadErr := loadIdentity(*dataDir); loadErr == nil {
+			id = fresh
 		}
 	}
 }

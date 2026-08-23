@@ -159,6 +159,8 @@ connection carries newline-delimited JSON `Envelope`s in both directions
 {"type": "heartbeat", "heartbeat": {"sent_at": "...", "uptime_secs": 0, "load_avg_1": 0, "mem_used_pct": 0, "disk_used_pct": 0}}
 {"type": "task", "task": {"id": "...", "capability": "...", "params": {}, "issued_at": "..."}}
 {"type": "task_event", "task_event": {"task_id": "...", "status": "queued|running|succeeded|failed|rejected", "message": "...", "detail": "...", "at": "..."}}
+{"type": "renew_csr", "renew_csr": {"csr_pem": "..."}}
+{"type": "renew_cert", "renew_cert": {"cert_pem": "...", "not_after": "...", "error": "..."}}
 {"type": "ack"}
 ```
 
@@ -170,6 +172,16 @@ HTTP handler) until it sees a terminal event for the task ID it sent, or its con
 deadline expires. There is no message type for a free-form command — `capability` must
 be a name in `packages/capabilities`'s fixed registry, or the agent returns `rejected`
 without executing anything.
+
+At any point in an established session the agent may also send `renew_csr` — this is
+how a client certificate is rotated before its 30-day expiry (see `SECURITY.md` §2),
+over this same session rather than a separate endpoint, since the session is already
+authenticated by the certificate being renewed. `gateway.handleRenewCSR` signs a new
+certificate bound to the `server_id` it already derived from that certificate (the
+CSR's own Subject is ignored) and replies with exactly one `renew_cert`: either
+`cert_pem`/`not_after` on success, or a non-empty `error` — never both. A rejected
+renewal does not close the session; the agent keeps using its current, still-valid
+certificate and retries later.
 
 ## 4. Capability reference
 

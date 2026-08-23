@@ -47,12 +47,12 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Agent command**: n/a (registration precedes capability dispatch).
 - **DB tables**: `servers`, `bootstrap_tokens`, `revoked_certs`.
 - **Required permission**: authenticated session (single-user model today — see ORG-001).
-- **Security considerations**: single-use/short-lived hashed bootstrap tokens; certificate identity independently derived from the mTLS handshake, never trusted from agent-asserted data; revocation checked every handshake.
-- **Test coverage**: `apps/controlplane/http_test.go` (`TestServerCreateListRevokeFlow`, `TestRegisterEndpointRejectsBadToken`), `apps/controlplane/store_test.go`.
+- **Security considerations**: single-use/short-lived hashed bootstrap tokens; certificate identity independently derived from the mTLS handshake, never trusted from agent-asserted data; revocation checked every handshake; certificates auto-renew over the existing mTLS session 10 days before their 30-day expiry (`proto.MsgRenewCSR`/`gateway.handleRenewCSR`, `apps/agent/renew.go`) — no separate renewal credential, the CA ignores the CSR's requested Subject and rebinds to the `server_id` already derived from the certificate being renewed.
+- **Test coverage**: `apps/controlplane/http_test.go` (`TestServerCreateListRevokeFlow`, `TestRegisterEndpointRejectsBadToken`), `apps/controlplane/store_test.go`, `apps/controlplane/gateway_test.go` (`TestGatewayRenewCSRIssuesFreshCertBoundToSameServerID`, `TestGatewayRenewCSRRejectsMalformedCSRWithoutDroppingSession` — real mTLS dial against the real gateway listener, not a mocked transport).
 - **Current status**: `COMPLETE`
-- **Completion date**: 2026-08-14
-- **Known differences**: no agent certificate auto-renewal before 30-day expiry yet.
-- **Reason**: scoped out of the initial secure-foundation pass; tracked in `SYSTEM.md` §21.
+- **Completion date**: 2026-08-23
+- **Known differences**: the renewed cert+key are persisted as two separate atomic (write-temp-then-rename) file operations rather than one transaction — a crash on the agent host in the narrow window between them could leave a mismatched pair; recovery is the same manual re-registration fallback as a fully missed renewal window, just not yet exercised by a fault-injection test. The CA itself is still in-process rather than a separately isolated trust boundary (unchanged from before, see SECURITY.md §2).
+- **Reason**: initial secure-foundation pass covered issuance/revocation; renewal was the flagged follow-up and is now implemented and tested. The CA-isolation gap is a deliberate infrastructure-layering decision for production deployment, not a code change — tracked in `SYSTEM.md` §21.
 
 ### SRV-002 — Hosting stack installation (LEMP)
 - **Category**: Server Management
@@ -359,3 +359,7 @@ establish the tracking process and close the single highest-priority gap
   BAK-001/BAK-002 reflecting this session's backup-restore implementation. ~60
   capabilities enumerated overall (detailed + summary), the large majority honestly
   `NOT_STARTED`.
+- **2026-08-23**: SRV-001 stays `COMPLETE` but its known-differences note is updated —
+  agent certificate auto-renewal (the gap this entry had flagged) is now implemented
+  and covered by real-mTLS integration tests; see the CHANGELOG entry of the same date.
+  No status/count changes to §3 (SRV-001 was already counted as `COMPLETE`).

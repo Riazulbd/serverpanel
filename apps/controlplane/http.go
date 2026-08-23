@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/riazulbd/serverpanel/packages/proto"
 )
 
 // apiServer is the public-facing HTTP API a browser dashboard (and, later,
@@ -100,12 +102,12 @@ func (a *apiServer) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	certPEM, serial, err := a.ca.signAgentCSR([]byte(req.CSRPEM), serverID, 30*24*time.Hour)
+	certPEM, serial, err := a.ca.signAgentCSR([]byte(req.CSRPEM), serverID, proto.AgentCertTTL)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, fmt.Sprintf("could not sign certificate: %v", err))
 		return
 	}
-	a.store.markIssuedCert(serverID, serial.String())
+	a.store.markIssuedCert(serverID, serial.String(), time.Now().UTC().Add(proto.AgentCertTTL))
 
 	writeJSON(w, http.StatusOK, map[string]string{
 		"server_id":    serverID,

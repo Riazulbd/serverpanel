@@ -12,6 +12,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/riazulbd/serverpanel/packages/capabilities"
@@ -20,13 +21,37 @@ import (
 
 const agentVersion = "0.1.0-dev"
 
+// connWriter serializes writes to the connection's JSON encoder. Once
+// certificate renewal (renew.go) added a second long-lived goroutine that
+// writes to the same connection alongside heartbeatLoop, a bare
+// *json.Encoder was no longer safe: two Encode calls racing on the same
+// net.Conn can interleave their writes and corrupt the newline-delimited
+// JSON stream the gateway is decoding.
+type connWriter struct {
+	mu  sync.Mutex
+	enc *json.Encoder
+}
+
+func (w *connWriter) send(env proto.Envelope) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.enc.Encode(env)
+}
+
 // runConnection maintains one mTLS session to the gateway: sends Hello,
 // then loops sending periodic heartbeats and executing any Task the
 // gateway sends, replying with TaskEvents. The hosted services the agent
 // manages (nginx, php-fpm, mariadb, ...) run under systemd independent of
 // this connection — see docs/architecture.md §2 — so a dropped connection
 // here degrades orchestration/observability only, never site serving.
-func runConnection(ctx context.Context, id *identity, reg capabilities.Registry) error {
+//
+// It also runs certRenewalLoop (renew.go) for the lifetime of the session:
+// when the client certificate this connection authenticated with nears
+// expiry, that loop requests, receives, and persists a replacement, then
+// deliberately closes conn to force exactly this function to return —
+// main's reconnect loop reloads identity from disk before redialing, so the
+// next connection uses the freshly issued certificate.
+func runConnection(ctx context.Context, id *identity, dataDir string, reg capabilities.Registry) error {
 	cert, err := tls.X509KeyPair(id.CertPEM, id.KeyPEM)
 	if err != nil {
 		return err
@@ -49,10 +74,10 @@ func runConnection(ctx context.Context, id *identity, reg capabilities.Registry)
 	}
 	defer conn.Close()
 
-	enc := json.NewEncoder(conn)
+	cw := &connWriter{enc: json.NewEncoder(conn)}
 	dec := json.NewDecoder(bufio.NewReader(conn))
 
-	if err := enc.Encode(proto.Envelope{Type: proto.MsgHello, Hello: &proto.Hello{ServerID: id.ServerID, AgentVersion: agentVersion}}); err != nil {
+	if err := cw.send(proto.Envelope{Type: proto.MsgHello, Hello: &proto.Hello{ServerID: id.ServerID, AgentVersion: agentVersion}}); err != nil {
 		return err
 	}
 
@@ -70,25 +95,37 @@ func runConnection(ctx context.Context, id *identity, reg capabilities.Registry)
 	}
 	log.Printf("connected to gateway %s as %s", id.GatewayAddr, id.ServerID)
 
-	go heartbeatLoop(ctx, enc)
+	go heartbeatLoop(ctx, cw)
+
+	renewCertCh := make(chan proto.RenewCert, 1)
+	go certRenewalLoop(ctx, dataDir, id.CertPEM, conn, cw, renewCertCh)
 
 	for {
 		var env proto.Envelope
 		if err := dec.Decode(&env); err != nil {
 			return err
 		}
-		if env.Type != proto.MsgTask || env.Task == nil {
-			continue
+		switch env.Type {
+		case proto.MsgTask:
+			if env.Task != nil {
+				go handleTask(ctx, cw, reg, *env.Task)
+			}
+		case proto.MsgRenewCert:
+			if env.RenewCert != nil {
+				select {
+				case renewCertCh <- *env.RenewCert:
+				default:
+				}
+			}
 		}
-		go handleTask(ctx, enc, reg, *env.Task)
 	}
 }
 
-func handleTask(ctx context.Context, enc *json.Encoder, reg capabilities.Registry, task proto.Task) {
+func handleTask(ctx context.Context, cw *connWriter, reg capabilities.Registry, task proto.Task) {
 	send := func(ev proto.TaskEvent) {
 		ev.TaskID = task.ID
 		ev.At = time.Now().UTC()
-		_ = enc.Encode(proto.Envelope{Type: proto.MsgTaskEvent, TaskEvent: &ev})
+		_ = cw.send(proto.Envelope{Type: proto.MsgTaskEvent, TaskEvent: &ev})
 	}
 
 	send(proto.TaskEvent{Status: proto.TaskRunning, Message: "starting " + task.Capability})
@@ -111,7 +148,7 @@ func handleTask(ctx context.Context, enc *json.Encoder, reg capabilities.Registr
 	send(proto.TaskEvent{Status: proto.TaskSucceeded, Message: "ok", Detail: detail})
 }
 
-func heartbeatLoop(ctx context.Context, enc *json.Encoder) {
+func heartbeatLoop(ctx context.Context, cw *connWriter) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -126,7 +163,7 @@ func heartbeatLoop(ctx context.Context, enc *json.Encoder) {
 				MemUsedPct:  memUsedPct(),
 				DiskUsedPct: diskUsedPct(),
 			}
-			_ = enc.Encode(proto.Envelope{Type: proto.MsgHeartbeat, Heartbeat: &hb})
+			_ = cw.send(proto.Envelope{Type: proto.MsgHeartbeat, Heartbeat: &hb})
 		}
 	}
 }
