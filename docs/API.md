@@ -46,6 +46,9 @@ protected route; there is no route that skips it by omission.
 | `GET` | `/api/v1/servers/{id}/sites/{siteId}/backups` | List backups for a site, newest first |
 | `POST` | `/api/v1/servers/{id}/sites/{siteId}/backups` | Dispatch `backup.run` and persist the resulting backup record |
 | `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a previously recorded backup |
+| `GET` | `/api/v1/servers/{id}/sites/{siteId}/crons` | Dispatch `cron.list` — live crontab read, not a cached table |
+| `POST` | `/api/v1/servers/{id}/sites/{siteId}/crons` | Dispatch `cron.create` |
+| `DELETE` | `/api/v1/servers/{id}/sites/{siteId}/crons/{cronId}` | Dispatch `cron.delete` |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -136,6 +139,31 @@ pre-restore safety backups taken automatically before anything was overwritten,
 isn't connected; `422` if `backup.restore` itself failed on the agent (the agent-side
 error message explains why, and any checkpoint already taken is named in it so it's
 never a silent loss).
+
+### `GET /api/v1/servers/{id}/sites/{siteId}/crons`
+Dispatches `cron.list` with `system_user` taken from the site's own recorded
+`system_user` (never caller-supplied). There is no `crons` table — the crontab
+installed on the agent is the only source of truth, so this always reflects what the
+server is actually running. → `200` with a JSON array of `{"id", "schedule", "command",
+"label"}`, or `[]` if the user has no crontab yet. `404` if the site doesn't exist on
+that server; `502` if the agent isn't connected.
+
+### `POST /api/v1/servers/{id}/sites/{siteId}/crons`
+```json
+{"schedule": "*/5 * * * *", "command": "php artisan schedule:run", "label": "Laravel scheduler"}
+```
+`schedule` must be exactly 5 whitespace-separated fields (numeric/`*`/range/step/list —
+named values like `mon-fri` are not supported yet); `command` and `label` must each be a
+single line (a newline could otherwise forge an extra crontab entry). Dispatches
+`cron.create`, which appends the job to the site's own crontab and runs it as that
+site's isolated system user — never root. `400` for a missing/invalid `schedule` or
+`command`; `404` if the site doesn't exist on that server; `502` if the agent isn't
+connected; `422` if `cron.create` itself failed on the agent (e.g. a malformed
+schedule). → `201` with the created entry (`id`, `schedule`, `command`, `label`).
+
+### `DELETE /api/v1/servers/{id}/sites/{siteId}/crons/{cronId}`
+Dispatches `cron.delete`. `404` if the site doesn't exist on that server; `422` if no
+cron job with that id exists in the site's crontab. → `200 {"status": "deleted"}`.
 
 ### `POST /agents/register`
 ```json

@@ -163,6 +163,67 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Known differences**: same-server restore only — there is no capability to restore a backup onto a *different* server (that needs a transfer step first).
 - **Reason**: cross-server restore is coupled to cross-server migration/cloning, both explicitly Phase 2 (`product-plan.md` §9); tracked as a follow-up, not silently dropped.
 
+### SRV-005 — Cron job management
+- **Category**: Server Management
+- **Documentation page**: Server Management → "Cron Jobs"
+- **Short description**: Create, list, and remove scheduled cron jobs that run on a
+  managed server.
+- **Our implementation**: `cron.list` / `cron.create` / `cron.delete` (agent) manage the
+  crontab of the target application's own isolated system user directly via the
+  `crontab` binary (never a shell, content piped over stdin). Each managed entry is a
+  two-line pair — a `# serverpanel-cron id=<id> label=<base64>` marker followed by the
+  standard `<schedule> <command>` line — which `cron.list` parses back out; any
+  unmarked/pre-existing crontab content is left untouched. There is no `crons` table on
+  the control plane: the crontab itself is the single source of truth, so the dashboard
+  can never show a job that isn't actually scheduled (or hide one that is).
+- **Frontend**: site-detail "Cron jobs" panel — list with schedule/command/label,
+  "+ New cron job" modal, per-row delete with confirmation.
+- **Backend service**: `apiServer.handleListCrons` / `handleCreateCron` /
+  `handleDeleteCron` (`apps/controlplane/crons.go`).
+- **API endpoint(s)**: `GET/POST /api/v1/servers/{id}/sites/{siteId}/crons`,
+  `DELETE /api/v1/servers/{id}/sites/{siteId}/crons/{cronId}`.
+- **Agent command**: `cron.list`, `cron.create`, `cron.delete`.
+- **DB tables**: none (see "Our implementation" above) — `sites.system_user` is the
+  only stored value these routes depend on, and it's read server-side, never accepted
+  as client input.
+- **Required permission**: authenticated session; `system_user` is always resolved
+  server-side from the site record the route is scoped to, so a caller can only ever
+  manage cron jobs for a site (and therefore a system user) they can already see.
+- **Security considerations**: `validateCronSystemUser` rejects anything that isn't a
+  `site_*` isolated application user — there is no way to schedule a cron job as `root`
+  or any other account through this capability. The job itself still runs with whatever
+  privileges that site's own system user already has (the same boundary a deployed PHP
+  file already crosses), so this adds no new privilege beyond what site ownership
+  already grants. `validateCronSchedule`/`validateCronCommand`/`validateCronLabel` reject
+  anything containing a newline (which could otherwise forge an extra crontab line or a
+  fake marker) before any process is ever started, and the whole crontab is always
+  rewritten atomically as one `crontab -u <user> -` call from an in-memory list — never
+  a partial in-place edit of the file on disk.
+- **Test coverage**: `packages/capabilities/cron_test.go` — 12 tests covering system-user
+  allow-listing, schedule field validation (valid and malformed, including an injection
+  attempt), command/label newline and length rejection, a render→parse round trip, that
+  unmarked crontab content survives a parse, ID uniqueness, and that
+  `handleCronCreate`/`handleCronDelete` reject invalid input before any system call.
+  `apps/controlplane/crons_test.go` covers the HTTP-layer site-not-found and
+  missing-field boundaries. A live `crontab` binary is not available in this sandboxed
+  environment, so a full agent-side create→list→delete round trip against a real
+  crontab is `BLOCKED_EXTERNAL` — everything up to and including the exact argv/stdin
+  the agent would run is covered; only the final OS-level effect is unverified here.
+- **Current status**: `COMPLETE` (all logic implemented and unit-tested; the real-`crontab`
+  round trip itself is `BLOCKED_EXTERNAL`, matching how BAK-001/BAK-002 treat their
+  real-MariaDB verification)
+- **Completion date**: 2026-08-23
+- **Known differences**: named schedule values (`mon-fri`, `@daily`, etc.) are not
+  accepted — only numeric/`*`/range/step/list fields. Cron jobs can only target an
+  application's own system user, not arbitrary server-level (root) cron, and there is
+  no execution-history/output log yet.
+- **Reason**: numeric-only keeps the validator small and unambiguous; a preset picker
+  can translate common choices client-side without widening what the agent accepts.
+  Root-level cron is intentionally out of scope — it would reintroduce the
+  "unrestricted root command execution" risk this project's capability model exists to
+  avoid. Execution history requires either agent-side log capture or wrapping every job
+  in a logging shim, tracked as a follow-up rather than silently dropped.
+
 ### ACC-001 — Authentication, 2FA, session management
 - **Category**: Account Management
 - **Documentation page**: Account Management → "Update Account Info"
@@ -229,7 +290,6 @@ capability surface (per task-brief §3/§101), not just what's already built.
 |---|---|---|---|
 | SRV-003 | SSH/SFTP management, key management, port/root-login controls | `NOT_STARTED` | `product-plan.md` Phase 2 |
 | SRV-004 | Firewall (UFW) rule editing UI, Fail2Ban jail management | `PARTIAL` | Installed with safe defaults by `stack.install`; no rule-editing capability/UI yet |
-| SRV-005 | Cron job management | `NOT_STARTED` | |
 | SRV-006 | Supervisor/PM2 worker management | `NOT_STARTED` | |
 | SRV-007 | Process list / kill | `NOT_STARTED` | |
 | SRV-008 | Historical monitoring (CPU/RAM/disk/network graphs, alerts) | `PARTIAL` | Heartbeat carries current uptime/load/mem%/disk%; no history retention or alerting yet |
@@ -295,9 +355,9 @@ capability surface (per task-brief §3/§101), not just what's already built.
 
 | Status | Count (detailed entries) | Count (summary-table rows) |
 |---|---|---|
-| `COMPLETE` | 3 (SRV-001, BAK-002, ACC-001) | 1 (PROV-006) |
+| `COMPLETE` | 4 (SRV-001, SRV-005, BAK-002, ACC-001) | 1 (PROV-006) |
 | `PARTIAL` | 3 (SRV-002, APP-001, APP-002, DB-001, BAK-001 — 5 total, see note) | 6 |
-| `NOT_STARTED` | 0 | ~55 |
+| `NOT_STARTED` | 0 | ~54 |
 | `BLOCKED_EXTERNAL` | 0 (sub-scoped within BAK-001/BAK-002's db/full-scope MariaDB verification) | 0 |
 | `INTENTIONALLY_NOT_APPLICABLE` | 0 | 1 |
 

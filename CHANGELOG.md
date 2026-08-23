@@ -2,6 +2,39 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-23 — Cron job management
+
+- **Implemented `cron.list`/`cron.create`/`cron.delete`** (`packages/capabilities/cron.go`),
+  closing the SRV-005 parity gap. Cron jobs run as the target application's own
+  isolated `site_*` system user — never root; `validateCronSystemUser` rejects any
+  other value before a single system call is made. There is no `crons` table: the
+  crontab installed on the agent is the sole source of truth, read live on every
+  `cron.list` call, the same "no cached copy that can drift" pattern `site.set_status`
+  already uses for a site's enabled/disabled state. Each managed entry is written as a
+  `# serverpanel-cron id=<id> label=<base64>` marker line followed by a standard
+  `<schedule> <command>` line; the whole crontab is always rewritten atomically from an
+  in-memory list (`crontab -u <user> -`, content piped over stdin, never a shell or an
+  argv built from caller text) rather than edited in place, and any pre-existing
+  unmarked content in the file is left untouched. `schedule`/`command`/`label` are all
+  validated (5-field numeric cron syntax; no embedded newlines, which could otherwise
+  forge an extra crontab line or a fake marker; bounded length) before any process runs.
+- Wired the three capabilities into the control plane: `GET`/`POST
+  /api/v1/servers/{id}/sites/{siteId}/crons` and `DELETE .../crons/{cronId}`
+  (`apps/controlplane/crons.go`), each resolving `system_user` server-side from the
+  site record the route is already scoped to — never accepted as client input — and a
+  new "Cron jobs" panel per site in the dashboard (list, create modal, per-row delete
+  with confirmation).
+- Added 12 new capability-layer tests (system-user allow-listing, schedule validation
+  including an injection attempt, command/label newline and length rejection, a
+  render→parse round trip, unmarked-content preservation, ID uniqueness, and
+  pre-dispatch validation rejection) and 2 new control-plane tests (site-not-found and
+  missing-field HTTP boundaries). Full suite: 75 test functions, `go vet`/`gofmt` clean.
+  A live `crontab` binary isn't available in this sandboxed environment, so the actual
+  agent→OS round trip is `BLOCKED_EXTERNAL` (everything up to the exact
+  argv/stdin the agent would run is covered).
+- Updated `SYSTEM.md`, `API.md`, and `docs/SERVERAVATAR_PARITY.md` (SRV-005 promoted
+  from `NOT_STARTED` to a full `COMPLETE` detail block).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

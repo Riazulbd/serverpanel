@@ -80,7 +80,7 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | SSH/SFTP management, SSH-key mgmt, port mgmt, root-login controls | ⬜ Phase 2 |
 | Automatic security updates | ⬜ Phase 2 (`unattended-upgrades` integration) |
 | Service controls | ✅ `service.control`, allow-listed units/actions only |
-| Cron-job management | ⬜ Phase 2 |
+| Cron-job management | ✅ `cron.list/create/delete` — always runs as the site's own isolated system user (never root); crontab itself is the source of truth (no separate DB copy to drift) |
 | Process/worker management | ⬜ Phase 2 |
 | Disk-usage analysis, safe cleanup | ⬜ not started |
 | Server diagnostics | 🚧 `diagnostics.basic` (read-only service-state check); no
@@ -254,6 +254,11 @@ EXISTS`, applied on every `openDB` call — idempotent, no separate migration to
 | `sites` | id, server, domain, system user, docroot, app type, PHP version, status |
 | `backups` | id, server, site, scope, path, size, sha256, status, created_at |
 
+Cron jobs deliberately have no table: the crontab installed on the agent for a site's
+system user is the single source of truth (`cron.list` re-reads it live), the same
+pattern `site.set_status` uses for a site's enabled/disabled state — there is nothing
+in SQLite that could drift out of sync with what the server is actually running.
+
 No ORM — every query is a small, explicit SQL statement in `store.go`. All secrets
 (session tokens, bootstrap tokens) are stored only as SHA-256 hashes; passwords use
 bcrypt (cost 12); nothing is stored in plaintext.
@@ -262,8 +267,8 @@ bcrypt (cost 12); nothing is stored in plaintext.
 
 Full list with request/response shapes in `API.md`. Summary: `/api/v1/auth/*`
 (signup/login/logout/TOTP enroll+verify/MFA challenge/me), `/api/v1/servers*` (CRUD,
-revoke, task dispatch, sites, audit), `/agents/register` (the one unauthenticated
-agent-facing endpoint, secured by the bootstrap token itself), `/healthz`.
+revoke, task dispatch, sites, backups, cron jobs, audit), `/agents/register` (the one
+unauthenticated agent-facing endpoint, secured by the bootstrap token itself), `/healthz`.
 
 ## 10. Background jobs
 
@@ -297,8 +302,13 @@ Current capability list: `system.ping`, `service.control`, `diagnostics.basic`,
 `stack.install`, `site.create`, `site.set_php_version`, `site.set_status`,
 `app.wordpress_install`, `ssl.issue_letsencrypt`, `ssl.install_custom`, `db.create`,
 `db.delete`, `db.list`, `file.list`, `file.read`, `file.write`, `file.delete`,
-`backup.run`, `backup.restore`, `logs.tail`. Notably absent (by design, until reviewed
-and added): `git.deploy`, `cron.upsert`, `ssh.*`, `firewall.*`, `agent.self_update`.
+`backup.run`, `backup.restore`, `logs.tail`, `cron.list`, `cron.create`, `cron.delete`.
+`cron.*` is scoped the same way `file.*`/`backup.*` are: `system_user` must be one of
+the `site_*` isolated application users (`validateCronSystemUser`), never `root` or an
+arbitrary name, and the control plane never accepts `system_user` as client input for
+these routes — it is always read server-side from the site record the request is
+already scoped to (`apps/controlplane/crons.go`). Notably absent (by design, until
+reviewed and added): `git.deploy`, `ssh.*`, `firewall.*`, `agent.self_update`.
 
 ## 13. Installation and deployment
 
