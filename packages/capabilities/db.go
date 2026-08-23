@@ -3,6 +3,7 @@ package capabilities
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"regexp"
 
@@ -15,6 +16,16 @@ import (
 // before backtick-quoting and interpolating, never to accept an arbitrary
 // string into a CREATE DATABASE/USER statement.
 var identifierRe = regexp.MustCompile(`^[a-z][a-z0-9_]{0,30}$`)
+
+// dbResult is what db.create returns as its TaskEvent detail (JSON) — the
+// control plane parses this to persist a database record; see
+// apps/controlplane/databases.go handleCreateDatabase. Mirrors the
+// dispatch-then-persist-on-success pattern site.create/backup.run already
+// use (packages/capabilities/site.go siteResult).
+type dbResult struct {
+	Name      string `json:"name"`
+	OwnerUser string `json:"owner_user"`
+}
 
 func mariaDBConn() (*sql.DB, error) {
 	// Connects as root over the local Unix socket, matching MariaDB's
@@ -75,7 +86,11 @@ func handleDBCreate(ctx context.Context, params map[string]any, progress Progres
 		return "", fmt.Errorf("flush privileges: %w", err)
 	}
 
-	return fmt.Sprintf("database %q created, owned by user %q with grants scoped to that database only", name, owner), nil
+	out, err := json.Marshal(dbResult{Name: name, OwnerUser: owner})
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
 }
 
 func handleDBDelete(ctx context.Context, params map[string]any, progress Progress) (string, error) {

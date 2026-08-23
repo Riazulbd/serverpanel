@@ -2,6 +2,46 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-23 — Database management: control-plane persistence + dashboard UI
+
+- **Closed the DB-005 parity gap** flagged in the previous entry's tracker
+  (`docs/SERVERAVATAR_PARITY.md`, DB-001 "Known differences"): databases created via
+  `db.create` are now durable, listed, and deletable through the dashboard, following
+  the same dispatch-then-persist-on-success pattern `handleCreateSite`/
+  `handleCreateBackup` already established.
+- `packages/capabilities/db.go`: `handleDBCreate` now returns a JSON `dbResult`
+  (`{name, owner_user}`) instead of a plain sentence, so the control plane can parse and
+  persist it — the same shape change `site.create`'s `siteResult` introduced.
+- New `databases` table (`server_id`, `site_id`, `name`, `owner_user`, `status`,
+  `created_at` — no password column, ever) and `store` methods `createDatabase`/
+  `listDatabases`/`getDatabase`/`deleteDatabase`, each scoped by server ID the same way
+  `getSite`/`getBackup` are.
+- Three new endpoints (`apps/controlplane/databases.go`): `GET`/
+  `POST /api/v1/servers/{id}/sites/{siteId}/databases`,
+  `DELETE /api/v1/servers/{id}/databases/{databaseId}`. The owner password is generated
+  server-side (`generateDBPassword`, `crypto/rand`, 24 random bytes/base64url) — never
+  accepted from the caller, never stored after the one-time response that returns it.
+  `name`/`owner_user` are validated against the same identifier allow-list the agent
+  uses, at the control-plane layer, before a task is ever dispatched.
+- A "Databases" panel landed on the site-detail dashboard view (`web/index.html`): list
+  table, "+ New database" modal, and a delete action with a destructive-action confirm.
+- Added 7 new tests: `packages/capabilities/db_test.go` (identifier-allow-list and
+  password-length validation for `db.create`/`db.delete`, the layer that runs before
+  any MariaDB connection is attempted), `apps/controlplane/store_test.go`
+  (`TestDatabaseCreateListGetDeleteRoundTrip`), and `apps/controlplane/http_test.go`
+  (`TestDatabaseEndpointsRequireARealSite`, `TestCreateDatabaseRejectsInvalidIdentifiers`).
+  `go test ./...` now covers 68 test functions (was 61), all passing;
+  `go vet`/`gofmt -l` clean.
+- Updated `docs/SYSTEM.md` (§8 schema, §12 capability list), `docs/API.md` (three new
+  endpoint entries), `docs/TESTING.md` (updated counts/coverage description), and
+  `docs/SERVERAVATAR_PARITY.md` (DB-005 promoted to a detailed `COMPLETE` entry; DB-001
+  "Known differences" narrowed to MongoDB/DB-admin-UI only).
+- **Known remaining gap, unchanged by this pass**: the real agent-side
+  `CREATE DATABASE`/`CREATE USER`/`GRANT` round trip still requires a live MariaDB
+  instance to verify end-to-end — this environment has none, so that path remains
+  manually-verified-in-a-prior-session, the same documented limitation `backup.run`'s
+  db/full scope already carries.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

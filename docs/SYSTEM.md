@@ -253,6 +253,7 @@ EXISTS`, applied on every `openDB` call — idempotent, no separate migration to
 | `audit_log` | append-only: seq, timestamp, server, actor, action, detail |
 | `sites` | id, server, domain, system user, docroot, app type, PHP version, status |
 | `backups` | id, server, site, scope, path, size, sha256, status, created_at |
+| `databases` | id, server, site, name, owner_user, status, created_at (owner password is never stored — see §12) |
 
 No ORM — every query is a small, explicit SQL statement in `store.go`. All secrets
 (session tokens, bootstrap tokens) are stored only as SHA-256 hashes; passwords use
@@ -299,6 +300,12 @@ Current capability list: `system.ping`, `service.control`, `diagnostics.basic`,
 `db.delete`, `db.list`, `file.list`, `file.read`, `file.write`, `file.delete`,
 `backup.run`, `backup.restore`, `logs.tail`. Notably absent (by design, until reviewed
 and added): `git.deploy`, `cron.upsert`, `ssh.*`, `firewall.*`, `agent.self_update`.
+
+`db.create`'s owner password is generated server-side by the control plane
+(`generateDBPassword`/`databases.go`, `crypto/rand`, 24 bytes/base64url) and never
+accepted from the caller or persisted anywhere after the one-time response — the
+`databases` table records only `name`/`owner_user`/`status`, the same
+"credential shown once, never stored" model bootstrap tokens use.
 
 ## 13. Installation and deployment
 
