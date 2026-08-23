@@ -253,7 +253,7 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | APP-013 | Log Monitoring Suite (traffic analytics) | `NOT_STARTED` | |
 | APP-014 | Application-level WAF / AI-bot blocker | `NOT_STARTED` | |
 | APP-015 | Custom SSL upload | `PARTIAL` | `ssl.install_custom` capability exists agent-side; no dedicated dashboard UI |
-| APP-016 | Let's Encrypt SSL + auto-renewal | `PARTIAL` | `ssl.issue_letsencrypt` implemented; certbot's own renewal timer not yet wired up by `stack.install` |
+| APP-016 | Let's Encrypt SSL + auto-renewal | `COMPLETE` | `ssl.issue_letsencrypt` implemented; `stack.install` now explicitly enables and starts `certbot.timer` (idempotent step), so every certificate issued renews automatically twice daily via certbot's own scheduler; a successful renewal re-invokes the nginx installer plugin recorded at issuance time, which reloads nginx with the new cert — no separate deploy-hook needed |
 
 ### Database management — not yet started (DB-*)
 | ID | Feature | Status | Notes |

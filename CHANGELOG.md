@@ -2,6 +2,21 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-23 — Automatic SSL renewal
+
+- **Wired up certbot auto-renewal** (`packages/capabilities/stack.go`): `stack.install`
+  now has an explicit, idempotent step (`systemctl enable --now certbot.timer`) after
+  installing certbot, rather than assuming the package's default systemd preset leaves
+  the twice-daily renewal timer active. Every certificate issued via
+  `ssl.issue_letsencrypt` (which invokes `certbot --nginx`) records the nginx installer
+  plugin in its own `/etc/letsencrypt/renewal/<domain>.conf`, so a successful renewal
+  reloads nginx with the new certificate automatically — no separate deploy-hook was
+  needed. This closes `APP-016` in the parity tracker (was `PARTIAL`, now `COMPLETE`)
+  and removes SSL auto-renewal from Phase 1's remaining-gaps list in `SYSTEM.md`.
+- Updated `docs/SYSTEM.md` and `docs/SERVERAVATAR_PARITY.md` to reflect the new status;
+  the only remaining Phase 1 capability gap is agent certificate auto-rotation before
+  30-day expiry (tracked in `SECURITY.md` §2).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

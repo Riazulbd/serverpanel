@@ -140,6 +140,30 @@ func phase1LEMPSteps() []installStep {
 			},
 		},
 		{
+			// The certbot package ships a systemd timer (certbot.timer)
+			// that runs "certbot renew" twice daily, but Ubuntu's systemd
+			// preset policy for newly-installed packages varies by image
+			// (some minimal/cloud images ship "disable everything by
+			// default" presets), so installing the package alone doesn't
+			// reliably leave every certificate issued by ssl.issue_letsencrypt
+			// on an auto-renewing timer. This step makes that explicit and
+			// idempotent rather than assumed. Renewal itself re-invokes the
+			// nginx installer plugin (recorded in each certificate's
+			// /etc/letsencrypt/renewal/<domain>.conf by the original
+			// `certbot --nginx` issuance), so a successful renewal reloads
+			// nginx with the new certificate automatically — no separate
+			// deploy-hook is needed.
+			Name: "certbot auto-renewal timer",
+			Check: func(ctx context.Context) bool {
+				out, err := run(ctx, "systemctl", "is-active", "certbot.timer")
+				return err == nil && strings.TrimSpace(out) == "active"
+			},
+			Run: func(ctx context.Context) error {
+				_, err := run(ctx, "systemctl", "enable", "--now", "certbot.timer")
+				return err
+			},
+		},
+		{
 			Name:  "ufw",
 			Check: func(ctx context.Context) bool { return isPackageInstalled(ctx, "ufw") },
 			Run:   func(ctx context.Context) error { _, err := aptInstall(ctx, "ufw"); return err },
