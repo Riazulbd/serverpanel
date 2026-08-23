@@ -437,6 +437,117 @@ func (s *store) createBackup(serverID, siteID, scope, path, dbName string, sizeB
 	return rec, nil
 }
 
+type cronJobRecord struct {
+	ID        string
+	ServerID  string
+	SiteID    string
+	Schedule  string
+	Command   string
+	Comment   string
+	Enabled   bool
+	CreatedAt time.Time
+}
+
+// listCronJobs returns every persisted cron job for one site — enabled and
+// disabled alike, since the dashboard needs to show disabled jobs too, not
+// just the ones currently live in the crontab.
+func (s *store) listCronJobs(serverID, siteID string) []*cronJobRecord {
+	rows, err := s.db.Query(
+		`SELECT id, server_id, site_id, schedule, command, comment, enabled, created_at
+		 FROM cron_jobs WHERE server_id = ? AND site_id = ? ORDER BY created_at ASC`, serverID, siteID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var out []*cronJobRecord
+	for rows.Next() {
+		rec, err := scanCronJob(rows)
+		if err != nil {
+			continue
+		}
+		out = append(out, rec)
+	}
+	return out
+}
+
+// enabledCronJobs returns only the enabled jobs for one site — this is the
+// list that must exactly match what's live in the system user's crontab,
+// so every create/delete/toggle re-dispatches cron.sync with exactly this
+// set (see crons.go).
+func (s *store) enabledCronJobs(serverID, siteID string) []*cronJobRecord {
+	all := s.listCronJobs(serverID, siteID)
+	var out []*cronJobRecord
+	for _, j := range all {
+		if j.Enabled {
+			out = append(out, j)
+		}
+	}
+	return out
+}
+
+func (s *store) getCronJob(serverID, jobID string) (*cronJobRecord, bool) {
+	row := s.db.QueryRow(
+		`SELECT id, server_id, site_id, schedule, command, comment, enabled, created_at
+		 FROM cron_jobs WHERE id = ? AND server_id = ?`, jobID, serverID)
+	rec, err := scanCronJob(row)
+	if err != nil {
+		return nil, false
+	}
+	return rec, true
+}
+
+func (s *store) createCronJob(serverID, siteID, schedule, command, comment string) (*cronJobRecord, error) {
+	rec := &cronJobRecord{
+		ID: randID("cron"), ServerID: serverID, SiteID: siteID, Schedule: schedule,
+		Command: command, Comment: comment, Enabled: true, CreatedAt: time.Now().UTC(),
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO cron_jobs (id, server_id, site_id, schedule, command, comment, enabled, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, 1, ?)`,
+		rec.ID, rec.ServerID, rec.SiteID, rec.Schedule, rec.Command, rec.Comment,
+		rec.CreatedAt.Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return nil, err
+	}
+	return rec, nil
+}
+
+func (s *store) deleteCronJob(serverID, jobID string) error {
+	res, err := s.db.Exec(`DELETE FROM cron_jobs WHERE id = ? AND server_id = ?`, jobID, serverID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("cron job not found")
+	}
+	return nil
+}
+
+func (s *store) setCronJobEnabled(serverID, jobID string, enabled bool) error {
+	res, err := s.db.Exec(`UPDATE cron_jobs SET enabled = ? WHERE id = ? AND server_id = ?`, enabled, jobID, serverID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("cron job not found")
+	}
+	return nil
+}
+
+func scanCronJob(row rowScanner) (*cronJobRecord, error) {
+	var rec cronJobRecord
+	var createdAt string
+	if err := row.Scan(&rec.ID, &rec.ServerID, &rec.SiteID, &rec.Schedule, &rec.Command, &rec.Comment, &rec.Enabled, &createdAt); err != nil {
+		return nil, err
+	}
+	rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+	return &rec, nil
+}
+
 // listBackups returns backups for one site, newest first. siteID must be
 // non-empty: every backup this control plane creates is created through the
 // per-site endpoint (see backups.go), so there is always a site to scope

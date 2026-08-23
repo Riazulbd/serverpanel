@@ -46,6 +46,10 @@ protected route; there is no route that skips it by omission.
 | `GET` | `/api/v1/servers/{id}/sites/{siteId}/backups` | List backups for a site, newest first |
 | `POST` | `/api/v1/servers/{id}/sites/{siteId}/backups` | Dispatch `backup.run` and persist the resulting backup record |
 | `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a previously recorded backup |
+| `GET` | `/api/v1/servers/{id}/sites/{siteId}/crons` | List cron jobs for a site (enabled and disabled) |
+| `POST` | `/api/v1/servers/{id}/sites/{siteId}/crons` | Persist a cron job, then dispatch `cron.sync` for the whole site |
+| `DELETE` | `/api/v1/servers/{id}/crons/{cronId}` | Dispatch `cron.sync` without the job, then delete its record |
+| `POST` | `/api/v1/servers/{id}/crons/{cronId}/toggle` | Flip enabled/disabled, then dispatch `cron.sync` to match |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -137,6 +141,41 @@ isn't connected; `422` if `backup.restore` itself failed on the agent (the agent
 error message explains why, and any checkpoint already taken is named in it so it's
 never a silent loss).
 
+### `POST /api/v1/servers/{id}/sites/{siteId}/crons`
+```json
+{"schedule": "@daily", "command": "php /home/sites/site_x/artisan schedule:run", "comment": "Laravel scheduler"}
+```
+`schedule` is either a standard 5-field cron expression or one of the `@hourly`/
+`@daily`/`@weekly`/`@monthly`/`@yearly`/`@reboot`-style shortcuts. The job is persisted
+first, then `cron.sync` is dispatched with *every* currently-enabled job for the site
+(not just the new one) — the agent always receives the full desired state, never an
+incremental diff, so a retry can never duplicate or drop a line. If the agent rejects
+it (bad schedule/command, not connected), the just-persisted row is deleted again, so
+the database never records a job that isn't actually live on the server. → `201` with
+the `cronJobRecord` JSON (`ID`, `ServerID`, `SiteID`, `Schedule`, `Command`, `Comment`,
+`Enabled`, `CreatedAt`). `404` if the site doesn't exist; `400` for a missing
+schedule/command or once the site already has 100 jobs; `422` if `cron.sync` failed on
+the agent.
+
+### `GET /api/v1/servers/{id}/sites/{siteId}/crons`
+→ `200` with an array of `cronJobRecord`, oldest first (creation order). `404` if the
+site doesn't exist on that server.
+
+### `DELETE /api/v1/servers/{id}/crons/{cronId}`
+Dispatches `cron.sync` with the site's remaining enabled jobs (this one excluded)
+*before* deleting the database row — the reverse of create's ordering, so a failed
+sync leaves the job present and still tracked rather than the dashboard showing
+something that's already gone from the real crontab. → `200 {"status": "deleted"}`.
+`404` if the job doesn't exist on that server; `422` if the sync failed on the agent.
+
+### `POST /api/v1/servers/{id}/crons/{cronId}/toggle`
+Flips the job's `enabled` flag, then re-syncs the site's enabled-job set to match — a
+disabled job stays a fully-defined row (nothing to re-enter later) but is simply
+excluded from what `cron.sync` writes, which is what actually stops it running. A
+failed sync rolls the flag back rather than leaving the database and the live crontab
+disagreeing. → `200 {"enabled": bool}`. `404` if the job doesn't exist on that server;
+`422` if the sync failed on the agent.
+
 ### `POST /agents/register`
 ```json
 {"token": "<bootstrap token>", "csr_pem": "<PEM-encoded CSR>"}
@@ -178,7 +217,7 @@ The full allow-listed capability names `packages/capabilities.Default()` registe
 `diagnostics.basic`, `stack.install`, `site.create`, `site.set_php_version`,
 `site.set_status`, `app.wordpress_install`, `ssl.issue_letsencrypt`,
 `ssl.install_custom`, `db.create`, `db.delete`, `db.list`, `file.list`, `file.read`,
-`file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`.
+`file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`, `cron.sync`.
 
 ### `backup.restore`
 ```json
@@ -197,3 +236,27 @@ database or site files, a fresh checkpoint backup of the *current* state is take
 `backup.run` — its path is returned in the result's `checkpoints`, so a restore is
 always recoverable, never a one-way trip. Returns
 `{"scope", "archive_path", "checkpoints": [...], "restored_at"}` on success.
+
+### `cron.sync`
+```json
+{"system_user": "site_example", "jobs": [
+  {"id": "cron_ab12", "schedule": "@daily", "command": "php /home/sites/site_example/artisan schedule:run"}
+]}
+```
+Replaces the entire ServerPanel-managed block of `system_user`'s crontab (delimited by
+fixed marker comment lines) with exactly this job list — idempotent by construction, so
+a retried sync produces the same crontab rather than a duplicated one, and the reason
+the control plane never issues an incremental "add one line" command: `jobs` is always
+the complete current desired state for that user, read fresh from the `cron_jobs`
+table on every call. `system_user` must already exist and match the `site_`-prefixed
+naming `site.create` assigns — a cron job always runs as its own site's already-isolated
+system user, never root, same isolation boundary `site.create`/`db.create` use. Each
+job's `schedule` is validated against real cron grammar (numbers, three-letter month/
+weekday names, ranges, steps, lists, or an `@`-shortcut) and `command` is rejected if it
+contains a newline (which would break the one-job-per-line crontab format) — beyond
+that, a cron command is inherently an arbitrary shell command, same as any other
+hosting panel's cron feature. A literal `%` in a command is auto-escaped to `\%` before
+writing, since cron treats an unescaped `%` as a newline (a common surprise otherwise).
+Lines outside the managed block (added by hand or by another tool) are left untouched.
+Written via `crontab -u <user> -` (stdin), never through a shell string. Returns
+`"synced N cron job(s) for <user>"` on success.

@@ -287,6 +287,95 @@ func TestCreateBackupRejectsInvalidScope(t *testing.T) {
 	}
 }
 
+func TestCronEndpointsRequireARealSite(t *testing.T) {
+	secureCookies = false
+	defer func() { secureCookies = true }()
+
+	a := newTestAPIServer(t)
+	h := a.routes()
+
+	doJSON(t, h, "POST", "/api/v1/auth/signup", map[string]string{
+		"Email": "ops3@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	rec := doJSON(t, h, "POST", "/api/v1/auth/login", map[string]string{
+		"Email": "ops3@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	cookie := sessionCookie(rec)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers", map[string]any{"Name": "web-11"}, cookie)
+	var created struct {
+		ServerID string `json:"server_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+
+	rec = doJSON(t, h, "GET", "/api/v1/servers/"+created.ServerID+"/sites/site_nonexistent/crons", nil, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("list crons for nonexistent site: status = %d, want 404", rec.Code)
+	}
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/sites/site_nonexistent/crons",
+		map[string]any{"schedule": "@daily", "command": "echo hi"}, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("create cron for nonexistent site: status = %d, want 404", rec.Code)
+	}
+
+	rec = doJSON(t, h, "DELETE", "/api/v1/servers/"+created.ServerID+"/crons/cron_nonexistent", nil, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("delete nonexistent cron: status = %d, want 404", rec.Code)
+	}
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/crons/cron_nonexistent/toggle", nil, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("toggle nonexistent cron: status = %d, want 404", rec.Code)
+	}
+}
+
+func TestCreateCronJobValidatesThenDispatches(t *testing.T) {
+	secureCookies = false
+	defer func() { secureCookies = true }()
+
+	a := newTestAPIServer(t)
+	h := a.routes()
+
+	doJSON(t, h, "POST", "/api/v1/auth/signup", map[string]string{
+		"Email": "ops4@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	rec := doJSON(t, h, "POST", "/api/v1/auth/login", map[string]string{
+		"Email": "ops4@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	cookie := sessionCookie(rec)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers", map[string]any{"Name": "web-12"}, cookie)
+	var created struct {
+		ServerID string `json:"server_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+
+	site, err := a.store.createSite(created.ServerID, "d.example.com", "site_d", "/home/sites/site_d", "php", "8.3")
+	if err != nil {
+		t.Fatalf("createSite: %v", err)
+	}
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/sites/"+site.ID+"/crons",
+		map[string]any{"schedule": "", "command": "echo hi"}, cookie)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("create cron with empty schedule: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// A well-formed request against a site whose server has no connected
+	// agent must fail as an unprocessable dispatch error, not silently
+	// record a database row for a job that was never actually written to
+	// any crontab.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/sites/"+site.ID+"/crons",
+		map[string]any{"schedule": "@daily", "command": "echo hi"}, cookie)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("create cron with no agent connected: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if jobs := a.store.listCronJobs(created.ServerID, site.ID); len(jobs) != 0 {
+		t.Fatalf("a failed dispatch must not leave a persisted cron job behind, got %d", len(jobs))
+	}
+}
+
 func TestRegisterEndpointRejectsBadToken(t *testing.T) {
 	a := newTestAPIServer(t)
 	h := a.routes()

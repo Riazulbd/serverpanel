@@ -33,6 +33,19 @@ func run(ctx context.Context, name string, args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), err
 }
 
+// runWithStdin is run's counterpart for commands that read their input from
+// stdin instead of argv (e.g. `crontab -u <user> -`, which is how a
+// crontab is replaced without ever passing job content through argv or a
+// shell). Same fixed-argv contract as run: name/args are never built from
+// caller-supplied text, only stdin content is.
+func runWithStdin(ctx context.Context, stdin string, name string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
+	cmd.Stdin = strings.NewReader(stdin)
+	out, err := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out)), err
+}
+
 // isPackageInstalled reports whether an apt package is already installed,
 // which is what makes stack installation idempotent/safely-retryable: a
 // re-run skips every step whose target state already holds.

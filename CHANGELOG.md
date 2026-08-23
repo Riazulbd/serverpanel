@@ -2,6 +2,44 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-23 — Cron job management
+
+- **Implemented `cron.sync`** (`packages/capabilities/cron.go`), closing the SRV-005
+  parity gap (Cron-job management, previously `NOT_STARTED`). Given a site's system
+  user and its complete current list of enabled jobs, it idempotently rewrites exactly
+  the ServerPanel-managed block of that user's crontab (delimited by fixed marker
+  comments), leaving any unmanaged lines untouched, via `crontab -u <user> -` (stdin —
+  never a shell string). Schedules are validated against real cron grammar (numbers,
+  three-letter month/weekday names, ranges, steps, lists, `@`-shortcuts, not just a
+  safe-character-set check); commands are rejected only if they'd break the
+  one-job-per-line format (a newline) — otherwise deliberately treated as an arbitrary
+  shell command, same as every other hosting panel's cron feature, since the isolation
+  boundary is *which system user* runs it (always the site's own, already-isolated
+  user, never root). A literal `%` is auto-escaped (`\%`) since cron treats an
+  unescaped one as a newline.
+- Wired it into the control plane end-to-end: a new `cron_jobs` table (source of
+  truth — every create/delete/toggle re-dispatches `cron.sync` with the full resulting
+  enabled-job list, so the database and the live crontab can never incrementally drift
+  apart), four new endpoints (`GET`/`POST /api/v1/servers/{id}/sites/{siteId}/crons`,
+  `DELETE /api/v1/servers/{id}/crons/{cronId}`,
+  `POST /api/v1/servers/{id}/crons/{cronId}/toggle`), and a "Cron jobs" panel per site
+  in the dashboard (schedule-preset/custom-expression selector, per-job enable/disable
+  and delete). Create/delete/toggle each follow the existing
+  dispatch-then-persist-on-success discipline (a failed agent sync never leaves an
+  orphan database row, and a failed toggle rolls its flag back) that backups already
+  established.
+- Added capability-layer tests covering schedule/command validation, percent-escaping,
+  managed-block preservation of unrelated crontab lines, and a full real round trip
+  against the actual `crontab` binary and a real throwaway system user (sync two jobs,
+  verify both live via `crontab -l`, sync down to one, verify the removed job is
+  actually gone) — installed and exercised `cron` for real in this session rather than
+  leaving it a `BLOCKED_EXTERNAL`/manually-verified gap. Added control-plane HTTP tests
+  for the new endpoints, including proving a failed dispatch never persists a job.
+  Full suite remains green: `go build ./...`, `go vet ./...`, `go test ./...` all clean.
+- Updated `SYSTEM.md`, `API.md`, `ARCHITECTURE.md`, `product-plan.md`, and
+  `SERVERAVATAR_PARITY.md` (SRV-005 moved from the not-yet-started summary table to a
+  full `COMPLETE` detail block).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

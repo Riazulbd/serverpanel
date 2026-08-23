@@ -99,7 +99,7 @@ e.g.:
 | `ssl.issue_letsencrypt` | `{domain}` | Invokes certbot/ACME client with fixed flags, no shell interpolation of user input |
 | `service.control` | `{unit: "nginx", action: "restart"}` | `unit` restricted to an allow-list of managed systemd units |
 | `db.create` | `{name, owner}` | Executes via MySQL client library with parameter binding, not raw SQL string concat |
-| `cron.upsert` | `{schedule, command_id, user}` | `command_id` maps to a pre-registered, reviewed command template — not a free-text shell string |
+| `cron.sync` | `{system_user, jobs: [{id, schedule, command}]}` | Replaces the site's whole managed crontab block with exactly this list (idempotent full-state sync, not an incremental upsert); runs as the site's own isolated system user via `crontab -u <user> -`, never root |
 | `firewall.apply_rules` | `{rules: [...]}` | Validated, dry-run diffed, applied via the commit-confirm flow (see security doc) |
 | `backup.run` | `{scope: "db"\|"files"\|"full", target}` | Streams progress events back over the same channel |
 

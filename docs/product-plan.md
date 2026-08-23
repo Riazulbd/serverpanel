@@ -154,7 +154,7 @@ three tracks).
 | Git deployment (public + deploy-key private repos), branch/build-dir config, deploy scripts, history/logs, rollback | 5 |
 | Webhook push-to-deploy (GitHub/GitLab/Bitbucket signature verification) | 2 |
 | Staging environments + application cloning | 3 |
-| Cron job management (approved command templates, execution history) | 2 |
+| ~~Cron job management~~ — **done**: `cron.sync`, per-site create/list/delete/enable-disable | 0 |
 | Process/worker management via systemd (queue workers, restart policies) | 3 |
 | UFW + Fail2Ban management UI, SSH/SFTP management, commit-confirm safety flow | 4 |
 | Automated OS security updates (unattended-upgrades integration + reporting) | 2 |
@@ -252,7 +252,8 @@ Phase 1:
 
 - Git deployment, push-to-deploy, staging/cloning (Phase 2 — Phase 1 ships direct
   file/one-click deploy only).
-- Cron/process/worker management (Phase 2).
+- Process/worker management (Phase 2) — cron-job management shipped ahead of schedule
+  (`cron.sync`, see `SYSTEM.md` §2).
 - Firewall/Fail2Ban *management UI* and SSH/SFTP management, automated OS updates
   (Phase 2) — Phase 1 installs and runs Fail2Ban/UFW with safe defaults but doesn't yet
   expose full rule-editing UI.

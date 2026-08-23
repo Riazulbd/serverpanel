@@ -181,6 +181,25 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Known differences**: no backup/recovery codes for 2FA, no login-history UI, no IP allowlisting, no API token management yet.
 - **Reason**: those are listed Phase 2 account-security items (`product-plan.md` §9) not yet built.
 
+### SRV-005 — Cron job management
+- **Category**: Server Management (per-application)
+- **Documentation page**: Server Management → cron job management
+- **Short description**: Create, list, delete, and enable/disable scheduled commands ("cron jobs") for an application, running as that application's own system user.
+- **Expected behavior** (per ServerAvatar's documented workflow): pick a schedule (common presets or a custom cron expression), enter a command, save; the job runs on schedule; it can be disabled without deleting it, or removed entirely.
+- **Our implementation**: `cron.sync` (agent) — an idempotent full-state sync: given a site's system user and its complete list of currently-enabled jobs, it rewrites exactly the ServerPanel-managed block of that user's crontab (delimited by fixed marker comments), leaving any unmanaged lines untouched, and writes it via `crontab -u <user> -` (stdin) rather than any shell string. The control plane's `cron_jobs` table is the source of truth; every create/delete/toggle re-dispatches `cron.sync` with the full resulting enabled-job list, so the control plane and the live crontab can never incrementally drift apart. Schedules are validated against real cron grammar (numbers, three-letter month/weekday names, ranges, steps, lists, `@`-shortcuts); commands are rejected only if they'd break the one-job-per-line crontab format (a newline) — otherwise a cron command is inherently an arbitrary shell command, same as every other hosting panel's cron feature, since the isolation boundary here is *which system user* runs it (always the site's own, already-isolated user, never root), not the command's own syntax.
+- **Frontend**: site-detail "Cron jobs" panel — schedule-preset/custom-expression selector, command + optional comment fields, per-job enable/disable and delete buttons.
+- **Backend service**: `apiServer.handleCreateCronJob` / `handleDeleteCronJob` / `handleToggleCronJob` / `handleListCronJobs` (`apps/controlplane/crons.go`), `syncCronsToAgent` (dispatch-then-persist on create, dispatch-then-delete on delete, dispatch-with-rollback on toggle).
+- **API endpoint(s)**: `GET/POST /api/v1/servers/{id}/sites/{siteId}/crons`, `DELETE /api/v1/servers/{id}/crons/{cronId}`, `POST /api/v1/servers/{id}/crons/{cronId}/toggle`.
+- **Agent command**: `cron.sync`.
+- **DB tables**: `cron_jobs` (`server_id`, `site_id`, `schedule`, `command`, `comment`, `enabled`, `created_at`).
+- **Required permission**: authenticated session; a job is only ever addressed scoped to the server/site it belongs to (`getCronJob`/`getSite` both take `serverID`), so a caller can't act on another server's cron job by ID guessing.
+- **Security considerations**: `system_user` must already exist and match the `site_`-prefixed naming `site.create` assigns — a cron job always runs as its own already-isolated site user; a literal `%` in a command is auto-escaped (`\%`) since cron treats an unescaped one as a newline, a common real-world footgun otherwise; every create/delete/toggle is written to the audit log.
+- **Test coverage**: `packages/capabilities/cron_test.go` — schedule-grammar validation (valid/invalid fields, `@`-shortcuts), command validation (newline/empty/oversized rejection), percent-escaping, managed-block-preservation of unrelated crontab lines, and a full real round trip (`TestHandleCronSyncRoundTrip`) against the actual `crontab` binary and a real throwaway system user: sync two jobs, verify both are live via `crontab -l`, sync down to one, verify the removed job is actually gone. `apps/controlplane/http_test.go` (`TestCronEndpointsRequireARealSite`, `TestCreateCronJobValidatesThenDispatches` — including proving a failed dispatch never leaves an orphan database row).
+- **Current status**: `COMPLETE`
+- **Completion date**: 2026-08-23
+- **Known differences**: no execution history/output logging per run (cron's own mail-on-output behavior applies, unchanged); no "run as a different user than the site's own" option (ServerAvatar's docs describe per-application cron scoped to that application, which this matches — a genuinely different system user is out of scope, not a gap); no cron-expression human-readable preview in the UI yet.
+- **Reason**: execution history would require either polling `syslog`/`cron.log` or wrapping every job command (added complexity not yet justified by demand); tracked as a future enhancement, not silently dropped.
+
 ---
 
 ## 2. Summary tables — not yet started
@@ -229,7 +248,6 @@ capability surface (per task-brief §3/§101), not just what's already built.
 |---|---|---|---|
 | SRV-003 | SSH/SFTP management, key management, port/root-login controls | `NOT_STARTED` | `product-plan.md` Phase 2 |
 | SRV-004 | Firewall (UFW) rule editing UI, Fail2Ban jail management | `PARTIAL` | Installed with safe defaults by `stack.install`; no rule-editing capability/UI yet |
-| SRV-005 | Cron job management | `NOT_STARTED` | |
 | SRV-006 | Supervisor/PM2 worker management | `NOT_STARTED` | |
 | SRV-007 | Process list / kill | `NOT_STARTED` | |
 | SRV-008 | Historical monitoring (CPU/RAM/disk/network graphs, alerts) | `PARTIAL` | Heartbeat carries current uptime/load/mem%/disk%; no history retention or alerting yet |
