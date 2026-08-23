@@ -59,6 +59,9 @@ func (a *apiServer) routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/servers/{id}/databases", a.requireAuth(a.handleListDatabases))
 	mux.HandleFunc("POST /api/v1/servers/{id}/databases", a.requireAuth(a.handleCreateDatabase))
 	mux.HandleFunc("DELETE /api/v1/servers/{id}/databases/{dbId}", a.requireAuth(a.handleDeleteDatabase))
+	mux.HandleFunc("GET /api/v1/servers/{id}/sites/{siteId}/ssl", a.requireAuth(a.handleListCertificates))
+	mux.HandleFunc("POST /api/v1/servers/{id}/sites/{siteId}/ssl/letsencrypt", a.requireAuth(a.handleIssueLetsEncrypt))
+	mux.HandleFunc("POST /api/v1/servers/{id}/sites/{siteId}/ssl/custom", a.requireAuth(a.handleInstallCustomSSL))
 	mux.HandleFunc("GET /api/v1/audit", a.requireAuth(a.handleAudit))
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })

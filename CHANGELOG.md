@@ -2,6 +2,36 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-23 (second pass) — SSL persistence, dashboard UI, and auto-renewal
+
+- **Closed the APP-015/016 gaps**: SSL certificates issued via `ssl.issue_letsencrypt`/
+  `ssl.install_custom` are now durably recorded and manageable from the dashboard, and
+  `stack.install` now verifies/enables certbot's systemd renewal timer instead of just
+  assuming Ubuntu's package postinst already did — closing the "issued certs can
+  silently expire" gap `SYSTEM.md` had flagged.
+- New `certificates` control-plane table (`server_id`, `site_id`, `domain`, `issuer`,
+  `status`, `created_at`) and `store` methods (`createCertificate`/`listCertificates`).
+- Three new endpoints (`apps/controlplane/ssl.go`): `GET
+  /api/v1/servers/{id}/sites/{siteId}/ssl`, `POST .../ssl/letsencrypt`, `POST
+  .../ssl/custom`. Both issue/install handlers take the domain from the site's own
+  recorded `Domain` — never from the request body — the same pattern
+  `handleCreateBackup` already uses for `site_root`, so a caller can't point certbot or
+  a custom-cert install at a domain this server doesn't actually have a vhost for.
+  Let's Encrypt's contact email defaults to the requesting account's own email when not
+  explicitly overridden.
+- New idempotent `stack.install` step: `systemctl is-enabled certbot.timer` /
+  `systemctl enable --now certbot.timer`.
+- New "SSL certificates" panel on the site-detail dashboard view: issue/upload actions,
+  certificates table.
+- Tests: `TestCertificateCreateListRoundTrip` (store layer);
+  `TestSSLEndpointsRequireARealSite` (HTTP layer — 404 site-scoping, PEM-required
+  validation, dispatch-before-validation ordering, list round trip). `go test ./...`,
+  `go vet ./...`, and `gofmt -l .` all clean; the dashboard's inline JS parses cleanly
+  under Node as a sanity check for the new panel's markup/script.
+- Docs: `docs/SERVERAVATAR_PARITY.md` (new APP-015/016 detailed entry, `PARTIAL`),
+  `docs/SYSTEM.md` (§8 schema table, SSL feature rows), `docs/API.md` (new endpoint
+  docs).
+
 ## 2026-08-23 — Database control-plane persistence and dashboard UI
 
 - **Closed the DB-001 gap flagged in the previous session** ("good candidate for the

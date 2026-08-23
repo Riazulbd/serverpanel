@@ -333,6 +333,33 @@ func TestDatabaseCreateListDeleteRoundTrip(t *testing.T) {
 	}
 }
 
+func TestCertificateCreateListRoundTrip(t *testing.T) {
+	st := newTestStore(t)
+	serverID, _, _ := st.createServer("web-16", "", nil, time.Hour, "admin@example.com")
+	site, err := st.createSite(serverID, "d.example.com", "sp_d", "/home/sites/sp_d", "static", "")
+	if err != nil {
+		t.Fatalf("createSite: %v", err)
+	}
+
+	cert, err := st.createCertificate(serverID, site.ID, site.Domain, "letsencrypt")
+	if err != nil {
+		t.Fatalf("createCertificate: %v", err)
+	}
+	if cert.ID == "" || cert.Status != "active" || cert.Issuer != "letsencrypt" {
+		t.Fatalf("unexpected certificate record: %+v", cert)
+	}
+
+	list := st.listCertificates(serverID, site.ID)
+	if len(list) != 1 || list[0].Domain != "d.example.com" {
+		t.Fatalf("listCertificates = %+v, want one entry for d.example.com", list)
+	}
+
+	otherSite, _ := st.createSite(serverID, "e.example.com", "sp_e", "/home/sites/sp_e", "static", "")
+	if got := st.listCertificates(serverID, otherSite.ID); len(got) != 0 {
+		t.Fatalf("listCertificates for an unrelated site = %+v, want none", got)
+	}
+}
+
 func TestCreateDatabaseRecordRejectsDuplicateNameOnSameServer(t *testing.T) {
 	st := newTestStore(t)
 	serverID, _, _ := st.createServer("web-13", "", nil, time.Hour, "admin@example.com")

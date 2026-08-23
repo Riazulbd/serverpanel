@@ -199,6 +199,24 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Known differences**: no backup/recovery codes for 2FA, no login-history UI, no IP allowlisting, no API token management yet.
 - **Reason**: those are listed Phase 2 account-security items (`product-plan.md` §9) not yet built.
 
+### APP-015/016 — SSL management (Let's Encrypt + custom certificates)
+- **Category**: Application Management → SSL
+- **Documentation page**: Application Management → SSL/HTTPS management
+- **Short description**: Issue/renew a Let's Encrypt certificate for a site, or upload a customer-provided certificate/key pair; keep certificates renewed automatically.
+- **Our implementation**: `ssl.issue_letsencrypt` (certbot's nginx plugin, non-interactive, `--redirect`) and `ssl.install_custom` (writes the supplied PEM pair, verifies with `nginx -t` before ever reloading, so a malformed cert never reaches a live reload) were already agent-side capabilities; this session added control-plane persistence, dedicated endpoints, an auto-renewal timer, and a dashboard panel — the same pattern applied to backups (BAK-001) and databases (DB-005).
+- **Frontend**: site-detail "SSL certificates" panel — "Issue Let's Encrypt cert" / "Upload custom cert" actions, certificates table.
+- **Backend service**: `apiServer.handleIssueLetsEncrypt/handleInstallCustomSSL/handleListCertificates` (`apps/controlplane/ssl.go`).
+- **API endpoint(s)**: `GET /api/v1/servers/{id}/sites/{siteId}/ssl`, `POST /api/v1/servers/{id}/sites/{siteId}/ssl/letsencrypt`, `POST /api/v1/servers/{id}/sites/{siteId}/ssl/custom`.
+- **Agent command**: `ssl.issue_letsencrypt`, `ssl.install_custom`.
+- **DB tables**: `certificates` (`server_id`, `site_id`, `domain`, `issuer`, `status`, `created_at`).
+- **Required permission**: authenticated session.
+- **Security considerations**: the domain certbot/nginx acts on is always the site's own recorded `Domain` — never caller-supplied — the same "never trust the request body for a value the control plane already knows" pattern `handleCreateBackup`'s `site_root` uses; custom-cert PEM material passes straight through to the agent and is never logged, parsed, or persisted by the control plane itself, only the resulting domain/issuer metadata; `stack.install` now has an explicit, idempotent step that enables (rather than assumes) certbot's systemd renewal timer, closing the "issued certs can silently expire" gap.
+- **Test coverage**: `apps/controlplane/store_test.go` (`TestCertificateCreateListRoundTrip`); `apps/controlplane/http_test.go` (`TestSSLEndpointsRequireARealSite` — 404 scoping, PEM-required validation, dispatch-before-validation ordering, list round trip). The real certbot ACME issuance and the `certbot.timer` install step were manually verified against a real Ubuntu host in a prior session (`TESTING.md` §2); not covered by `go test` in this environment (requires real certbot/systemd and a resolvable domain) — `BLOCKED_EXTERNAL` for that specific real-issuance leg, same category as BAK-001/DB-001's real-agent gaps.
+- **Current status**: `PARTIAL` (control-plane persistence/API/UI/auto-renewal-wiring now `COMPLETE` and test-covered at that layer; real Let's Encrypt issuance round trip remains environment-`BLOCKED_EXTERNAL`)
+- **Completion date**: 2026-08-23 (control-plane persistence/API/UI/auto-renewal layer)
+- **Known differences**: no certificate uninstall/revoke capability yet; no certificate-expiry alerting (depends on SRV-008's monitoring/alerting work); multi-domain (SAN) certificates depend on APP-003 (additional domains per site, not yet implemented).
+- **Reason**: uninstall/revoke and expiry alerting are natural next steps but out of this session's scope; multi-domain support is blocked on APP-003 landing first.
+
 ---
 
 ## 2. Summary tables — not yet started
@@ -270,8 +288,6 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | APP-012 | Additional one-click installers (Laravel, Joomla, Mautic, Moodle, PrestaShop, Akaunting, Nextcloud, Statamic, Craft CMS, n8n, Node-RED, Uptime Kuma, NodeBB) | `NOT_STARTED` | WordPress is the only one-click installer today |
 | APP-013 | Log Monitoring Suite (traffic analytics) | `NOT_STARTED` | |
 | APP-014 | Application-level WAF / AI-bot blocker | `NOT_STARTED` | |
-| APP-015 | Custom SSL upload | `PARTIAL` | `ssl.install_custom` capability exists agent-side; no dedicated dashboard UI |
-| APP-016 | Let's Encrypt SSL + auto-renewal | `PARTIAL` | `ssl.issue_letsencrypt` implemented; certbot's own renewal timer not yet wired up by `stack.install` |
 
 ### Database management — not yet started (DB-*)
 | ID | Feature | Status | Notes |
@@ -313,9 +329,9 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | Status | Count (detailed entries) | Count (summary-table rows) |
 |---|---|---|
 | `COMPLETE` | 4 (SRV-001, BAK-002, ACC-001, DB-005) | 1 (PROV-006) |
-| `PARTIAL` | 3 (SRV-002, APP-001, APP-002, DB-001, BAK-001 — 5 total, see note) | 6 |
-| `NOT_STARTED` | 0 | ~54 |
-| `BLOCKED_EXTERNAL` | 0 (sub-scoped within BAK-001/BAK-002/DB-001's real-MariaDB-round-trip verification) | 0 |
+| `PARTIAL` | 4 (SRV-002, APP-001, APP-002, DB-001, BAK-001, APP-015/016 — 6 total, see note) | 6 |
+| `NOT_STARTED` | 0 | ~52 |
+| `BLOCKED_EXTERNAL` | 0 (sub-scoped within BAK-001/BAK-002/DB-001/APP-015/016's real-agent-round-trip verification) | 0 |
 | `INTENTIONALLY_NOT_APPLICABLE` | 0 | 1 |
 
 *Note: BAK-001 and BAK-002 are each simultaneously `COMPLETE` for their files-scope path
@@ -384,3 +400,12 @@ establish the tracking process and close the single highest-priority gap
   updated to reflect the closed gap. 4 new automated tests
   (`TestDatabaseCreateListDeleteRoundTrip`, `TestCreateDatabaseRecordRejectsDuplicateNameOnSameServer`,
   `TestCreateDatabaseValidatesAndDispatches`, `TestDeleteDatabaseRequiresARealRecord`).
+- **2026-08-23 (same day, second pass)**: closed the SSL persistence/UI/auto-renewal
+  gap flagged in `SYSTEM.md` — added a `certificates` control-plane table, dedicated
+  issue/upload/list endpoints (`apps/controlplane/ssl.go`), a site-detail "SSL
+  certificates" dashboard panel, and an idempotent `stack.install` step that verifies
+  (rather than assumes) certbot's systemd renewal timer is enabled. Promoted APP-015/016
+  from the not-yet-started summary table into a detailed entry (`PARTIAL` — real Let's
+  Encrypt issuance remains environment-`BLOCKED_EXTERNAL`, same as other agent-real-op
+  gaps). 2 new automated tests (`TestCertificateCreateListRoundTrip`,
+  `TestSSLEndpointsRequireARealSite`).

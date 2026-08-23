@@ -369,6 +369,78 @@ func TestDeleteDatabaseRequiresARealRecord(t *testing.T) {
 	}
 }
 
+func TestSSLEndpointsRequireARealSite(t *testing.T) {
+	secureCookies = false
+	defer func() { secureCookies = true }()
+
+	a := newTestAPIServer(t)
+	h := a.routes()
+
+	doJSON(t, h, "POST", "/api/v1/auth/signup", map[string]string{
+		"Email": "ops5@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	rec := doJSON(t, h, "POST", "/api/v1/auth/login", map[string]string{
+		"Email": "ops5@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	cookie := sessionCookie(rec)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers", map[string]any{"Name": "web-17"}, cookie)
+	var created struct {
+		ServerID string `json:"server_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+
+	rec = doJSON(t, h, "GET", "/api/v1/servers/"+created.ServerID+"/sites/site_nonexistent/ssl", nil, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("list certificates for nonexistent site: status = %d, want 404", rec.Code)
+	}
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/sites/site_nonexistent/ssl/letsencrypt", nil, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("issue letsencrypt cert for nonexistent site: status = %d, want 404", rec.Code)
+	}
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/sites/site_nonexistent/ssl/custom",
+		map[string]any{"cert_pem": "x", "key_pem": "y"}, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("install custom cert for nonexistent site: status = %d, want 404", rec.Code)
+	}
+
+	site, err := a.store.createSite(created.ServerID, "f.example.com", "sp_f", "/home/sites/sp_f", "static", "")
+	if err != nil {
+		t.Fatalf("createSite: %v", err)
+	}
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/sites/"+site.ID+"/ssl/custom",
+		map[string]any{"cert_pem": "", "key_pem": ""}, cookie)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("install custom cert missing pem: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// A well-formed Let's Encrypt request against a site whose server has no
+	// connected agent should fail as a gateway/dispatch error, not a
+	// validation error — same "validation happens before dispatch" proof
+	// used for backups and databases.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/sites/"+site.ID+"/ssl/letsencrypt", nil, cookie)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("issue letsencrypt cert with no agent connected: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// Directly persist a record (as if ssl.install_custom had already
+	// succeeded on a real agent) to exercise the list endpoint without a
+	// live agent.
+	if _, err := a.store.createCertificate(created.ServerID, site.ID, site.Domain, "custom"); err != nil {
+		t.Fatalf("createCertificate: %v", err)
+	}
+	rec = doJSON(t, h, "GET", "/api/v1/servers/"+created.ServerID+"/sites/"+site.ID+"/ssl", nil, cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list certificates: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var list []map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &list)
+	if len(list) != 1 {
+		t.Fatalf("list certificates = %v, want one entry", list)
+	}
+}
+
 func TestRegisterEndpointRejectsBadToken(t *testing.T) {
 	a := newTestAPIServer(t)
 	h := a.routes()

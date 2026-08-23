@@ -49,6 +49,9 @@ protected route; there is no route that skips it by omission.
 | `GET` | `/api/v1/servers/{id}/databases` | List databases on a server, newest first |
 | `POST` | `/api/v1/servers/{id}/databases` | Dispatch `db.create` and persist the resulting database record |
 | `DELETE` | `/api/v1/servers/{id}/databases/{dbId}` | Dispatch `db.delete` for a previously recorded database and remove its record |
+| `GET` | `/api/v1/servers/{id}/sites/{siteId}/ssl` | List certificates recorded for a site, newest first |
+| `POST` | `/api/v1/servers/{id}/sites/{siteId}/ssl/letsencrypt` | Dispatch `ssl.issue_letsencrypt` for the site's own domain and persist the resulting certificate record |
+| `POST` | `/api/v1/servers/{id}/sites/{siteId}/ssl/custom` | Dispatch `ssl.install_custom` with a caller-supplied cert/key pair and persist the resulting certificate record |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -165,6 +168,35 @@ database that was actually created and recorded, never a free-form name. → `20
 success. `404` if the database doesn't exist on that server; `502` if the agent isn't
 connected; `422` if `db.delete` itself failed on the agent (the record is kept, not
 removed, if the agent-side delete failed).
+
+### `POST /api/v1/servers/{id}/sites/{siteId}/ssl/letsencrypt`
+```json
+{"email": ""}
+```
+`email` is optional — defaults to the requesting account's own email. The domain
+certbot acts on is always the site's own recorded `Domain`, never caller-supplied.
+5-minute dispatch timeout (ACME challenge + CA round trip can be slow). Dispatches
+`ssl.issue_letsencrypt`, and only on the agent reporting success, persists a
+`certificates` row. → `201` with the `certificateRecord` JSON. `404` if the site
+doesn't exist on that server; `502` if the agent isn't connected; `422` if
+`ssl.issue_letsencrypt` itself failed on the agent.
+
+### `POST /api/v1/servers/{id}/sites/{siteId}/ssl/custom`
+```json
+{"cert_pem": "-----BEGIN CERTIFICATE-----...", "key_pem": "-----BEGIN PRIVATE KEY-----..."}
+```
+Both fields are required. The domain is the site's own recorded `Domain`. Dispatches
+`ssl.install_custom` — the agent verifies the resulting nginx config with `nginx -t`
+before ever reloading, so a malformed cert never reaches a live reload — and only on
+success persists a `certificates` row. → `201` with the `certificateRecord` JSON.
+`400` if either PEM field is missing; `404` if the site doesn't exist on that server;
+`502` if the agent isn't connected; `422` if `ssl.install_custom` itself failed on the
+agent.
+
+### `GET /api/v1/servers/{id}/sites/{siteId}/ssl`
+→ `200` with an array of `certificateRecord` (`ID`, `ServerID`, `SiteID`, `Domain`,
+`Issuer`, `Status`, `CreatedAt`), newest first. `404` if the site doesn't exist on that
+server.
 
 ### `POST /agents/register`
 ```json

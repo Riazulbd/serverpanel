@@ -161,4 +161,14 @@ CREATE TABLE IF NOT EXISTS databases (
 	created_at TEXT NOT NULL,
 	UNIQUE(server_id, name)
 );
+
+CREATE TABLE IF NOT EXISTS certificates (
+	id         TEXT PRIMARY KEY,
+	server_id  TEXT NOT NULL REFERENCES servers(id),
+	site_id    TEXT NOT NULL REFERENCES sites(id),
+	domain     TEXT NOT NULL,
+	issuer     TEXT NOT NULL,
+	status     TEXT NOT NULL DEFAULT 'active',
+	created_at TEXT NOT NULL
+);
 `

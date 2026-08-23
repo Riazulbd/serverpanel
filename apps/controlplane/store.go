@@ -568,6 +568,60 @@ func scanDatabase(row rowScanner) (*databaseRecord, error) {
 	return &rec, nil
 }
 
+type certificateRecord struct {
+	ID        string
+	ServerID  string
+	SiteID    string
+	Domain    string
+	Issuer    string
+	Status    string
+	CreatedAt time.Time
+}
+
+// createCertificate persists a certificate record. Like createBackup and
+// createDatabaseRecord, this is only ever called after the corresponding
+// ssl.issue_letsencrypt/ssl.install_custom capability has already succeeded
+// on the agent — the certificates table records certs actually installed,
+// never attempted ones.
+func (s *store) createCertificate(serverID, siteID, domain, issuer string) (*certificateRecord, error) {
+	rec := &certificateRecord{
+		ID: randID("cert"), ServerID: serverID, SiteID: siteID, Domain: domain,
+		Issuer: issuer, Status: "active", CreatedAt: time.Now().UTC(),
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO certificates (id, server_id, site_id, domain, issuer, status, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		rec.ID, rec.ServerID, rec.SiteID, rec.Domain, rec.Issuer, rec.Status, rec.CreatedAt.Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return nil, err
+	}
+	return rec, nil
+}
+
+// listCertificates returns certificates for one site, newest first.
+func (s *store) listCertificates(serverID, siteID string) []*certificateRecord {
+	rows, err := s.db.Query(
+		`SELECT id, server_id, site_id, domain, issuer, status, created_at
+		 FROM certificates WHERE server_id = ? AND site_id = ? ORDER BY created_at DESC`, serverID, siteID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var out []*certificateRecord
+	for rows.Next() {
+		var rec certificateRecord
+		var createdAt string
+		if err := rows.Scan(&rec.ID, &rec.ServerID, &rec.SiteID, &rec.Domain, &rec.Issuer, &rec.Status, &createdAt); err != nil {
+			continue
+		}
+		rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+		out = append(out, &rec)
+	}
+	return out
+}
+
 func randID(prefix string) string {
 	n, _ := rand.Int(rand.Reader, big.NewInt(1<<62))
 	return fmt.Sprintf("%s_%x", prefix, n)

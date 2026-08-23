@@ -140,6 +140,24 @@ func phase1LEMPSteps() []installStep {
 			},
 		},
 		{
+			// Ubuntu's certbot package ships a systemd timer that runs
+			// `certbot renew` (a safe no-op for certs not yet due) twice
+			// daily; it's usually enabled automatically by the package's
+			// postinst, but this step makes that a verified, idempotent
+			// part of the install rather than an assumption — closing the
+			// "issued certs silently expire" gap SYSTEM.md previously
+			// flagged as not wired up.
+			Name: "certbot auto-renewal timer",
+			Check: func(ctx context.Context) bool {
+				out, _ := run(ctx, "systemctl", "is-enabled", "certbot.timer")
+				return strings.TrimSpace(out) == "enabled"
+			},
+			Run: func(ctx context.Context) error {
+				_, err := run(ctx, "systemctl", "enable", "--now", "certbot.timer")
+				return err
+			},
+		},
+		{
 			Name:  "ufw",
 			Check: func(ctx context.Context) bool { return isPackageInstalled(ctx, "ufw") },
 			Run:   func(ctx context.Context) error { _, err := aptInstall(ctx, "ufw"); return err },

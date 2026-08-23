@@ -102,9 +102,11 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | Site cloning, cross-server migration | ⬜ Phase 2 |
 | Maintenance mode | ⬜ not implemented |
 | Basic auth on a site | ⬜ not implemented |
-| Custom + Let's Encrypt SSL | ✅ `ssl.issue_letsencrypt` (certbot), `ssl.install_custom` |
-| Automatic SSL renewal | ⬜ not implemented (certbot's own renewal timer is not
-  wired up by `stack.install` yet) |
+| Custom + Let's Encrypt SSL | ✅ `ssl.issue_letsencrypt` (certbot), `ssl.install_custom`;
+  dedicated dashboard panel + `certificates` table (`apps/controlplane/ssl.go`) |
+| Automatic SSL renewal | ✅ `stack.install` verifies/enables certbot's systemd
+  `certbot.timer` (idempotent step, not just an install-time assumption) |
+| SSL uninstall/revoke, expiry alerting | ⬜ not implemented |
 | WordPress auto-login/auto-update | ⬜ not implemented |
 | Application enable/disable | ✅ `site.set_status` |
 | Secure file manager | ✅ `file.list/read/write/delete`, scoped + symlink-safe |
@@ -266,6 +268,7 @@ EXISTS`, applied on every `openDB` call — idempotent, no separate migration to
 | `sites` | id, server, domain, system user, docroot, app type, PHP version, status |
 | `backups` | id, server, site, scope, path, size, sha256, status, created_at |
 | `databases` | id, server, name, owner user, engine, status, created_at; `UNIQUE(server_id, name)` |
+| `certificates` | id, server, site, domain, issuer (letsencrypt/custom), status, created_at |
 
 No ORM — every query is a small, explicit SQL statement in `store.go`. All secrets
 (session tokens, bootstrap tokens) are stored only as SHA-256 hashes; passwords use
