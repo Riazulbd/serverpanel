@@ -2,6 +2,48 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-24 — Database Management: control-plane persistence and dashboard UI
+
+- Closed the highest-priority documented gap flagged by `SERVERAVATAR_PARITY.md` (DB-001
+  "Known differences" / DB-005): the `db.create`/`db.delete`/`db.list` agent capabilities
+  existed but were only reachable through generic task dispatch, with no durable record
+  of what databases exist and no dashboard UI — the same gap `backups` had before its
+  2026-08-17 pass.
+- Added a `databases` table (`server_id`, `site_id`, `name`, `owner_user`, `engine`,
+  `status`, `created_at` — deliberately **no password column**) and matching `store`
+  methods (`createDatabaseRecord`/`listDatabases`/`getDatabase`/`deleteDatabaseRecord`,
+  each scoped by server ID the same way `getSite`/`getBackup` are).
+- Added three endpoints (`apps/controlplane/databases.go`):
+  `GET`/`POST /api/v1/servers/{id}/sites/{siteId}/databases`,
+  `DELETE /api/v1/servers/{id}/databases/{databaseId}`. Create follows the
+  dispatch-then-persist pattern (`handleCreateSite`/`handleCreateBackup`); delete is the
+  inverse, dispatch-then-remove — a `databases` row is only ever written after `db.create`
+  succeeds on the agent, and only ever removed after `db.delete` succeeds.
+- The owner password is generated control-plane-side with a CSPRNG (32 random bytes,
+  base64url-encoded), handed to the agent to set via `db.create`, and returned to the
+  caller exactly once in the `201` response body — it is never written to the
+  `databases` table or the audit log, so a compromise of the SQLite file cannot also
+  leak every application database's credentials.
+- Exported `packages/capabilities.IdentifierRe` (was the unexported `identifierRe`) so
+  the control plane validates database/owner names with the *exact* same allow-list
+  regex the agent enforces, rejecting malformed names with a clean `400` before ever
+  dispatching to the agent, instead of only a `422` from the agent afterward.
+- Added a "Databases" panel to the site-detail dashboard view (`web/index.html`): a
+  list table, a "+ Create database" modal, a one-time owner-password display, and a
+  "Delete" button per row with a destructive-action confirmation dialog — mirroring the
+  existing "Backups" panel's structure.
+- Added `TestDatabaseCreateListGetDeleteRoundTrip` (store layer, real SQLite) and
+  `TestCreateDatabaseRejectsInvalidNameThenDispatchesWhenValid` /
+  `TestDatabaseEndpointsRequireARealSite` (HTTP layer) — proving validation happens
+  before dispatch and that database/site lookups are correctly scoped by server ID, the
+  same guarantees already tested for sites/backups. `go test ./...` passes; `gofmt -l .`
+  and `go vet ./...` are clean.
+- Updated `docs/API.md`, `docs/SYSTEM.md`, and `docs/SERVERAVATAR_PARITY.md` (DB-001
+  detail block expanded, DB-005 folded into it and removed from the summary table,
+  progress-summary counts adjusted). The real `db.create`/`db.delete` dispatch against
+  a live MariaDB remains unverified in this environment (no MariaDB installed here) —
+  same `BLOCKED_EXTERNAL` caveat already documented for backups' db/full scope.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the
