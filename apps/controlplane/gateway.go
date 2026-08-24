@@ -40,34 +40,52 @@ func newGateway(ca *agentCA, st *store) *gateway {
 	return &gateway{ca: ca, store: st, sessions: map[string]*agentSession{}}
 }
 
-func (g *gateway) listenAndServe(addr string) error {
+// agentCertTTL is how long an issued agent client certificate is valid.
+// Short by design (see SECURITY.md §2): a leaked certificate has a bounded
+// blast radius, and rotation is routine rather than exceptional — which is
+// only true because the agent renews automatically over its existing mTLS
+// session (see handleCertRenew).
+const agentCertTTL = 30 * 24 * time.Hour
+
+// tlsConfig builds the gateway's mTLS server configuration. Split out from
+// listenAndServe so tests can stand up a real TLS listener against the same
+// configuration the production path uses, rather than asserting against a
+// hand-rolled approximation of it.
+func (g *gateway) tlsConfig() (*tls.Config, error) {
 	certPEM, keyPEM, err := g.ca.signServerCert([]string{"localhost", "127.0.0.1", "serverpanel-gateway"})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	cert, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
-		return err
+		return nil, err
 	}
-
-	cfg := &tls.Config{
+	return &tls.Config{
 		Certificates: []tls.Certificate{cert},
 		ClientAuth:   tls.RequireAndVerifyClientCert,
 		ClientCAs:    g.ca.certPool(),
 		MinVersion:   tls.VersionTLS13,
-	}
+	}, nil
+}
 
+func (g *gateway) listenAndServe(addr string) error {
+	cfg, err := g.tlsConfig()
+	if err != nil {
+		return err
+	}
 	ln, err := tls.Listen("tcp", addr, cfg)
 	if err != nil {
 		return err
 	}
 	log.Printf("agent gateway (mTLS) listening on %s", addr)
+	return g.serve(ln)
+}
 
+func (g *gateway) serve(ln net.Listener) error {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			log.Printf("gateway accept error: %v", err)
-			continue
+			return err
 		}
 		go g.handleConn(conn)
 	}
@@ -160,6 +178,10 @@ func (g *gateway) handleConn(conn net.Conn) {
 					At: env.Heartbeat.SentAt,
 				})
 			}
+		case proto.MsgCertRenewRequest:
+			if env.CertRenewRequest != nil {
+				g.handleCertRenew(sess, env.CertRenewRequest)
+			}
 		case proto.MsgTaskEvent:
 			if env.TaskEvent != nil {
 				g.store.log(serverID, "", "task.event", fmt.Sprintf("task_id=%s status=%s message=%q", env.TaskEvent.TaskID, env.TaskEvent.Status, env.TaskEvent.Message))
@@ -175,6 +197,50 @@ func (g *gateway) handleConn(conn net.Conn) {
 			}
 		}
 	}
+}
+
+// handleCertRenew signs a fresh client certificate for the agent on the
+// other end of sess. The identity it is issued for is sess.serverID, which
+// came from the mTLS peer certificate of this very connection — the
+// renewal message itself carries only a CSR, so an already-authenticated
+// agent can renew its own identity and nothing else.
+//
+// The superseded certificate is deliberately *not* revoked here. If it
+// were, an agent that failed to persist the new certificate (disk full,
+// crash mid-write) would be permanently locked out with no bootstrap token
+// to recover with. Leaving it valid for the remainder of its own short TTL
+// makes a failed renewal retryable instead of fatal; revocation still
+// covers it, because revokeServer revokes every serial in issued_certs.
+func (g *gateway) handleCertRenew(sess *agentSession, req *proto.CertRenewRequest) {
+	reply := func(resp proto.CertRenewResponse) {
+		sess.mu.Lock()
+		defer sess.mu.Unlock()
+		sess.enc.Encode(proto.Envelope{Type: proto.MsgCertRenewResponse, CertRenewResponse: &resp})
+	}
+
+	// A revoked server must not be able to mint itself a fresh certificate
+	// on a connection that was opened before the revocation landed.
+	if rec, ok := g.store.get(sess.serverID); !ok || rec.Status == statusDisconnected {
+		g.store.log(sess.serverID, "", "agent.cert_renew_refused", "server is unknown or revoked")
+		reply(proto.CertRenewResponse{Error: "certificate renewal refused for this server"})
+		return
+	}
+
+	certPEM, serial, notAfter, err := g.ca.signAgentCSR([]byte(req.CSRPEM), sess.serverID, agentCertTTL)
+	if err != nil {
+		g.store.log(sess.serverID, "", "agent.cert_renew_failed", err.Error())
+		reply(proto.CertRenewResponse{Error: "could not sign certificate: " + err.Error()})
+		return
+	}
+	g.store.markRenewedCert(sess.serverID, serial.String(), notAfter)
+
+	reply(proto.CertRenewResponse{
+		CertPEM:  string(certPEM),
+		CAPEM:    string(g.ca.CAPEM()),
+		Serial:   serial.String(),
+		NotAfter: notAfter,
+	})
+	log.Printf("issued renewed certificate for server_id=%s serial=%s", sess.serverID, serial)
 }
 
 // dispatch sends a task to a connected agent and waits (bounded by ctx) for

@@ -103,12 +103,12 @@ func (a *apiServer) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	certPEM, serial, err := a.ca.signAgentCSR([]byte(req.CSRPEM), serverID, 30*24*time.Hour)
+	certPEM, serial, notAfter, err := a.ca.signAgentCSR([]byte(req.CSRPEM), serverID, agentCertTTL)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, fmt.Sprintf("could not sign certificate: %v", err))
 		return
 	}
-	a.store.markIssuedCert(serverID, serial.String())
+	a.store.markIssuedCert(serverID, serial.String(), notAfter)
 
 	writeJSON(w, http.StatusOK, map[string]string{
 		"server_id":    serverID,

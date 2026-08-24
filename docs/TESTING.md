@@ -2,7 +2,7 @@
 
 ## 1. Current automated coverage
 
-`go test ./...` — 64 test functions across two packages, all passing, no `-race`
+`go test ./...` — 74 test functions across three packages, all passing, no `-race`
 failures, `go vet` clean, `gofmt -l` clean:
 
 ```
@@ -15,8 +15,9 @@ go test ./... -race
 
 | Package | Tests | What they cover |
 |---|---|---|
-| `apps/controlplane` | 30 | Auth/session lifecycle (create, MFA-verify, expiry, delete), bcrypt password rules, email normalization/uniqueness, TOTP round-trip/skew/rejection, bootstrap-token single-use/expiry/unknown-token, server create/list/get, revocation (cert-serial blocking + status transitions, including that a stray disconnect can't resurrect a revoked server), heartbeat recording, audit-log append, site create/list, `getSite`'s cross-server scoping, backup create/list/get round trip and its own cross-server scoping, and 8 full HTTP integration tests through `routes()` with `httptest` covering signup→login→protected-route, the full 2FA enroll→logout→login→MFA-challenge→access flow, server create/list/revoke, agent registration with a bad token, the backup endpoints' not-found boundaries, backup-request validation (bad scope, missing `db_name`, and confirming validation runs before dispatch), the database endpoints' not-found boundaries and identifier allow-list (six malformed-identifier rejections, all refused before dispatch), that a failed `db.create` dispatch persists no record, and that a failed `db.delete` dispatch leaves the record in place rather than orphaning a real database |
+| `apps/controlplane` | 34 | Auth/session lifecycle (create, MFA-verify, expiry, delete), bcrypt password rules, email normalization/uniqueness, TOTP round-trip/skew/rejection, bootstrap-token single-use/expiry/unknown-token, server create/list/get, revocation (cert-serial blocking + status transitions, including that a stray disconnect can't resurrect a revoked server), heartbeat recording, audit-log append, site create/list, `getSite`'s cross-server scoping, backup create/list/get round trip and its own cross-server scoping, and 8 full HTTP integration tests through `routes()` with `httptest` covering signup→login→protected-route, the full 2FA enroll→logout→login→MFA-challenge→access flow, server create/list/revoke, agent registration with a bad token, the backup endpoints' not-found boundaries, backup-request validation (bad scope, missing `db_name`, and confirming validation runs before dispatch), the database endpoints' not-found boundaries and identifier allow-list (six malformed-identifier rejections, all refused before dispatch), that a failed `db.create` dispatch persists no record, and that a failed `db.delete` dispatch leaves the record in place rather than orphaning a real database. Also 4 **real mTLS gateway tests** (`gateway_test.go`) — the first in this codebase to stand up the actual TLS listener from `tlsConfig()` and connect a CA-issued client certificate to it — covering certificate renewal issuing a genuinely new certificate whose CommonName comes from the connection rather than the CSR, that renewal does not knock a connected server offline, that the superseded certificate is left valid, that revocation covers every certificate ever issued to a server, that a revoked server cannot renew on an already-open connection, and that a malformed CSR is refused without changing the recorded serial |
 | `packages/capabilities` | 34 | Capability dispatch (unknown name rejected, `system.ping` works, nil `Progress` doesn't panic, the registry has a handler for every declared `Cap*` constant), `service.control`'s allow-list boundary (unit, action, and an explicit shell-metacharacter-injection attempt, all rejected before `systemctl` is ever invoked), the file manager's path-traversal and symlink-escape defenses (`resolveScopedPath`), oversized-read/write rejection, refusal to delete the site root itself, a real list+write round trip against a real filesystem, log redaction (token/password query params, `Authorization: Bearer`/`Basic`), `logs.tail`'s input validation, domain-name validation (including injection-shaped inputs), `systemUserForDomain`'s bounding/sanitization, the deterministic php-fpm-pool/socket/vhost path builders, `backup.run`'s scope validation and a real files-backup-and-checksum round trip, and `backup.restore`'s archive-location/checksum validation, a real files backup→corrupt→restore round trip (with a real throwaway system user, verifying both content restoration and pre-restore checkpoint creation), and `extractTarGzSafely`'s rejection of path-traversal entries, absolute-path entries, and oversized archives |
+| `apps/agent` | 6 | Certificate-renewal threshold against real parsed certificates, that each renewal generates a fresh keypair with a verifying CSR signature, the crash-safe identity switchover (new pair written under fresh names, one atomic pointer rename commits it), that an uncommitted renewal leaves the previous identity intact, backwards-compatible loading of pre-renewal identity files, and `renewalGate`'s bounding of the renew/reconnect loop found in §4a |
 
 None of this is mocked where a cheap real implementation was possible: sessions/users/
 servers/audit run against a real temp-file SQLite database with the real schema (not
@@ -99,6 +100,34 @@ This session's automated-test pass (see §1) found **no new defects** — every 
 passed on the first correctly-written attempt, which is consistent with (not
 independent proof beyond) the prior manual pass having been genuine.
 
+## 4a. Defect found by end-to-end testing: the certificate-renewal loop (2026-08-24)
+
+Agent certificate auto-renewal passed every unit and mTLS integration test, then
+**failed in a real end-to-end run** — the exact reason that run was worth doing.
+
+Method: the control plane and agent were built with `agentCertTTL` compressed from 30
+days to 90 seconds and `renewCheckInterval` from 6 hours to seconds, then run as real
+processes (real registration, real mTLS gateway, real renewal). Only the two time
+constants differed from production; every code path exercised was the shipping one,
+and both constants were restored afterwards.
+
+Result: **18,588 renewals in 100 seconds.** A successful renewal deliberately drops
+the connection so the new certificate takes effect immediately; the freshly issued
+certificate still read as needing renewal, so the agent renewed, reconnected, renewed
+again, without pause. In production the 30-day TTL makes the specific trigger
+(`NotBefore` being backdated 5 minutes for clock skew, which is negligible against 30
+days but dominant against 90 seconds) unreachable — but the failure mode is real and
+reachable by other means: a badly skewed system clock, or a control plane later
+configured with a TTL shorter than the renewal threshold, turns one misconfigured
+server into a request flood against the gateway.
+
+Fix: `renewalGate` (`apps/agent/renew.go`) rate-limits renewal attempts process-wide,
+across the reconnect a renewal triggers, and logs loudly when it holds one back.
+Re-running the identical scenario after the fix: **2 renewals in the same window**
+(one per gate interval), with the agent reconnecting and staying connected on the new
+certificate each time. Regression test:
+`TestRenewalGateBoundsRepeatedAttempts`.
+
 ## 5. Known gaps / recommended next testing investment, in priority order
 
 1. **Backup restore is unit- and integration-tested (`packages/capabilities/backup_test.go`,
@@ -120,6 +149,9 @@ independent proof beyond) the prior manual pass having been genuine.
    clipped content, and usable touch targets, screenshotted for review.
 4. **Load/failure testing of agent reconnect** under real network partition
    conditions (not just the backoff-loop code review already done).
+   Certificate renewal's reconnect path *has* now been exercised against real
+   processes (see §4a); a real network partition during an in-flight renewal has
+   not been.
 5. **`govulncheck`/dependency vulnerability scanning** wired into a CI pipeline (none
    exists yet).
 

@@ -50,9 +50,28 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Security considerations**: single-use/short-lived hashed bootstrap tokens; certificate identity independently derived from the mTLS handshake, never trusted from agent-asserted data; revocation checked every handshake.
 - **Test coverage**: `apps/controlplane/http_test.go` (`TestServerCreateListRevokeFlow`, `TestRegisterEndpointRejectsBadToken`), `apps/controlplane/store_test.go`.
 - **Current status**: `COMPLETE`
-- **Completion date**: 2026-08-14
-- **Known differences**: no agent certificate auto-renewal before 30-day expiry yet.
-- **Reason**: scoped out of the initial secure-foundation pass; tracked in `SYSTEM.md` §21.
+- **Completion date**: 2026-08-14 (registration); 2026-08-24 (automatic certificate renewal — see SRV-012)
+- **Known differences**: none outstanding for the enrollment flow itself.
+- **Reason**: n/a.
+
+### SRV-012 — Agent certificate lifecycle (automatic renewal and rotation)
+- **Category**: Server Management
+- **Documentation page**: Server Management (agent/connection lifecycle)
+- **Short description**: A connected server stays connected indefinitely without manual re-enrollment.
+- **Expected behavior**: the managed server's agent credential renews itself; an operator never has to re-run an install command just because time passed.
+- **Our implementation**: a `cert_renew_request`/`cert_renew_response` message pair carried **over the agent's existing mTLS session**. The agent asks once under a third of its certificate's validity remains, sending only a CSR; the gateway signs it for the identity derived from that connection's peer certificate. Each renewal generates a fresh private key, so it is a real credential rotation. The agent persists the new pair under fresh filenames and commits the switch with one atomic rename of its `identity.json` pointer, then reconnects immediately with the new certificate.
+- **Frontend**: none required — renewal is invisible to the operator by design; the audit log records every `agent.cert_renewed` event.
+- **Backend service**: `gateway.handleCertRenew`, `agentCA.signAgentCSR`, `store.markRenewedCert`/`issuedCertSerials`.
+- **API endpoint(s)**: none — deliberately not an HTTP endpoint (an already-authenticated mTLS session is a better proof of identity than any token would be, and adds no unauthenticated surface).
+- **Agent command**: n/a (this is protocol-level, not a dispatched capability).
+- **DB tables**: `issued_certs` (every serial ever issued, so revocation can cover superseded certificates), `servers.cert_serial`, `revoked_certs`.
+- **Required permission**: none user-facing; authorization is the mTLS peer certificate itself.
+- **Security considerations**: the identity is never taken from the message (only from the verified connection), so an agent cannot renew as another server; a revoked server is refused even on a connection opened before the revocation landed; the superseded certificate is intentionally left valid for the rest of its own TTL so a failed persist is retryable rather than a permanent lockout — which is exactly why `revokeServer` now revokes *every* issued serial rather than just the current one.
+- **Test coverage**: `apps/controlplane/gateway_test.go` — 4 tests over a real mTLS listener (new certificate for the connection's identity not the CSR's, connected status preserved, superseded certificate left valid, revocation covering all issued serials, revoked-server refusal, malformed-CSR refusal). `apps/agent/renew_test.go` — 6 tests (renewal threshold, fresh-keypair rotation, atomic switchover, crash-before-commit safety, legacy-filename fallback, renewal rate limiting). Additionally verified end-to-end against real control-plane and agent processes with compressed time constants, which **found a real renew/reconnect loop defect** now fixed and regression-tested — see `TESTING.md` §4a.
+- **Current status**: `COMPLETE`
+- **Completion date**: 2026-08-24
+- **Known differences**: an agent offline past its certificate's expiry still requires manual re-registration with a fresh bootstrap token (intentional fail-closed behavior, not a gap); there is no dashboard view of certificate expiry dates yet.
+- **Reason**: fail-closed re-enrollment is the correct security posture; a certificate-expiry column in the UI is cosmetic and not yet built.
 
 ### SRV-002 — Hosting stack installation (LEMP)
 - **Category**: Server Management
@@ -295,7 +314,7 @@ capability surface (per task-brief §3/§101), not just what's already built.
 
 | Status | Count (detailed entries) | Count (summary-table rows) |
 |---|---|---|
-| `COMPLETE` | 3 (SRV-001, BAK-002, ACC-001) | 2 (PROV-006, DB-005) |
+| `COMPLETE` | 4 (SRV-001, SRV-012, BAK-002, ACC-001) | 2 (PROV-006, DB-005) |
 | `PARTIAL` | 5 (SRV-002, APP-001, APP-002, DB-001, BAK-001 — see note) | 6 |
 | `NOT_STARTED` | 0 | ~54 |
 | `BLOCKED_EXTERNAL` | 0 (sub-scoped within BAK-001/BAK-002's db/full-scope MariaDB verification) | 0 |
@@ -354,6 +373,11 @@ establish the tracking process and close the single highest-priority gap
 
 ## Change history
 
+- **2026-08-24**: added SRV-012 (agent certificate lifecycle / automatic renewal) as
+  `COMPLETE` — closing the "no auto-renewal before 30-day expiry" gap that would
+  otherwise have taken every deployed agent permanently offline 30 days after
+  enrollment. End-to-end testing of it found and fixed a renew/reconnect loop
+  (`TESTING.md` §4a). SRV-001's "known differences" cleared accordingly.
 - **2026-08-24**: DB-005 (control-plane persistence + dashboard UI for databases) moved
   `NOT_STARTED` → `COMPLETE`; DB-001's detail block updated to reflect the now
   end-to-end database lifecycle (create/list/delete from the dashboard, `databases`

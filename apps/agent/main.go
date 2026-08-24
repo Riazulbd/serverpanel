@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"log"
 	"os"
@@ -49,13 +50,33 @@ func main() {
 
 	reg := capabilities.Default()
 
+	// One gate for the whole process, not per connection: its entire job is
+	// to bound renewals across the reconnect a successful renewal triggers.
+	gate := newRenewalGate(renewCheckInterval)
+
 	backoff := time.Second
 	for {
-		err := runConnection(ctx, id, reg)
+		err := runConnection(ctx, id, *dataDir, reg, gate)
 		if ctx.Err() != nil {
 			log.Println("shutting down")
 			return
 		}
+
+		// A renewal isn't a failure, so it neither backs off nor escalates
+		// the backoff: reload the just-committed identity and reconnect
+		// immediately so the new certificate is in use from the next
+		// session onward.
+		if errors.Is(err, errIdentityRenewed) {
+			renewed, loadErr := loadIdentity(*dataDir)
+			if loadErr != nil {
+				log.Fatalf("certificate was renewed but the new identity could not be loaded from %s: %v", *dataDir, loadErr)
+			}
+			id = renewed
+			backoff = time.Second
+			log.Print("reconnecting with the renewed certificate")
+			continue
+		}
+
 		log.Printf("connection to gateway lost: %v (retrying in %s)", err, backoff)
 		select {
 		case <-ctx.Done():

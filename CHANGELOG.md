@@ -2,6 +2,60 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-24 — Agent certificate auto-renewal (SRV-012)
+
+- **Implemented automatic agent certificate renewal**, closing the highest-severity
+  latent defect in the system: agent certificates are issued with a 30-day TTL and
+  there was no renewal path, so every deployed agent would have gone permanently
+  offline 30 days after enrollment and needed a manual re-install to recover.
+- Renewal is a new `cert_renew_request`/`cert_renew_response` message pair carried
+  **over the agent's existing mTLS session**, not a new HTTP endpoint. The request
+  carries only a CSR; the certificate is issued for the identity derived from that
+  connection's verified peer certificate, so an authenticated agent can renew its own
+  identity and nothing else, renewal needs no bootstrap token, and no new
+  unauthenticated surface is added. Each renewal generates a **fresh private key** —
+  a real credential rotation, not an expiry-date extension.
+- **Revocation now covers every certificate ever issued to a server**, via a new
+  `issued_certs` table. This is a prerequisite, not a nicety: renewal deliberately
+  leaves the superseded certificate valid for the rest of its own TTL (so an agent
+  that fails to persist the new one is retryable rather than permanently locked out),
+  which means revoking only `servers.cert_serial` would have left a still-usable
+  certificate behind.
+- `handleCertRenew` re-checks the server's status, so a revoked server cannot mint
+  itself a fresh certificate on a connection opened before the revocation landed —
+  the handshake-time check has already passed for that session.
+- Agent-side, the renewed pair is written under fresh filenames and committed with a
+  single atomic rename of `identity.json` (which now names the authoritative pair).
+  There is no window in which the certificate and key on disk belong to different
+  keypairs, and a crash before the rename leaves the previous identity fully usable.
+  Identities written before this change have no pointer fields and fall back to the
+  original filenames, so an already-installed agent keeps working across an upgrade.
+- **Fixed an unsynchronized-write bug found while touching this code**: heartbeats,
+  progress events from concurrently-running tasks, and now renewal requests all share
+  one connection, and `json.Encoder` is not safe for concurrent use — interleaved
+  partial writes could desynchronize the gateway's decoder for the rest of a session.
+  All agent writes now go through a mutex-guarded `connWriter`.
+- **A real end-to-end run found a renew/reconnect loop that every unit and integration
+  test had passed.** Run against real control-plane and agent processes with the TTL
+  and check interval compressed (only those two constants differed from production),
+  it produced **18,588 renewals in 100 seconds**: a successful renewal drops the
+  connection so the new certificate takes effect at once, and a certificate that still
+  reads as near-expiry turns that into a flood against the gateway — reachable in
+  production via a badly skewed system clock or a shortened TTL. Fixed with
+  `renewalGate`, a process-wide rate limit that logs loudly when it holds an attempt
+  back; the identical scenario then produced 2 renewals in the same window, with the
+  agent reconnecting and staying connected on each new certificate. Full write-up in
+  `TESTING.md` §4a.
+- Added 10 tests: 4 in a new `apps/controlplane/gateway_test.go` — the **first tests in
+  this codebase to stand up the real mTLS listener** and connect a CA-issued client
+  certificate to it — and 6 in a new `apps/agent/renew_test.go` (the agent package had
+  no tests at all before this). Full suite: 74 test functions, `-race` clean,
+  `go vet`/`gofmt` clean.
+- Updated `SYSTEM.md`, `SECURITY.md` (§2 rewritten from "not yet implemented" to the
+  implemented design, including why the superseded certificate is intentionally left
+  valid), `API.md` (renewal message pair documented in the wire protocol), `TESTING.md`
+  (new §4a), and `SERVERAVATAR_PARITY.md` (new SRV-012 entry, `COMPLETE`).
+
 ## 2026-08-24 — Database management wired end-to-end (DB-005)
 
 - **Databases are now a first-class, per-site resource in the control plane**, closing

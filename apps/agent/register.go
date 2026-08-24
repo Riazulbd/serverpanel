@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -29,20 +30,55 @@ type identity struct {
 	GatewayAddr string
 }
 
+// identityMeta is the on-disk pointer file. CertFile/KeyFile name which
+// certificate/key pair in dataDir is currently authoritative, which is what
+// makes certificate renewal crash-safe: the new pair is written under fresh
+// names first, and only a single atomic rename of this file switches over to
+// it. There is no window in which the cert and key on disk belong to
+// different keypairs. Both fields are empty for identities written before
+// renewal existed; loadIdentity falls back to the original fixed filenames
+// so an already-installed agent keeps working across an upgrade.
+type identityMeta struct {
+	ServerID    string `json:"server_id"`
+	GatewayAddr string `json:"gateway_addr"`
+	CertFile    string `json:"cert_file,omitempty"`
+	KeyFile     string `json:"key_file,omitempty"`
+}
+
+const (
+	legacyCertFile = "agent-cert.pem"
+	legacyKeyFile  = "agent-key.pem"
+)
+
 func identityPaths(dataDir string) (cert, key, ca, meta string) {
-	return filepath.Join(dataDir, "agent-cert.pem"),
-		filepath.Join(dataDir, "agent-key.pem"),
+	return filepath.Join(dataDir, legacyCertFile),
+		filepath.Join(dataDir, legacyKeyFile),
 		filepath.Join(dataDir, "ca.pem"),
 		filepath.Join(dataDir, "identity.json")
 }
 
 func loadIdentity(dataDir string) (*identity, error) {
-	certPath, keyPath, caPath, metaPath := identityPaths(dataDir)
-	certPEM, err := os.ReadFile(certPath)
+	_, _, caPath, metaPath := identityPaths(dataDir)
+	metaBytes, err := os.ReadFile(metaPath)
 	if err != nil {
 		return nil, err
 	}
-	keyPEM, err := os.ReadFile(keyPath)
+	var meta identityMeta
+	if err := json.Unmarshal(metaBytes, &meta); err != nil {
+		return nil, err
+	}
+	if meta.CertFile == "" {
+		meta.CertFile = legacyCertFile
+	}
+	if meta.KeyFile == "" {
+		meta.KeyFile = legacyKeyFile
+	}
+
+	certPEM, err := os.ReadFile(filepath.Join(dataDir, meta.CertFile))
+	if err != nil {
+		return nil, err
+	}
+	keyPEM, err := os.ReadFile(filepath.Join(dataDir, meta.KeyFile))
 	if err != nil {
 		return nil, err
 	}
@@ -50,18 +86,89 @@ func loadIdentity(dataDir string) (*identity, error) {
 	if err != nil {
 		return nil, err
 	}
-	metaBytes, err := os.ReadFile(metaPath)
-	if err != nil {
-		return nil, err
-	}
-	var meta struct {
-		ServerID    string `json:"server_id"`
-		GatewayAddr string `json:"gateway_addr"`
-	}
-	if err := json.Unmarshal(metaBytes, &meta); err != nil {
-		return nil, err
-	}
 	return &identity{ServerID: meta.ServerID, CertPEM: certPEM, KeyPEM: keyPEM, CAPEM: caPEM, GatewayAddr: meta.GatewayAddr}, nil
+}
+
+// persistRenewedIdentity durably stores a renewed certificate/key pair and
+// atomically switches the agent over to it. Order matters and is the whole
+// point: both new files are written and fsynced under names nothing yet
+// references, then one atomic rename of identity.json makes them
+// authoritative. A crash at any point before that rename leaves the
+// previous identity fully intact and still usable — which is why the
+// gateway can safely leave the superseded certificate unrevoked (see
+// gateway.handleCertRenew).
+func persistRenewedIdentity(dataDir, serverID, gatewayAddr, serial string, certPEM, keyPEM, caPEM []byte) error {
+	certFile := "agent-cert-" + serial + ".pem"
+	keyFile := "agent-key-" + serial + ".pem"
+
+	if err := writeFileSync(filepath.Join(dataDir, keyFile), keyPEM, 0600); err != nil {
+		return fmt.Errorf("write renewed key: %w", err)
+	}
+	if err := writeFileSync(filepath.Join(dataDir, certFile), certPEM, 0600); err != nil {
+		return fmt.Errorf("write renewed certificate: %w", err)
+	}
+	if len(caPEM) > 0 {
+		_, _, caPath, _ := identityPaths(dataDir)
+		if err := writeFileSync(caPath, caPEM, 0600); err != nil {
+			return fmt.Errorf("write CA certificate: %w", err)
+		}
+	}
+
+	metaBytes, err := json.Marshal(identityMeta{
+		ServerID: serverID, GatewayAddr: gatewayAddr, CertFile: certFile, KeyFile: keyFile,
+	})
+	if err != nil {
+		return err
+	}
+	_, _, _, metaPath := identityPaths(dataDir)
+	tmpPath := metaPath + ".new"
+	if err := writeFileSync(tmpPath, metaBytes, 0600); err != nil {
+		return fmt.Errorf("write identity pointer: %w", err)
+	}
+	if err := os.Rename(tmpPath, metaPath); err != nil {
+		return fmt.Errorf("commit identity pointer: %w", err)
+	}
+
+	pruneSupersededIdentityFiles(dataDir, certFile, keyFile)
+	return nil
+}
+
+// pruneSupersededIdentityFiles removes certificate/key files no longer
+// referenced by the committed pointer. Best-effort and deliberately run
+// only after the pointer switch has succeeded, so a failure here leaves
+// stale files behind rather than removing something still in use.
+func pruneSupersededIdentityFiles(dataDir, keepCert, keepKey string) {
+	entries, err := os.ReadDir(dataDir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if name == keepCert || name == keepKey {
+			continue
+		}
+		isIdentityFile := strings.HasPrefix(name, "agent-cert-") || strings.HasPrefix(name, "agent-key-") ||
+			name == legacyCertFile || name == legacyKeyFile
+		if isIdentityFile {
+			os.Remove(filepath.Join(dataDir, name))
+		}
+	}
+}
+
+func writeFileSync(path string, data []byte, perm os.FileMode) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 // register performs the one-time bootstrap-token-for-certificate exchange
@@ -122,7 +229,10 @@ func register(apiAddr, token, dataDir string) (*identity, error) {
 	if err := os.WriteFile(caPath, []byte(rr.CAPEM), 0600); err != nil {
 		return nil, err
 	}
-	metaBytes, _ := json.Marshal(map[string]string{"server_id": rr.ServerID, "gateway_addr": rr.GatewayAddr})
+	metaBytes, _ := json.Marshal(identityMeta{
+		ServerID: rr.ServerID, GatewayAddr: rr.GatewayAddr,
+		CertFile: legacyCertFile, KeyFile: legacyKeyFile,
+	})
 	if err := os.WriteFile(metaPath, metaBytes, 0600); err != nil {
 		return nil, err
 	}

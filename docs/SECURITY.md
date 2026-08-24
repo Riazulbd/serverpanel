@@ -60,11 +60,43 @@ Properties this guarantees:
   (agent offline past expiry), the agent falls back to a manual re-registration flow
   requiring a fresh bootstrap token from the dashboard — this is an intentional
   fail-closed behavior, not silent re-trust.
-  **Not yet implemented**: certs are issued with a fixed 30-day TTL
-  (`apps/controlplane/http.go` `handleRegister`) and there is no renewal
-  capability/endpoint yet — an agent whose cert expires must be manually
-  re-registered with a fresh bootstrap token today. Auto-rotation before expiry is
-  tracked as a known gap in `SYSTEM.md`.
+  **Implemented as described.** Certificates are issued with a 30-day TTL
+  (`agentCertTTL` in `apps/controlplane/gateway.go`, used by both registration and
+  renewal). Once under a third of that remains, the agent sends a
+  `cert_renew_request` carrying only a CSR **over its existing mTLS session**; the
+  gateway signs it for the identity it derived from that connection's peer
+  certificate, never from anything in the message — so an authenticated agent can
+  renew its own identity and nothing else, and renewal needs no bootstrap token and
+  no additional unauthenticated surface. Each renewal generates a **fresh private
+  key**, so it is a real credential rotation rather than an expiry-date extension.
+  An agent that stays offline past expiry still falls back to manual re-registration
+  with a new bootstrap token — the intended fail-closed behavior.
+
+  Three properties are worth calling out because they are what make rotation safe
+  rather than merely present:
+  - **The superseded certificate is not revoked at renewal time.** If it were, an
+    agent that failed to persist the new one (disk full, crash mid-write) would be
+    permanently locked out with no token to recover with. It instead stays valid for
+    the remainder of its own short TTL, making a failed renewal retryable.
+  - **Because of that, revocation must cover every certificate ever issued** to a
+    server, not just the current one. Every issued serial is recorded in
+    `issued_certs`, and `store.revokeServer` revokes all of them — otherwise a
+    renewed server would leave a still-usable certificate behind on revocation.
+    Covered by `TestRevocationCoversEveryCertificateEverIssuedToAServer`.
+  - **A revoked server cannot renew** on a connection opened before the revocation
+    landed: `handleCertRenew` re-checks the server's status, since the
+    handshake-time revocation check has already passed for that session. Covered by
+    `TestRevokedServerCannotRenewOnAnAlreadyOpenConnection`.
+
+  Agent-side, the new certificate/key pair is written under fresh filenames and only
+  a single atomic rename of `identity.json` (which names the authoritative pair)
+  switches over to it — there is no window in which the certificate and key on disk
+  belong to different keypairs. Renewal attempts are rate-limited process-wide
+  (`renewalGate`): a successful renewal deliberately drops the connection so the new
+  certificate takes effect at once, and without the gate a certificate that still
+  read as near-expiry (badly skewed clock, or a TTL shorter than the renewal
+  threshold) would turn into a renew/reconnect flood against the gateway. This was
+  found by a real end-to-end run, not by inspection — see `TESTING.md`.
 - The Agent CA's private key is held in a dedicated, tightly access-controlled service
   (e.g. `step-ca` or HSM-backed KMS in later stages), separate from the general
   application database, so a control-plane app-tier compromise doesn't automatically

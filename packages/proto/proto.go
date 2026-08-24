@@ -18,16 +18,47 @@ const (
 	MsgTask      MessageType = "task"       // gateway -> agent, requests a capability run
 	MsgTaskEvent MessageType = "task_event" // agent -> gateway, progress/result of a task
 	MsgAck       MessageType = "ack"        // either direction, generic acknowledgement
+
+	// Certificate renewal. Deliberately carried over the already-established
+	// mTLS session rather than a second HTTP endpoint: the agent's identity
+	// is then derived from the certificate it is currently authenticated
+	// with, so renewal needs no bootstrap token, no new unauthenticated
+	// surface, and cannot be used to obtain a certificate for a different
+	// server.
+	MsgCertRenewRequest  MessageType = "cert_renew_request"  // agent -> gateway
+	MsgCertRenewResponse MessageType = "cert_renew_response" // gateway -> agent
 )
 
 // Envelope is the outer message wrapper. Exactly one of the typed payload
 // fields is populated, matching Type.
 type Envelope struct {
-	Type      MessageType `json:"type"`
-	Hello     *Hello      `json:"hello,omitempty"`
-	Heartbeat *Heartbeat  `json:"heartbeat,omitempty"`
-	Task      *Task       `json:"task,omitempty"`
-	TaskEvent *TaskEvent  `json:"task_event,omitempty"`
+	Type              MessageType        `json:"type"`
+	Hello             *Hello             `json:"hello,omitempty"`
+	Heartbeat         *Heartbeat         `json:"heartbeat,omitempty"`
+	Task              *Task              `json:"task,omitempty"`
+	TaskEvent         *TaskEvent         `json:"task_event,omitempty"`
+	CertRenewRequest  *CertRenewRequest  `json:"cert_renew_request,omitempty"`
+	CertRenewResponse *CertRenewResponse `json:"cert_renew_response,omitempty"`
+}
+
+// CertRenewRequest asks the gateway to sign a fresh client certificate for
+// the agent. It carries only a CSR: the server identity the certificate is
+// issued for comes from the mTLS peer certificate of the connection the
+// request arrives on, never from anything in this message, so an agent can
+// only ever renew its own identity.
+type CertRenewRequest struct {
+	CSRPEM string `json:"csr_pem"`
+}
+
+// CertRenewResponse returns the newly signed certificate, or Error
+// explaining why renewal was refused. CAPEM is echoed back so an agent also
+// picks up a rotated CA root without a re-registration.
+type CertRenewResponse struct {
+	CertPEM  string    `json:"cert_pem,omitempty"`
+	CAPEM    string    `json:"ca_pem,omitempty"`
+	Serial   string    `json:"serial,omitempty"`
+	NotAfter time.Time `json:"not_after,omitempty"`
+	Error    string    `json:"error,omitempty"`
 }
 
 // Hello is sent by the agent immediately after the mTLS handshake completes,

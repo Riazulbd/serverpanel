@@ -193,12 +193,31 @@ connection carries newline-delimited JSON `Envelope`s in both directions
 {"type": "task", "task": {"id": "...", "capability": "...", "params": {}, "issued_at": "..."}}
 {"type": "task_event", "task_event": {"task_id": "...", "status": "queued|running|succeeded|failed|rejected", "message": "...", "detail": "...", "at": "..."}}
 {"type": "ack"}
+{"type": "cert_renew_request", "cert_renew_request": {"csr_pem": "<PEM-encoded CSR>"}}
+{"type": "cert_renew_response", "cert_renew_response": {"cert_pem": "...", "ca_pem": "...", "serial": "...", "not_after": "...", "error": ""}}
 ```
 
 Flow: gateway accepts → verifies cert → sends `ack` → agent sends `hello`, then
 `heartbeat`s on its own interval → gateway may send a `task` at any time → agent
 replies with one or more `task_event`s, the last one terminal
-(`succeeded`/`failed`/`rejected`). The gateway's `dispatch()` blocks its caller (an
+(`succeeded`/`failed`/`rejected`).
+
+### Certificate renewal
+
+`cert_renew_request` carries **only** a CSR. The identity the certificate is issued
+for is `sess.serverID` — derived from the peer certificate of the very connection the
+request arrived on — never from anything in the message, so an authenticated agent can
+renew its own identity and nothing else. Renewal deliberately lives here rather than
+on an HTTP endpoint: the existing mTLS session already proves who the agent is, so
+renewal needs no bootstrap token and adds no unauthenticated surface.
+
+The agent sends one once under a third of its certificate's validity remains, and
+generates a fresh keypair each time (rotating the key, not just the expiry). The
+gateway refuses (`error` set, no `cert_pem`) for a revoked/unknown server or an
+unparseable CSR. The superseded certificate stays valid for the rest of its own TTL so
+a renewal the agent fails to persist is retryable rather than fatal — which is why
+revocation covers every serial in `issued_certs`, not just the current one. See
+`SECURITY.md` §2. The gateway's `dispatch()` blocks its caller (an
 HTTP handler) until it sees a terminal event for the task ID it sent, or its context
 deadline expires. There is no message type for a free-form command — `capability` must
 be a name in `packages/capabilities`'s fixed registry, or the agent returns `rejected`

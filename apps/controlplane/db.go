@@ -94,6 +94,19 @@ CREATE TABLE IF NOT EXISTS bootstrap_tokens (
 	used       INTEGER NOT NULL DEFAULT 0
 );
 
+-- Every certificate serial this control plane has ever issued to an agent,
+-- including superseded ones. Certificate renewal means a server can have
+-- more than one unexpired certificate at a time (the old one stays valid
+-- until it expires, so a renewal that fails to persist agent-side never
+-- bricks the agent) — revocation must therefore revoke all of them, not
+-- just servers.cert_serial. See store.revokeServer.
+CREATE TABLE IF NOT EXISTS issued_certs (
+	serial     TEXT PRIMARY KEY,
+	server_id  TEXT NOT NULL,
+	issued_at  TEXT NOT NULL,
+	not_after  TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS revoked_certs (
 	serial     TEXT PRIMARY KEY,
 	server_id  TEXT NOT NULL,
