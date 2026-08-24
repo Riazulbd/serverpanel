@@ -2,6 +2,40 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-24 — Database management: control-plane persistence + dashboard UI
+
+- **Closed the DB-001 gap flagged in the previous entry**: `db.create`/`db.delete`
+  (agent-side capabilities, already implemented) are now wired into the control plane
+  with the same dispatch-then-persist-on-success pattern `backup.run`/`backup.restore`
+  established — a `databases` table (`apps/controlplane/db.go`), store methods
+  (`createDatabase`/`listDatabases`/`getDatabase`/`deleteDatabase`, each scoped by
+  server ID the same way `getSite`/`getBackup` are), and three new endpoints
+  (`GET`/`POST /api/v1/servers/{id}/databases`,
+  `DELETE /api/v1/servers/{id}/databases/{databaseId}`) in a new
+  `apps/controlplane/databases.go`.
+- The owner password is generated server-side with `crypto/rand` (128-bit, hex-encoded)
+  and returned exactly once in the create response — never accepted from the client,
+  never persisted anywhere, matching how bootstrap tokens are handled. `name` is
+  validated against the same identifier allow-list the agent's own `handleDBCreate`
+  uses, rejected before a task is ever dispatched.
+- Added a "Databases" panel to the server-detail dashboard view: create-database modal
+  (name only; owner user is derived from the name), a databases table, a delete action,
+  and a one-time credentials display after creation.
+- Added 3 new automated tests: `TestDatabaseCreateListGetDeleteRoundTrip` (store-layer
+  CRUD + cross-server-scoping rejection), `TestCreateDatabaseRejectsInvalidName`
+  (empty/malformed name rejected before dispatch; a failed dispatch with no agent
+  connected leaves zero persisted rows), `TestDeleteDatabaseRequiresARealRecord` (404 on
+  a nonexistent database ID). Full suite passes, `go vet`/`gofmt` clean. Also manually
+  smoke-tested end-to-end (signup → login → create server → list/create-reject/delete)
+  against a running control-plane binary in this session. The real `db.create`/
+  `db.delete` MariaDB round trip remains DB-001's pre-existing `BLOCKED_EXTERNAL` gap
+  (no MariaDB in this environment) — this pass's own scope (persistence/API/UI/
+  validation) is fully covered by the automated suite.
+- Updated `SYSTEM.md`, `API.md`, and `SERVERAVATAR_PARITY.md` (DB-001 refreshed, new
+  DB-005 detail entry marked `COMPLETE`, new DB-006 follow-up row for multi-user-per-
+  database/remote-grants/password-reset, which are intentionally out of this pass's
+  scope).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the
