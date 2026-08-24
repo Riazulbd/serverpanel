@@ -2,6 +2,39 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-24 — Database control-plane persistence + dashboard UI (DB-005)
+
+- **Closed the DB-005 gap flagged in `SERVERAVATAR_PARITY.md`**: `db.create`/`db.delete`
+  were already real, tested agent capabilities (see DB-001), but the control plane
+  never persisted a record of what was created and had no dashboard UI for it — the
+  same gap backups had before the 2026-08-17 pass, now closed the same way.
+- Added a `databases` table (`apps/controlplane/db.go`) and matching `store.go` methods
+  (`createDatabase`/`listDatabases`/`getDatabase`/`deleteDatabase`, each scoped by
+  server ID the same way `getSite`/`getBackup` are) — deliberately with **no password
+  column**: the owner password `db.create` requires is generated server-side
+  (`generateDBPassword`, 20 bytes of `crypto/rand`, hex-encoded) and returned to the
+  caller exactly once in the creation response, never logged or persisted anywhere.
+- Added three endpoints in `apps/controlplane/databases.go`:
+  `GET`/`POST /api/v1/servers/{id}/sites/{siteId}/databases`,
+  `DELETE /api/v1/servers/{id}/databases/{databaseId}`, following the same
+  dispatch-then-persist-on-success pattern as `handleCreateBackup`/`handleCreateSite` —
+  a database record is only ever written after the agent confirms `db.create` actually
+  succeeded, and `handleDeleteDatabase` reads the `name`/`owner_user` to delete from the
+  stored record (never from free-form client input), matching how `backup.restore`
+  trusts only its own stored `backups` row.
+- Added a "Databases" panel to the site-detail dashboard view (create-database modal,
+  databases table, delete button with a destructive-action confirmation dialog, and a
+  one-time credentials display after creation) in `apps/controlplane/web/index.html`.
+- Added 3 new control-plane tests (`TestDatabaseCreateListGetDeleteRoundTrip` in
+  `store_test.go`; `TestDatabaseEndpointsRequireARealSite`,
+  `TestCreateDatabaseRejectsInvalidName` in `http_test.go`, the latter proving
+  validation happens before dispatch the same way `TestCreateBackupRejectsInvalidScope`
+  does). Full suite: 64 test functions, `go build`/`go vet` clean.
+- Updated `SYSTEM.md` and `SERVERAVATAR_PARITY.md` (DB-001 promoted with a DB-005 note;
+  progress-summary counts refreshed) to reflect the new persistence/UI layer. Real
+  `db.create`/`db.delete` MariaDB round trips remain unverified in this session's
+  environment (no MariaDB here) — same documented limitation as BAK-001/BAK-002.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the
