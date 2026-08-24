@@ -485,6 +485,103 @@ func scanBackup(row rowScanner) (*backupRecord, error) {
 	return &rec, nil
 }
 
+type databaseRecord struct {
+	ID        string
+	ServerID  string
+	Name      string
+	OwnerUser string
+	Status    string
+	CreatedAt time.Time
+}
+
+// createDatabase persists a database record. Like createBackup, this is
+// only ever called after db.create has already succeeded on the agent (see
+// databases.go handleCreateDatabase) — the databases table records
+// databases actually provisioned on the server, never in-flight or
+// attempted ones. The UNIQUE(server_id, name) constraint (db.go) is the
+// backstop against a duplicate record if a caller races two create
+// requests for the same name.
+func (s *store) createDatabase(serverID, name, ownerUser string) (*databaseRecord, error) {
+	rec := &databaseRecord{
+		ID: randID("db"), ServerID: serverID, Name: name, OwnerUser: ownerUser,
+		Status: "active", CreatedAt: time.Now().UTC(),
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO databases (id, server_id, name, owner_user, status, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		rec.ID, rec.ServerID, rec.Name, rec.OwnerUser, rec.Status, rec.CreatedAt.Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return nil, err
+	}
+	return rec, nil
+}
+
+// listDatabases returns databases for one server, newest first.
+func (s *store) listDatabases(serverID string) []*databaseRecord {
+	rows, err := s.db.Query(
+		`SELECT id, server_id, name, owner_user, status, created_at
+		 FROM databases WHERE server_id = ? ORDER BY created_at DESC`, serverID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var out []*databaseRecord
+	for rows.Next() {
+		rec, err := scanDatabase(rows)
+		if err != nil {
+			continue
+		}
+		out = append(out, rec)
+	}
+	return out
+}
+
+// getDatabase looks up one database record scoped to serverID, for the
+// same cross-tenant-addressing reason getSite/getBackup are scoped to
+// serverID.
+func (s *store) getDatabase(serverID, dbID string) (*databaseRecord, bool) {
+	row := s.db.QueryRow(
+		`SELECT id, server_id, name, owner_user, status, created_at
+		 FROM databases WHERE id = ? AND server_id = ?`, dbID, serverID)
+	rec, err := scanDatabase(row)
+	if err != nil {
+		return nil, false
+	}
+	return rec, true
+}
+
+// deleteDatabaseRecord removes a database's record. Only called after
+// db.delete has already succeeded on the agent (see databases.go
+// handleDeleteDatabase) — mirrors deleteDatabase's caller-verifies-first
+// pattern the rest of this file uses (createBackup/createDatabase never
+// persist a "maybe" state).
+func (s *store) deleteDatabaseRecord(serverID, dbID string) error {
+	res, err := s.db.Exec(`DELETE FROM databases WHERE id = ? AND server_id = ?`, dbID, serverID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return errors.New("database record not found")
+	}
+	return nil
+}
+
+func scanDatabase(row rowScanner) (*databaseRecord, error) {
+	var rec databaseRecord
+	var createdAt string
+	if err := row.Scan(&rec.ID, &rec.ServerID, &rec.Name, &rec.OwnerUser, &rec.Status, &createdAt); err != nil {
+		return nil, err
+	}
+	rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+	return &rec, nil
+}
+
 func randID(prefix string) string {
 	n, _ := rand.Int(rand.Reader, big.NewInt(1<<62))
 	return fmt.Sprintf("%s_%x", prefix, n)

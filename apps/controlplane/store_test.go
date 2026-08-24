@@ -297,3 +297,51 @@ func TestBackupCreateListGetRoundTrip(t *testing.T) {
 		t.Fatal("expected getBackup to refuse a backup ID under the wrong server")
 	}
 }
+
+func TestDatabaseCreateListGetDeleteRoundTrip(t *testing.T) {
+	st := newTestStore(t)
+	serverID, _, _ := st.createServer("web-11", "", nil, time.Hour, "admin@example.com")
+
+	db, err := st.createDatabase(serverID, "app_db", "app_db")
+	if err != nil {
+		t.Fatalf("createDatabase: %v", err)
+	}
+	if db.ID == "" || db.Status != "active" {
+		t.Fatalf("unexpected database record: %+v", db)
+	}
+
+	list := st.listDatabases(serverID)
+	if len(list) != 1 || list[0].Name != "app_db" {
+		t.Fatalf("listDatabases = %+v, want one entry matching the created database", list)
+	}
+
+	got, ok := st.getDatabase(serverID, db.ID)
+	if !ok {
+		t.Fatal("expected getDatabase to find the created database")
+	}
+	if got.OwnerUser != "app_db" {
+		t.Fatalf("getDatabase = %+v, fields don't round-trip", got)
+	}
+
+	otherServer, _, _ := st.createServer("web-12", "", nil, time.Hour, "admin@example.com")
+	if _, ok := st.getDatabase(otherServer, db.ID); ok {
+		t.Fatal("expected getDatabase to refuse a database ID under the wrong server")
+	}
+	if err := st.deleteDatabaseRecord(otherServer, db.ID); err == nil {
+		t.Fatal("expected deleteDatabaseRecord to refuse a database ID under the wrong server")
+	}
+
+	if err := st.deleteDatabaseRecord(serverID, db.ID); err != nil {
+		t.Fatalf("deleteDatabaseRecord: %v", err)
+	}
+	if _, ok := st.getDatabase(serverID, db.ID); ok {
+		t.Fatal("expected getDatabase to fail after deletion")
+	}
+
+	if _, err := st.createDatabase(serverID, "app_db", "app_db"); err != nil {
+		t.Fatalf("createDatabase after delete (name reuse) should succeed: %v", err)
+	}
+	if _, err := st.createDatabase(serverID, "app_db", "another_owner"); err == nil {
+		t.Fatal("expected createDatabase to reject a duplicate (server_id, name) pair")
+	}
+}

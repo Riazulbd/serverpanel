@@ -46,6 +46,9 @@ protected route; there is no route that skips it by omission.
 | `GET` | `/api/v1/servers/{id}/sites/{siteId}/backups` | List backups for a site, newest first |
 | `POST` | `/api/v1/servers/{id}/sites/{siteId}/backups` | Dispatch `backup.run` and persist the resulting backup record |
 | `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a previously recorded backup |
+| `GET` | `/api/v1/servers/{id}/databases` | List databases on a server, newest first |
+| `POST` | `/api/v1/servers/{id}/databases` | Dispatch `db.create` and persist the resulting database record |
+| `DELETE` | `/api/v1/servers/{id}/databases/{dbId}` | Dispatch `db.delete` for a previously recorded database and remove its record |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -137,6 +140,31 @@ isn't connected; `422` if `backup.restore` itself failed on the agent (the agent
 error message explains why, and any checkpoint already taken is named in it so it's
 never a silent loss).
 
+### `POST /api/v1/servers/{id}/databases`
+```json
+{"name": "app_db", "owner_user": ""}
+```
+`name` must match `^[a-z][a-z0-9_]{0,30}$` (validated here, before dispatch, and again
+by `db.create` itself). `owner_user` defaults to `name` when empty. The owner password
+is generated server-side (24 random bytes, hex-encoded) — never accepted from the
+client and never persisted anywhere. Dispatches `db.create`, and only on the agent
+reporting success, persists a `databases` row. → `201
+{"database": {...databaseRecord}, "owner_password": "<shown exactly once>"}`. `400` for
+an invalid name/owner; `502` if the agent isn't connected; `422` if `db.create` itself
+failed on the agent (e.g. the database already exists).
+
+### `GET /api/v1/servers/{id}/databases`
+→ `200` with an array of `databaseRecord` (`ID`, `ServerID`, `Name`, `OwnerUser`,
+`Status`, `CreatedAt`), newest first.
+
+### `DELETE /api/v1/servers/{id}/databases/{dbId}`
+No request body — the database's own recorded `name`/`owner_user` are read from the
+`databases` table and passed to `db.delete` verbatim; a caller can only ever delete a
+database that was actually created and recorded through this API, never point deletion
+at an arbitrary name. → `200 {"status": "deleted"}`. `404` if the database doesn't
+exist on that server; `502` if the agent isn't connected; `422` if `db.delete` itself
+failed on the agent.
+
 ### `POST /agents/register`
 ```json
 {"token": "<bootstrap token>", "csr_pem": "<PEM-encoded CSR>"}
@@ -179,6 +207,17 @@ The full allow-listed capability names `packages/capabilities.Default()` registe
 `site.set_status`, `app.wordpress_install`, `ssl.issue_letsencrypt`,
 `ssl.install_custom`, `db.create`, `db.delete`, `db.list`, `file.list`, `file.read`,
 `file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`.
+
+### `db.create` / `db.delete`
+Both return `{"name": "...", "owner_user": "..."}` as their `TaskEvent` detail (JSON) —
+the same "the JSON detail is the one place a fact is expressed" convention
+`site.create`/`backup.run` use — which is what `POST /api/v1/servers/{id}/databases`
+parses to know what to persist. `name`/`owner_user` are validated against
+`^[a-z][a-z0-9_]{0,30}$` before any SQL is built (no placeholder syntax exists for SQL
+identifiers, so this allow-list, not string escaping, is what prevents identifier
+injection); values are backtick-quoted and interpolated only after passing validation.
+`owner_password` (create only) must be at least 16 characters and is always passed to
+MariaDB as a bound query parameter, never interpolated into SQL text.
 
 ### `backup.restore`
 ```json

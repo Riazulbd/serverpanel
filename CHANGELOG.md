@@ -2,6 +2,46 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-24 — Database management: control-plane persistence and dashboard UI
+
+- Closed DB-005 (`docs/SERVERAVATAR_PARITY.md`), the specific "good candidate for the
+  next iteration" gap flagged in the previous entry: `db.create`/`db.delete` existed as
+  agent-side capabilities but had no control-plane record, no dashboard UI, and were
+  only reachable through generic task dispatch.
+- Added a `databases` table (`server_id`, `name`, `owner_user`, `status`, `created_at`,
+  `UNIQUE(server_id, name)`) and store methods (`createDatabase`/`listDatabases`/
+  `getDatabase`/`deleteDatabaseRecord`), all scoped by server ID the same way
+  `getSite`/`getBackup` are.
+- Added three endpoints (`apps/controlplane/databases.go`): `POST`/`GET
+  /api/v1/servers/{id}/databases`, `DELETE /api/v1/servers/{id}/databases/{dbId}`,
+  following the same dispatch-then-persist-only-on-success pattern `handleCreateSite`/
+  `handleCreateBackup` use. The owner password is generated server-side (24 random
+  bytes, hex-encoded) and returned exactly once in the create response — it is never
+  persisted anywhere, matching how a server's own install command is a one-time secret.
+- Changed `db.create`/`db.delete` (`packages/capabilities/db.go`) to return structured
+  JSON detail (`{"name","owner_user"}`) instead of a formatted string, matching the
+  convention `site.create`/`backup.run` already use, so the control plane can persist
+  what actually happened rather than re-deriving it from the request it sent.
+- Added a "Databases" panel to the server-detail dashboard view (create-database modal,
+  a databases table, per-row delete with a destructive-action confirmation dialog and a
+  one-time password display).
+- Added validation both control-plane-side (a fast `400` before any agent round trip)
+  and agent-side (defense in depth, unchanged) for database/owner-user names against
+  `^[a-z][a-z0-9_]{0,30}$`.
+- Added tests: `packages/capabilities/db_test.go` (3 tests covering identifier/password
+  validation without requiring a live MariaDB — the same environment boundary
+  `backup_test.go` documents for the db/full backup scope), `apps/controlplane/
+  store_test.go` (`TestDatabaseCreateListGetDeleteRoundTrip` — create/list/get/delete,
+  cross-server addressing rejection, duplicate-name rejection), `apps/controlplane/
+  http_test.go` (`TestDatabaseEndpointsRequireARealDatabase`,
+  `TestCreateDatabaseRejectsInvalidNames` — proving validation runs before dispatch).
+  `go test ./...` passes; a real `CREATE DATABASE`/`CREATE USER`/`GRANT` round trip
+  against MariaDB remains manually verified from a prior session (no MariaDB in this
+  environment), same as the rest of this project's db/full-scope gaps.
+- Updated `docs/SERVERAVATAR_PARITY.md` (DB-001 detail block, DB-005 closed),
+  `docs/API.md` (new endpoints + updated `db.create`/`db.delete` capability reference),
+  `docs/SYSTEM.md` (§2 database row, §8 schema table).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

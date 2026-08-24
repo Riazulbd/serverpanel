@@ -3,11 +3,21 @@ package capabilities
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"regexp"
 
 	_ "github.com/go-sql-driver/mysql"
 )
+
+// dbResult is what db.create/db.delete return as their TaskEvent detail
+// (JSON) — the control plane parses this to persist a databaseRecord,
+// the same dispatch-then-persist pattern site.create and backup.run use
+// (see packages/capabilities/site.go's siteResult doc comment).
+type dbResult struct {
+	Name      string `json:"name"`
+	OwnerUser string `json:"owner_user,omitempty"`
+}
 
 // identifierRe is the allow-list for database/user names. MySQL has no
 // placeholder syntax for identifiers (only for values), so the standard
@@ -75,7 +85,11 @@ func handleDBCreate(ctx context.Context, params map[string]any, progress Progres
 		return "", fmt.Errorf("flush privileges: %w", err)
 	}
 
-	return fmt.Sprintf("database %q created, owned by user %q with grants scoped to that database only", name, owner), nil
+	out, err := json.Marshal(dbResult{Name: name, OwnerUser: owner})
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
 }
 
 func handleDBDelete(ctx context.Context, params map[string]any, progress Progress) (string, error) {
@@ -100,7 +114,11 @@ func handleDBDelete(ctx context.Context, params map[string]any, progress Progres
 		}
 		db.ExecContext(ctx, fmt.Sprintf("DROP USER IF EXISTS `%s`@'localhost'", owner))
 	}
-	return fmt.Sprintf("database %q deleted", name), nil
+	out, err := json.Marshal(dbResult{Name: name, OwnerUser: owner})
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
 }
 
 func handleDBList(ctx context.Context, params map[string]any, progress Progress) (string, error) {
