@@ -78,7 +78,31 @@ task detail) recorded, verify its SHA-256 matches, then either re-run the same r
 via a direct `backup.restore` task dispatch or extract/restore by hand as a last
 resort.
 
-## 4. Monitoring and alerting
+## 4. Cron jobs
+
+**Cron job management** (implemented): from the dashboard, open a server → a site →
+"Cron Jobs" → "+ New cron job". Pick a preset (hourly/daily/weekly/monthly) or type a
+raw 5-field cron expression, and a command to run. This calls
+`POST /api/v1/servers/{id}/sites/{siteId}/crons`, which dispatches `cron.create`
+(`packages/capabilities/cron.go`) with `system_user` taken from the site's own recorded
+`system_user` (never caller-supplied) and a control-plane-generated ID. The agent writes
+(or rewrites) `/etc/cron.d/serverpanel-<system_user>` — one file per site, containing
+only entries this agent created; the job runs as that unprivileged site user, never
+root. `cron`'s own inotify watch on `/etc/cron.d/` picks up the change automatically —
+there is no service restart step.
+
+Enable/disable (toggle) comments the entry's line out in place rather than deleting it,
+so re-enabling doesn't require re-submitting the schedule/command. Delete removes the
+entry from the file (and removes the file entirely once it's the last entry) — never a
+`crontab -r`-style wipe of anything outside this agent's own managed file.
+
+To inspect what's actually running on the VPS: `cat
+/etc/cron.d/serverpanel-<system_user>` (SSH access required — there is no dedicated
+"cron execution history" view yet; a cron job's own stdout/stderr goes wherever the
+command itself sends it, typically mailed by `cron` locally unless the command
+redirects it — see `SERVERAVATAR_PARITY.md` SRV-005 "Known differences").
+
+## 5. Monitoring and alerting
 
 Server health is visible in the dashboard's server-detail view (uptime, 1-minute load
 average, memory-used %, disk-used %), sourced from the agent's periodic heartbeat.
@@ -93,7 +117,7 @@ beyond `GET /healthz`, which only confirms the HTTP listener is up — it does n
 DB connectivity or gateway health), and `journalctl -u serverpanel-agent` on each VPS
 for reconnect-loop messages, which indicate a network or certificate problem.
 
-## 5. Upgrade and rollback
+## 6. Upgrade and rollback
 
 **Control plane**: no automated upgrade mechanism. Build a new binary, stop the old
 process, start the new one pointed at the same `-db`/`-ca-dir`. Because every schema
@@ -117,7 +141,7 @@ project yet — see `TESTING.md` §5 item 2 (this is one of the scenarios a scri
 real-VPS/container test pass should cover before either is called a supported,
 tested procedure rather than a documented manual fallback).
 
-## 6. Troubleshooting
+## 7. Troubleshooting
 
 | Symptom | Cause / fix |
 |---|---|
@@ -129,8 +153,9 @@ tested procedure rather than a documented manual fallback).
 | Dashboard shows a server's site list as empty after a successful `site.create` dispatch | Confirm you're calling `POST /api/v1/servers/{id}/sites` (which persists a record), not the generic `POST /api/v1/servers/{id}/tasks` with `capability: "site.create"` (which dispatches but does not persist — see `API.md` §2). |
 | Login succeeds but every subsequent API call returns `403 two-factor verification required` | Expected behavior once 2FA is enabled — call `POST /api/v1/auth/mfa/challenge` with a valid TOTP code before any other route will accept the session. |
 | Any privileged action's effect isn't showing up | Check `GET /api/v1/audit` — every capability dispatch is logged with its `task_id` before being sent, and its terminal outcome is logged as `task.event`; cross-reference the task ID to see whether the agent actually reported success. |
+| A cron job doesn't seem to be running | Confirm `/etc/cron.d/serverpanel-<system_user>` exists and the entry isn't commented out (disabled); confirm `cron`/`crond` itself is running (`systemctl status cron`); a schedule field outside cron's valid range (e.g. minute `99`) is accepted by our regex validator but rejected by `cron` itself at parse time — check `grep CRON /var/log/syslog` (or `journalctl -u cron`) for a parse error on that specific file. |
 
-## 7. Data/secrets hygiene
+## 8. Data/secrets hygiene
 
 Never commit `.db` files, CA key material, or agent identity files. `.gitignore`
 already excludes the common build/data artifacts (`*.db`/`*.db-shm`/`*.db-wal`,

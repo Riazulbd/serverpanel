@@ -181,6 +181,25 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Known differences**: no backup/recovery codes for 2FA, no login-history UI, no IP allowlisting, no API token management yet.
 - **Reason**: those are listed Phase 2 account-security items (`product-plan.md` §9) not yet built.
 
+### SRV-005 — Cron job management
+- **Category**: Server Management
+- **Documentation page**: Server Management → Cron Jobs
+- **Short description**: Create, list, enable/disable, and delete scheduled commands that run as a site's own system user.
+- **Expected behavior**: pick (or type) a schedule and a command, the job starts running on that schedule; jobs can be paused without deleting them and removed entirely when no longer needed.
+- **Our implementation**: one `/etc/cron.d/serverpanel-<system_user>` file per site's isolated system user, fully owned and rewritten by this package — never hand-edited, never sharing a file with anything else. Each managed entry is a `# sp-cron:<id> enabled|disabled` marker line followed by the actual cron.d line (`<schedule> <user> <command>`); disabling comments the line out in place rather than deleting it, so re-enabling doesn't need the original schedule/command re-submitted. `cron`'s own inotify-based reload picks up `/etc/cron.d/*` changes automatically — no service restart needed. Jobs run as the site's system user (never root), matching the same OS-level isolation `site.create`/`db.create` already establish.
+- **Frontend**: site-detail "Cron Jobs" panel — table with enable/disable/delete actions, "+ New cron job" modal with hourly/daily/weekly/monthly presets plus a raw cron-expression field.
+- **Backend service**: `apiServer.handleCreateCron`/`handleListCrons`/`handleToggleCron`/`handleDeleteCron` (`apps/controlplane/crons.go`), dispatch-then-persist-on-success pattern matching `handleCreateSite`/`handleCreateBackup`.
+- **API endpoint(s)**: `GET/POST /api/v1/servers/{id}/sites/{siteId}/crons`, `POST /api/v1/servers/{id}/crons/{cronId}/toggle`, `DELETE /api/v1/servers/{id}/crons/{cronId}`.
+- **Agent command**: `cron.create`, `cron.list`, `cron.delete`, `cron.set_enabled`.
+- **DB tables**: `crons` (id, server_id, site_id, schedule, command, enabled, created_at) — scoped to `server_id` on every lookup, same cross-tenant-addressing guard as `sites`/`backups`.
+- **Required permission**: authenticated session; `system_user` is always read server-side from the site's own stored record, never accepted as free-form client input on the cron endpoints.
+- **Security considerations**: the schedule is restricted to a strict `[0-9*/,-]` charset per field (no day/month names, no shell/cron-meaningful characters); the command is rejected outright if it contains a newline (the one character that could inject a second, uncontrolled cron.d line); the cron ID embedded in the file's marker comment is restricted to `[a-z0-9_]`. While auditing this feature, found and fixed a related pre-existing gap: `system_user` validation across `app.go`/`logs.go`/`site.go`/`cron.go` only checked a `"site_"` *prefix* before building a filesystem path from it — a crafted value like `site_/../../../etc/passwd` would pass that check. Replaced all five call sites with a shared `validateSiteSystemUser` (full-charset regex matching exactly what `systemUserForDomain` ever generates) in `exec_helpers.go`.
+- **Test coverage**: `packages/capabilities/cron_test.go` — 12 tests (schedule/command validation including the injection-via-newline case, create/list round trip, duplicate-ID rejection, enable/disable persistence, delete removing only the targeted entry, last-entry deletion removing the file rather than leaving it empty, unknown-ID rejection); `packages/capabilities/capabilities_test.go` adds `TestValidateSiteSystemUserRejectsPathTraversal` for the shared validator fix. `apps/controlplane/store_test.go` (`TestCronCreateListGetRoundTrip`) and `apps/controlplane/http_test.go` (`TestCronEndpointsRequireARealSiteOrCron`, `TestCreateCronRejectsMissingFieldsAndDispatchesWhenValid`) cover the control-plane layer. Real `cron`/inotify pickup not exercised in this environment (no live crond to observe) — `BLOCKED_EXTERNAL` for that one behavior only; every filesystem/validation code path is covered by real `os`/`useradd` operations, not mocks.
+- **Current status**: `COMPLETE` (agent + control plane + persistence + dashboard UI, all tested except the live-crond pickup itself)
+- **Completion date**: 2026-08-24
+- **Known differences**: no execution-history/output logging (ServerAvatar-style "last run" status) yet; no timezone selector (cron.d entries run in the server's system timezone); day/month names (`MON`, `JAN`, ...) are not accepted in custom expressions, only numeric fields and `* / , -`.
+- **Reason**: execution history needs a place to capture cron's own output (typically mailed or logged via `MAILTO`/redirection, not yet wired up) — tracked as a follow-up, not silently dropped.
+
 ---
 
 ## 2. Summary tables — not yet started
@@ -229,7 +248,6 @@ capability surface (per task-brief §3/§101), not just what's already built.
 |---|---|---|---|
 | SRV-003 | SSH/SFTP management, key management, port/root-login controls | `NOT_STARTED` | `product-plan.md` Phase 2 |
 | SRV-004 | Firewall (UFW) rule editing UI, Fail2Ban jail management | `PARTIAL` | Installed with safe defaults by `stack.install`; no rule-editing capability/UI yet |
-| SRV-005 | Cron job management | `NOT_STARTED` | |
 | SRV-006 | Supervisor/PM2 worker management | `NOT_STARTED` | |
 | SRV-007 | Process list / kill | `NOT_STARTED` | |
 | SRV-008 | Historical monitoring (CPU/RAM/disk/network graphs, alerts) | `PARTIAL` | Heartbeat carries current uptime/load/mem%/disk%; no history retention or alerting yet |

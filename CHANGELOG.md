@@ -2,6 +2,56 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-24 — Cron job management, `system_user` path-traversal hardening
+
+- **Implemented cron job management** end-to-end (agent capability, control plane
+  persistence/API, dashboard UI) — the next-highest-priority `NOT_STARTED` item in
+  `SERVERAVATAR_PARITY.md`'s server-management category (SRV-005). New agent
+  capabilities `cron.create`/`cron.list`/`cron.delete`/`cron.set_enabled`
+  (`packages/capabilities/cron.go`): one `/etc/cron.d/serverpanel-<system_user>` file
+  per site, fully owned and rewritten by this package (never hand-edited), each entry
+  a `# sp-cron:<id> enabled|disabled` marker line followed by the real cron.d line —
+  disabling comments the line out in place rather than deleting it, so re-enabling
+  doesn't need the schedule/command resupplied. Jobs run as the site's own unprivileged
+  system user, matching the isolation model `site.create`/`db.create` already
+  establish; `cron`'s inotify watch on `/etc/cron.d/` picks up changes automatically,
+  no service restart required.
+- Schedule validation restricts each of the 5 fields to `[0-9*/,-]` (day/month names
+  not supported — deliberately, to keep every accepted character safe to write
+  directly into a single cron.d line); command validation rejects newlines outright
+  (the one character that could inject a second, uncontrolled line into the file).
+- Wired into the control plane: new `crons` table + store methods (`createCron`/
+  `listCrons`/`getCron`/`deleteCron`/`setCronEnabled`, each scoped by server ID the
+  same way `getSite`/`getBackup` are), four new endpoints (`GET`/
+  `POST /api/v1/servers/{id}/sites/{siteId}/crons`,
+  `POST /api/v1/servers/{id}/crons/{cronId}/toggle`,
+  `DELETE /api/v1/servers/{id}/crons/{cronId}`), and a "Cron Jobs" panel per site in
+  the dashboard (hourly/daily/weekly/monthly presets plus a raw-expression field,
+  enable/disable/delete actions).
+- **Security fix found during this pass, not scoped to cron**: `system_user` validation
+  across `app.go`/`logs.go`/`site.go` (and the new `cron.go`) checked only a `"site_"`
+  *prefix* before building a filesystem path from the value — a crafted string like
+  `site_/../../../etc/passwd` would pass that check and reach `filepath.Join`. Replaced
+  all five call sites with a shared `validateSiteSystemUser` (`exec_helpers.go`): a
+  full-charset regex matching exactly what `systemUserForDomain` ever generates,
+  bringing `system_user` up to the same strict-charset standard already used for
+  database/domain identifiers (`identifierRe`/`domainRe`). Bounded by the existing
+  trust model (only an authenticated dashboard session can dispatch a capability at
+  all), so this is defense-in-depth hardening, not a closed remote-exploit path — see
+  `SECURITY.md` §4 and `SERVERAVATAR_PARITY.md` SRV-005 for the full writeup.
+- Added 13 new capability-layer tests (schedule/command validation including the
+  newline-injection case, create/list round trip, duplicate-ID rejection,
+  enable/disable persistence, delete removing only the targeted entry, last-entry
+  deletion removing the file rather than leaving it empty, unknown-ID rejection, and
+  the `validateSiteSystemUser` path-traversal regression test) and 5 new control-plane
+  tests (cron store round trip + cross-server scoping, endpoint not-found boundaries,
+  field-validation-before-dispatch). Full suite: 75 test functions (was 61),
+  `go vet`/`gofmt` clean.
+- Updated `SYSTEM.md`, `API.md`, `OPERATIONS.md`, `SECURITY.md`, `TESTING.md`, and
+  `SERVERAVATAR_PARITY.md` to reflect cron management as implemented (SRV-005 now
+  `COMPLETE`; live-`cron`/inotify pickup itself remains `BLOCKED_EXTERNAL` — not
+  exercisable without a real running `crond` to observe).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

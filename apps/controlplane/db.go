@@ -150,4 +150,14 @@ CREATE TABLE IF NOT EXISTS backups (
 	status     TEXT NOT NULL,
 	created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS crons (
+	id         TEXT PRIMARY KEY,
+	server_id  TEXT NOT NULL REFERENCES servers(id),
+	site_id    TEXT NOT NULL,
+	schedule   TEXT NOT NULL,
+	command    TEXT NOT NULL,
+	enabled    INTEGER NOT NULL DEFAULT 1,
+	created_at TEXT NOT NULL
+);
 `

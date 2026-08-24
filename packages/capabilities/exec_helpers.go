@@ -7,9 +7,28 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 )
+
+// siteSystemUserRe is the strict allow-list for a site's isolated system
+// user: exactly what systemUserForDomain (site.go) ever generates —
+// "site_" followed by 1-28 lowercase letters, digits, or underscores.
+// Several capabilities (app.go, cron.go, logs.go, site.go) build a
+// filesystem path directly from a caller-supplied system_user; validating
+// only a "site_" prefix still lets a crafted value containing "/" or ".."
+// through to path construction (e.g. "site_/../../../etc/passwd" passes a
+// prefix check). validateSiteSystemUser is the one place that full charset
+// is enforced, so every call site gets the same guarantee.
+var siteSystemUserRe = regexp.MustCompile(`^site_[a-z0-9_]{1,28}$`)
+
+func validateSiteSystemUser(sysUser string) error {
+	if !siteSystemUserRe.MatchString(sysUser) {
+		return fmt.Errorf("invalid system_user %q", sysUser)
+	}
+	return nil
+}
 
 // run executes a fixed argv (never a shell, never caller-built strings) and
 // returns combined output. This is the one place every capability in this

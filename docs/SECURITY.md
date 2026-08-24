@@ -101,6 +101,22 @@ Properties this guarantees:
 - Each hosted application runs as its **own Linux system user** with its own PHP-FPM
   pool, `open_basedir`, disabled dangerous PHP functions, and file ownership — a
   compromised app cannot read/write another app's files or crontab.
+  **Crontab isolation implemented**: `cron.create`/`cron.set_enabled`/`cron.delete`
+  (`packages/capabilities/cron.go`) each write only to
+  `/etc/cron.d/serverpanel-<system_user>` — one file per site, and every cron job it
+  contains runs as that site's own unprivileged system user, never root. While building
+  this, found and fixed a real gap in the shared `system_user` validation used across
+  `app.go`/`logs.go`/`site.go`/`cron.go`: it previously checked only a `"site_"`
+  *prefix* before building a filesystem path from the value, which would let a crafted
+  string like `site_/../../../etc/cron.d/evil` pass the check and reach `filepath.Join`.
+  Replaced with `validateSiteSystemUser` (`exec_helpers.go`), a full-charset regex
+  matching exactly what `systemUserForDomain` ever generates — see
+  `SERVERAVATAR_PARITY.md` SRV-005 and `TestValidateSiteSystemUserRejectsPathTraversal`.
+  This is bounded by the existing trust model (only an already-authenticated dashboard
+  session can dispatch a capability at all — see §1-3 above), so it is a defense-in-depth
+  hardening fix, not a closed remote-exploit path, but it brings every `system_user`
+  call site up to the same strict-charset standard already used for database/domain
+  identifiers (`identifierRe`, `domainRe`).
 - Each application's database user has grants scoped to only its own database/schema.
 - The agent process itself runs with the minimum privilege it can — where an action
   genuinely requires root (installing packages, editing `/etc/nginx`, managing

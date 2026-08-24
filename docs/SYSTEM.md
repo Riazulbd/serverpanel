@@ -80,7 +80,7 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | SSH/SFTP management, SSH-key mgmt, port mgmt, root-login controls | ⬜ Phase 2 |
 | Automatic security updates | ⬜ Phase 2 (`unattended-upgrades` integration) |
 | Service controls | ✅ `service.control`, allow-listed units/actions only |
-| Cron-job management | ⬜ Phase 2 |
+| Cron-job management | ✅ per-site-user `/etc/cron.d/serverpanel-<user>` files, fully agent-managed; create/list/enable-disable/delete, dashboard UI with common-schedule presets |
 | Process/worker management | ⬜ Phase 2 |
 | Disk-usage analysis, safe cleanup | ⬜ not started |
 | Server diagnostics | 🚧 `diagnostics.basic` (read-only service-state check); no
@@ -164,14 +164,14 @@ Phase boundaries and full milestone/estimate tables are in `product-plan.md` §6
 is the condensed status:
 
 - **Phase 1 — secure working foundation:** ~90% of the *capability* surface exists and
-  is tested per-capability (see the tables above); the biggest real gaps are backup
-  **restore**, an automated test suite (now added, see `TESTING.md`), SSL auto-renewal,
-  and agent cert auto-rotation. Not "GA-ready" yet, but the architecture and security
-  primitives it depends on (mTLS, allow-listed capabilities, per-app isolation, audit
-  log) are real and proven, not stubs.
-- **Phase 2 — professional server management:** not started. Git deployment,
-  cron/process management, SSH/firewall management UI, remote backups, cross-server
-  migration all remain ⬜.
+  is tested per-capability (see the tables above); backup **restore** and cron-job
+  management have since been added (see `TESTING.md`); the remaining real gaps are SSL
+  auto-renewal and agent cert auto-rotation. Not "GA-ready" yet, but the architecture and
+  security primitives it depends on (mTLS, allow-listed capabilities, per-app isolation,
+  audit log) are real and proven, not stubs.
+- **Phase 2 — professional server management:** cron-job management is now done (see
+  above); Git deployment, process/worker management, SSH/firewall management UI, remote
+  backups, and cross-server migration all remain ⬜.
 - **Phase 3 — commercial platform:** not started.
 
 ## 4. System architecture
@@ -253,6 +253,7 @@ EXISTS`, applied on every `openDB` call — idempotent, no separate migration to
 | `audit_log` | append-only: seq, timestamp, server, actor, action, detail |
 | `sites` | id, server, domain, system user, docroot, app type, PHP version, status |
 | `backups` | id, server, site, scope, path, size, sha256, status, created_at |
+| `crons` | id, server, site, schedule, command, enabled, created_at |
 
 No ORM — every query is a small, explicit SQL statement in `store.go`. All secrets
 (session tokens, bootstrap tokens) are stored only as SHA-256 hashes; passwords use
@@ -297,8 +298,9 @@ Current capability list: `system.ping`, `service.control`, `diagnostics.basic`,
 `stack.install`, `site.create`, `site.set_php_version`, `site.set_status`,
 `app.wordpress_install`, `ssl.issue_letsencrypt`, `ssl.install_custom`, `db.create`,
 `db.delete`, `db.list`, `file.list`, `file.read`, `file.write`, `file.delete`,
-`backup.run`, `backup.restore`, `logs.tail`. Notably absent (by design, until reviewed
-and added): `git.deploy`, `cron.upsert`, `ssh.*`, `firewall.*`, `agent.self_update`.
+`backup.run`, `backup.restore`, `logs.tail`, `cron.create`, `cron.list`,
+`cron.delete`, `cron.set_enabled`. Notably absent (by design, until reviewed and
+added): `git.deploy`, `ssh.*`, `firewall.*`, `agent.self_update`.
 
 ## 13. Installation and deployment
 

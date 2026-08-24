@@ -46,6 +46,10 @@ protected route; there is no route that skips it by omission.
 | `GET` | `/api/v1/servers/{id}/sites/{siteId}/backups` | List backups for a site, newest first |
 | `POST` | `/api/v1/servers/{id}/sites/{siteId}/backups` | Dispatch `backup.run` and persist the resulting backup record |
 | `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a previously recorded backup |
+| `GET` | `/api/v1/servers/{id}/sites/{siteId}/crons` | List cron jobs for a site, newest first |
+| `POST` | `/api/v1/servers/{id}/sites/{siteId}/crons` | Dispatch `cron.create` and persist the resulting cron record |
+| `POST` | `/api/v1/servers/{id}/crons/{cronId}/toggle` | Dispatch `cron.set_enabled` and update the persisted record |
+| `DELETE` | `/api/v1/servers/{id}/crons/{cronId}` | Dispatch `cron.delete` and remove the persisted record |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -136,6 +140,42 @@ pre-restore safety backups taken automatically before anything was overwritten,
 isn't connected; `422` if `backup.restore` itself failed on the agent (the agent-side
 error message explains why, and any checkpoint already taken is named in it so it's
 never a silent loss).
+
+### `POST /api/v1/servers/{id}/sites/{siteId}/crons`
+```json
+{"schedule": "0 3 * * *", "command": "php /home/sites/site_example/artisan schedule:run"}
+```
+`schedule` must be exactly 5 whitespace-separated fields, each restricted to digits and
+`* / , -` (no day/month names). `command` must be non-empty, contain no newline, and be
+under 2000 characters. Dispatches `cron.create` with `system_user` taken from the
+site's own recorded `system_user` (never caller-supplied) and a control-plane-generated
+`id`; only on the agent reporting success is a `crons` row persisted. → `201` with the
+`cronRecord` JSON (`ID`, `ServerID`, `SiteID`, `Schedule`, `Command`, `Enabled`,
+`CreatedAt`). `404` if the site doesn't exist on that server; `400` for a missing
+schedule/command; `502` if the agent isn't connected; `422` if `cron.create` itself
+failed on the agent (e.g. the schedule fails validation agent-side too, or the cron ID
+somehow collides).
+
+### `GET /api/v1/servers/{id}/sites/{siteId}/crons`
+→ `200` with an array of `cronRecord`, newest first. `404` if the site doesn't exist on
+that server.
+
+### `POST /api/v1/servers/{id}/crons/{cronId}/toggle`
+```json
+{"enabled": false}
+```
+Dispatches `cron.set_enabled` for the cron's own recorded `system_user`/`id`; only on
+agent-side success is the persisted `enabled` flag updated. Disabling comments the
+entry's line out in the agent's `/etc/cron.d/serverpanel-<user>` file rather than
+deleting it, so the original schedule/command survive a later re-enable unchanged. →
+`200 {"id": "...", "enabled": bool}`. `404` if the cron (or the site it belongs to)
+doesn't exist on that server; `502`/`422` as above.
+
+### `DELETE /api/v1/servers/{id}/crons/{cronId}`
+Dispatches `cron.delete` for the cron's own recorded `system_user`/`id`; only on
+agent-side success is the persisted record removed — the store never claims a cron is
+gone while it's still live on the server. → `200 {"status": "deleted"}`. `404`/`502`/
+`422` as above.
 
 ### `POST /agents/register`
 ```json

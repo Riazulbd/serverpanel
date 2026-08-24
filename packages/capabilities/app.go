@@ -31,8 +31,8 @@ func handleWordPressInstall(ctx context.Context, params map[string]any, progress
 	adminEmail, _ := params["admin_email"].(string)
 	siteTitle, _ := params["site_title"].(string)
 
-	if sysUser == "" || !strings.HasPrefix(sysUser, "site_") {
-		return "", fmt.Errorf("invalid system_user")
+	if err := validateSiteSystemUser(sysUser); err != nil {
+		return "", err
 	}
 	expectedRoot := filepath.Join("/home/sites", sysUser)
 	if !strings.HasPrefix(docroot, expectedRoot) {

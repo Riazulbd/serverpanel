@@ -287,6 +287,93 @@ func TestCreateBackupRejectsInvalidScope(t *testing.T) {
 	}
 }
 
+func TestCronEndpointsRequireARealSiteOrCron(t *testing.T) {
+	secureCookies = false
+	defer func() { secureCookies = true }()
+
+	a := newTestAPIServer(t)
+	h := a.routes()
+
+	doJSON(t, h, "POST", "/api/v1/auth/signup", map[string]string{
+		"Email": "cronops@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	rec := doJSON(t, h, "POST", "/api/v1/auth/login", map[string]string{
+		"Email": "cronops@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	cookie := sessionCookie(rec)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers", map[string]any{"Name": "web-11"}, cookie)
+	var created struct {
+		ServerID string `json:"server_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+
+	rec = doJSON(t, h, "GET", "/api/v1/servers/"+created.ServerID+"/sites/site_nonexistent/crons", nil, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("list crons for nonexistent site: status = %d, want 404", rec.Code)
+	}
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/sites/site_nonexistent/crons",
+		map[string]any{"schedule": "* * * * *", "command": "echo hi"}, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("create cron for nonexistent site: status = %d, want 404", rec.Code)
+	}
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/crons/cron_nonexistent/toggle",
+		map[string]any{"enabled": false}, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("toggle nonexistent cron: status = %d, want 404", rec.Code)
+	}
+
+	rec = doJSON(t, h, "DELETE", "/api/v1/servers/"+created.ServerID+"/crons/cron_nonexistent", nil, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("delete nonexistent cron: status = %d, want 404", rec.Code)
+	}
+}
+
+func TestCreateCronRejectsMissingFieldsAndDispatchesWhenValid(t *testing.T) {
+	secureCookies = false
+	defer func() { secureCookies = true }()
+
+	a := newTestAPIServer(t)
+	h := a.routes()
+
+	doJSON(t, h, "POST", "/api/v1/auth/signup", map[string]string{
+		"Email": "cronops2@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	rec := doJSON(t, h, "POST", "/api/v1/auth/login", map[string]string{
+		"Email": "cronops2@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	cookie := sessionCookie(rec)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers", map[string]any{"Name": "web-12"}, cookie)
+	var created struct {
+		ServerID string `json:"server_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+
+	site, err := a.store.createSite(created.ServerID, "e.example.com", "site_e", "/home/sites/site_e", "static", "")
+	if err != nil {
+		t.Fatalf("createSite: %v", err)
+	}
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/sites/"+site.ID+"/crons",
+		map[string]any{"schedule": "* * * * *"}, cookie)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("create cron without command: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// A well-formed request against a site whose server has no connected
+	// agent should fail as a gateway/dispatch error, not a validation
+	// error — proving field validation happens before dispatch, matching
+	// TestCreateBackupRejectsInvalidScope's equivalent assertion.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/sites/"+site.ID+"/crons",
+		map[string]any{"schedule": "* * * * *", "command": "echo hi"}, cookie)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("create cron with no agent connected: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestRegisterEndpointRejectsBadToken(t *testing.T) {
 	a := newTestAPIServer(t)
 	h := a.routes()

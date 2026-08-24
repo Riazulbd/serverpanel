@@ -82,6 +82,36 @@ func TestServiceControlRejectsMissingParams(t *testing.T) {
 	}
 }
 
+func TestValidateSiteSystemUserRejectsPathTraversal(t *testing.T) {
+	// A prefix-only check ("site_" + anything) would let these through to
+	// filepath.Join in every call site that builds a path from
+	// system_user (app.go, cron.go, logs.go, site.go) — validateSiteSystemUser
+	// is what closes that off by constraining the whole string's charset,
+	// not just its prefix.
+	bad := []string{
+		"site_/../../../etc/passwd",
+		"site_..",
+		"site_foo/bar",
+		"site_foo bar",
+		"site_" + strings.Repeat("a", 40), // longer than systemUserForDomain ever produces
+		"root",
+		"",
+		"SITE_EXAMPLE", // uppercase never produced by systemUserForDomain (always lowercased)
+	}
+	for _, s := range bad {
+		if err := validateSiteSystemUser(s); err == nil {
+			t.Errorf("validateSiteSystemUser(%q) = nil, want an error", s)
+		}
+	}
+
+	good := []string{"site_example_com", "site_a", systemUserForDomain("Example.COM")}
+	for _, s := range good {
+		if err := validateSiteSystemUser(s); err != nil {
+			t.Errorf("validateSiteSystemUser(%q) = %v, want nil", s, err)
+		}
+	}
+}
+
 func TestDefaultRegistryCoversAllDeclaredCapabilityConstants(t *testing.T) {
 	r := Default()
 	want := []string{
@@ -89,6 +119,7 @@ func TestDefaultRegistryCoversAllDeclaredCapabilityConstants(t *testing.T) {
 		CapSiteCreate, CapSiteSetPHP, CapSiteSetStatus, CapWordPressInstall,
 		CapSSLIssueLE, CapSSLInstallCustom, CapDBCreate, CapDBDelete, CapDBList,
 		CapFileList, CapFileRead, CapFileWrite, CapFileDelete, CapBackupRun, CapBackupRestore, CapLogsTail,
+		CapCronCreate, CapCronList, CapCronDelete, CapCronSetEnabled,
 	}
 	for _, name := range want {
 		if _, ok := r[name]; !ok {

@@ -43,8 +43,8 @@ func handleLogsTail(ctx context.Context, params map[string]any, progress Progres
 	if lines > maxTailLines {
 		lines = maxTailLines
 	}
-	if sysUser == "" || !strings.HasPrefix(sysUser, "site_") {
-		return "", fmt.Errorf("invalid system_user")
+	if err := validateSiteSystemUser(sysUser); err != nil {
+		return "", err
 	}
 
 	var path string

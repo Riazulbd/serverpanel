@@ -239,8 +239,8 @@ func handleSiteSetPHP(ctx context.Context, params map[string]any, progress Progr
 	if phpVersion != "8.3" {
 		return "", fmt.Errorf("only php_version 8.3 is available in this release")
 	}
-	if sysUser == "" || !strings.HasPrefix(sysUser, "site_") {
-		return "", fmt.Errorf("invalid system_user")
+	if err := validateSiteSystemUser(sysUser); err != nil {
+		return "", err
 	}
 	return "no-op: only one PHP version is currently offered", nil
 }
@@ -248,8 +248,8 @@ func handleSiteSetPHP(ctx context.Context, params map[string]any, progress Progr
 func handleSiteSetStatus(ctx context.Context, params map[string]any, progress Progress) (string, error) {
 	sysUser, _ := params["system_user"].(string)
 	status, _ := params["status"].(string)
-	if sysUser == "" || !strings.HasPrefix(sysUser, "site_") {
-		return "", fmt.Errorf("invalid system_user")
+	if err := validateSiteSystemUser(sysUser); err != nil {
+		return "", err
 	}
 	enabledPath := "/etc/nginx/sites-enabled/" + sysUser + ".conf"
 
