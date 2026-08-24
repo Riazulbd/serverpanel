@@ -2,6 +2,40 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-24 — Agent certificate auto-renewal, closing the SRV-001 security gap
+
+- **Implemented before-expiry mTLS client-certificate auto-renewal**, closing the
+  known gap tracked in `SYSTEM.md` §21 and `SECURITY.md` §2 since Phase 1: agent
+  certs are issued with a fixed 30-day TTL, and until now there was no renewal
+  path — an agent whose cert expired had to be manually re-registered with a fresh
+  bootstrap token, a real risk for any server the operator doesn't proactively
+  babysit.
+  - Protocol: two new envelope types (`renew_request`/`renew_response`,
+    `packages/proto/proto.go`) carried over an agent's existing authenticated mTLS
+    session — deliberately not a new REST endpoint, since the live session itself
+    (already verified at handshake time against the CA and revocation list) is
+    exactly the credential a renewal should require, with no bootstrap token
+    involved.
+  - Agent (`apps/agent/renew.go`): `renewalLoop` checks the current certificate's
+    expiry every 6 hours; once within 10 days of expiry it generates a fresh
+    keypair, sends a CSR, and on success persists the new cert/key atomically
+    (temp file + rename, so a crash mid-write can't corrupt an unattended agent's
+    only identity) and updates the shared in-memory `identity` so the next
+    reconnect uses it.
+  - Control plane (`apps/controlplane/gateway.go` `handleRenewRequest`,
+    `apps/controlplane/store.go` `rotateCert`): signs the new cert bound to the
+    session-authenticated `server_id` (never the CSR's requested subject, closing
+    off a renewal-time identity-spoofing path) and atomically revokes the old
+    certificate serial so exactly one certificate is ever valid per server.
+  - An agent that stays offline past its certificate's actual expiry (rather than
+    reconnecting periodically, the normal case) still falls back to manual
+    re-registration — intentional fail-closed behavior, not a gap.
+  - Tests: `apps/controlplane/store_test.go`, `apps/controlplane/gateway_test.go`
+    (real CSR through the full renewal handler, including CA verification of the
+    result and rejection of a malformed CSR), `apps/agent/renew_test.go`.
+  - Updated `docs/SYSTEM.md`, `docs/SECURITY.md`, and `docs/SERVERAVATAR_PARITY.md`
+    (SRV-001) to reflect this as implemented rather than a known limitation.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

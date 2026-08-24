@@ -60,11 +60,19 @@ Properties this guarantees:
   (agent offline past expiry), the agent falls back to a manual re-registration flow
   requiring a fresh bootstrap token from the dashboard — this is an intentional
   fail-closed behavior, not silent re-trust.
-  **Not yet implemented**: certs are issued with a fixed 30-day TTL
-  (`apps/controlplane/http.go` `handleRegister`) and there is no renewal
-  capability/endpoint yet — an agent whose cert expires must be manually
-  re-registered with a fresh bootstrap token today. Auto-rotation before expiry is
-  tracked as a known gap in `SYSTEM.md`.
+  **Implemented as described**: certs are issued with a fixed 30-day TTL
+  (`apps/controlplane/http.go` `handleRegister`); the agent's `renewalLoop`
+  (`apps/agent/renew.go`) checks the certificate it is currently connected with every
+  6 hours and, once within 10 days of expiry, sends a `renew_request` over that same
+  live mTLS session — no bootstrap token involved, since holding a valid, unexpired,
+  unrevoked cert (already proven by the handshake that established the session) is
+  itself the credential. The gateway (`handleRenewRequest` in
+  `apps/controlplane/gateway.go`) signs a fresh 30-day cert bound to the
+  session-authenticated `server_id` (never the CSR's requested subject) and
+  atomically revokes the old serial (`store.rotateCert`) so exactly one cert is ever
+  valid per server. An agent that stays offline past its cert's actual expiry still
+  falls back to manual re-registration with a fresh bootstrap token — renewal only
+  covers an agent that reconnects periodically, which is the normal case.
 - The Agent CA's private key is held in a dedicated, tightly access-controlled service
   (e.g. `step-ca` or HSM-backed KMS in later stages), separate from the general
   application database, so a control-plane app-tier compromise doesn't automatically

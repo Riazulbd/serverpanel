@@ -173,8 +173,35 @@ func (g *gateway) handleConn(conn net.Conn) {
 					}
 				}
 			}
+		case proto.MsgRenewRequest:
+			if env.RenewRequest != nil {
+				g.handleRenewRequest(sess, serverID, serial, env.RenewRequest)
+			}
 		}
 	}
+}
+
+// handleRenewRequest issues a fresh 30-day client certificate for the
+// already-authenticated agent on this session, and revokes the certificate
+// it connected with (oldSerial) so exactly one stays valid. No bootstrap
+// token is involved — the live mTLS session itself, verified at handshake
+// time against the CA and the revocation list, is the credential.
+func (g *gateway) handleRenewRequest(sess *agentSession, serverID, oldSerial string, req *proto.RenewRequest) {
+	resp := proto.RenewResponse{}
+	certPEM, newSerial, err := g.ca.signAgentCSR([]byte(req.CSRPEM), serverID, 30*24*time.Hour)
+	if err != nil {
+		resp.Error = err.Error()
+		g.store.log(serverID, "", "agent.cert_renewal_failed", err.Error())
+	} else if err := g.store.rotateCert(serverID, oldSerial, newSerial.String()); err != nil {
+		resp.Error = fmt.Sprintf("could not persist renewed certificate: %v", err)
+		g.store.log(serverID, "", "agent.cert_renewal_failed", resp.Error)
+	} else {
+		resp.CertPEM = string(certPEM)
+	}
+
+	sess.mu.Lock()
+	_ = sess.enc.Encode(proto.Envelope{Type: proto.MsgRenewResponse, RenewResponse: &resp})
+	sess.mu.Unlock()
 }
 
 // dispatch sends a task to a connected agent and waits (bounded by ctx) for

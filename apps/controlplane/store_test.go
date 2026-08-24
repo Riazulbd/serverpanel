@@ -152,6 +152,54 @@ func TestRevokeServerBlocksReuseOfCertSerial(t *testing.T) {
 	}
 }
 
+func TestRotateCertRevokesOldSerialAndUpdatesRecord(t *testing.T) {
+	st := newTestStore(t)
+	id, _, err := st.createServer("web-5", "", nil, time.Hour, "admin@example.com")
+	if err != nil {
+		t.Fatalf("createServer: %v", err)
+	}
+	st.markIssuedCert(id, "100")
+
+	if err := st.rotateCert(id, "100", "101"); err != nil {
+		t.Fatalf("rotateCert: %v", err)
+	}
+	if !st.isRevoked("100") {
+		t.Fatal("old cert serial should be revoked after rotation")
+	}
+	if st.isRevoked("101") {
+		t.Fatal("newly issued cert serial should not be revoked")
+	}
+	rec, ok := st.get(id)
+	if !ok {
+		t.Fatal("server should still exist after rotation")
+	}
+	if rec.CertSerial != "101" {
+		t.Fatalf("cert_serial = %q, want %q", rec.CertSerial, "101")
+	}
+	// Rotation must not itself disconnect the server — unlike revokeServer,
+	// this is a routine renewal, not a security response, and the live
+	// session it travels over stays open (see gateway.go handleRenewRequest).
+	if rec.Status == statusDisconnected {
+		t.Fatal("rotateCert should not mark the server disconnected")
+	}
+}
+
+func TestRotateCertWithNoPriorSerialJustRecordsNewOne(t *testing.T) {
+	st := newTestStore(t)
+	id, _, err := st.createServer("web-6", "", nil, time.Hour, "admin@example.com")
+	if err != nil {
+		t.Fatalf("createServer: %v", err)
+	}
+
+	if err := st.rotateCert(id, "", "200"); err != nil {
+		t.Fatalf("rotateCert: %v", err)
+	}
+	rec, _ := st.get(id)
+	if rec.CertSerial != "200" {
+		t.Fatalf("cert_serial = %q, want %q", rec.CertSerial, "200")
+	}
+}
+
 func TestRevokeServerRejectsUnknownServer(t *testing.T) {
 	st := newTestStore(t)
 	if err := st.revokeServer("srv_doesnotexist", "admin@example.com"); err == nil {

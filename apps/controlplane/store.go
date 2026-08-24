@@ -178,6 +178,39 @@ func (s *store) isRevoked(serial string) bool {
 	return n > 0
 }
 
+// rotateCert atomically revokes a server's previous certificate serial (if
+// any) and records the newly issued one, so exactly one certificate is ever
+// valid for a server at a time. Used by the agent's before-expiry renewal
+// flow (apps/controlplane/gateway.go handleRenewRequest): unlike
+// markIssuedCert (first issuance, nothing to revoke yet), a renewal always
+// has a predecessor cert that must stop being trusted, otherwise a leaked
+// old key would remain usable for the rest of its original 30-day TTL even
+// after rotation.
+func (s *store) rotateCert(serverID, oldSerial, newSerial string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if oldSerial != "" {
+		if _, err := tx.Exec(
+			`INSERT OR REPLACE INTO revoked_certs (serial, server_id, revoked_at) VALUES (?, ?, ?)`,
+			oldSerial, serverID, time.Now().UTC().Format(time.RFC3339Nano),
+		); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`UPDATE servers SET cert_serial = ? WHERE id = ?`, newSerial, serverID); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.log(serverID, "", "agent.cert_renewed", fmt.Sprintf("old_serial=%s new_serial=%s", oldSerial, newSerial))
+	return nil
+}
+
 // revokeServer revokes the server's issued certificate and marks it
 // disconnected. Re-connecting requires a brand new bootstrap token —
 // there is no path back to trust from a revoked certificate.

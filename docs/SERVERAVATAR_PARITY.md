@@ -40,19 +40,19 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Documentation page**: Server Management → "Installation (Direct Method)"
 - **Short description**: Connect a VPS to the control plane via a one-time install command.
 - **Expected behavior** (per ServerAvatar's documented workflow): operator creates a server record, gets an install command, runs it on a clean VPS, server appears connected.
-- **Our implementation**: bootstrap-token → mTLS client-certificate exchange (`POST /agents/register`); agent connects outbound to the gateway, no inbound port required.
+- **Our implementation**: bootstrap-token → mTLS client-certificate exchange (`POST /agents/register`); agent connects outbound to the gateway, no inbound port required. Certificates are short-lived (30-day TTL) and self-renew: the agent's `renewalLoop` (`apps/agent/renew.go`) requests a fresh cert over its already-authenticated session once within 10 days of expiry, and the gateway (`handleRenewRequest`) issues the new cert and revokes the old serial (`store.rotateCert`) atomically — no bootstrap token is needed or accepted for renewal.
 - **Frontend**: `web/index.html` "+ New server" modal, server list/detail views.
 - **Backend service**: `apiServer.handleCreateServer`, `agentCA`, `gateway`.
-- **API endpoint(s)**: `POST /api/v1/servers`, `POST /agents/register`.
-- **Agent command**: n/a (registration precedes capability dispatch).
+- **API endpoint(s)**: `POST /api/v1/servers`, `POST /agents/register`; renewal travels over the persistent mTLS session (`renew_request`/`renew_response` envelopes), not a REST endpoint.
+- **Agent command**: n/a (registration precedes capability dispatch); renewal is agent-initiated protocol traffic, not a dispatched capability.
 - **DB tables**: `servers`, `bootstrap_tokens`, `revoked_certs`.
 - **Required permission**: authenticated session (single-user model today — see ORG-001).
-- **Security considerations**: single-use/short-lived hashed bootstrap tokens; certificate identity independently derived from the mTLS handshake, never trusted from agent-asserted data; revocation checked every handshake.
-- **Test coverage**: `apps/controlplane/http_test.go` (`TestServerCreateListRevokeFlow`, `TestRegisterEndpointRejectsBadToken`), `apps/controlplane/store_test.go`.
+- **Security considerations**: single-use/short-lived hashed bootstrap tokens; certificate identity independently derived from the mTLS handshake, never trusted from agent-asserted data; revocation checked every handshake; renewed certs are bound to the session-authenticated `server_id`, never the CSR's requested subject, so an agent cannot rename itself or claim another server's identity via renewal.
+- **Test coverage**: `apps/controlplane/http_test.go` (`TestServerCreateListRevokeFlow`, `TestRegisterEndpointRejectsBadToken`), `apps/controlplane/store_test.go` (`TestRotateCertRevokesOldSerialAndUpdatesRecord`, `TestRotateCertWithNoPriorSerialJustRecordsNewOne`), `apps/controlplane/gateway_test.go` (`TestHandleRenewRequestIssuesFreshCertAndRevokesOld`, `TestHandleRenewRequestRejectsInvalidCSR`), `apps/agent/renew_test.go`.
 - **Current status**: `COMPLETE`
-- **Completion date**: 2026-08-14
-- **Known differences**: no agent certificate auto-renewal before 30-day expiry yet.
-- **Reason**: scoped out of the initial secure-foundation pass; tracked in `SYSTEM.md` §21.
+- **Completion date**: 2026-08-24
+- **Known differences**: an agent that stays offline past its cert's actual 30-day expiry (rather than reconnecting periodically, the normal case) still falls back to manual re-registration with a fresh bootstrap token — fail-closed by design, not a gap.
+- **Reason**: n/a — this closes the previously tracked gap.
 
 ### SRV-002 — Hosting stack installation (LEMP)
 - **Category**: Server Management
