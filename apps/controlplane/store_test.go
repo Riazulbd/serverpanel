@@ -297,3 +297,55 @@ func TestBackupCreateListGetRoundTrip(t *testing.T) {
 		t.Fatal("expected getBackup to refuse a backup ID under the wrong server")
 	}
 }
+
+func TestDatabaseCreateListGetDeleteRoundTrip(t *testing.T) {
+	st := newTestStore(t)
+	serverID, _, _ := st.createServer("web-11", "", nil, time.Hour, "admin@example.com")
+
+	rec, err := st.createDatabase(serverID, "wp_example", "wp_example")
+	if err != nil {
+		t.Fatalf("createDatabase: %v", err)
+	}
+	if rec.ID == "" || rec.Status != "active" {
+		t.Fatalf("unexpected database record: %+v", rec)
+	}
+
+	list := st.listDatabases(serverID)
+	if len(list) != 1 || list[0].Name != "wp_example" {
+		t.Fatalf("listDatabases = %+v, want one entry named wp_example", list)
+	}
+
+	got, ok := st.getDatabase(serverID, rec.ID)
+	if !ok || got.OwnerUser != "wp_example" {
+		t.Fatalf("getDatabase = %+v, ok=%v, want owner_user wp_example", got, ok)
+	}
+
+	otherServer, _, _ := st.createServer("web-12", "", nil, time.Hour, "admin@example.com")
+	if _, ok := st.getDatabase(otherServer, rec.ID); ok {
+		t.Fatal("expected getDatabase to refuse a database ID under the wrong server")
+	}
+
+	if err := st.deleteDatabaseRecord(serverID, rec.ID); err != nil {
+		t.Fatalf("deleteDatabaseRecord: %v", err)
+	}
+	if list := st.listDatabases(serverID); len(list) != 0 {
+		t.Fatalf("listDatabases after delete = %+v, want empty", list)
+	}
+}
+
+func TestDatabaseNameIsUniquePerServer(t *testing.T) {
+	st := newTestStore(t)
+	serverID, _, _ := st.createServer("web-13", "", nil, time.Hour, "admin@example.com")
+
+	if _, err := st.createDatabase(serverID, "dup_db", "dup_owner"); err != nil {
+		t.Fatalf("createDatabase: %v", err)
+	}
+	if _, err := st.createDatabase(serverID, "dup_db", "dup_owner2"); err == nil {
+		t.Fatal("expected a UNIQUE constraint error for a duplicate (server_id, name)")
+	}
+
+	otherServer, _, _ := st.createServer("web-14", "", nil, time.Hour, "admin@example.com")
+	if _, err := st.createDatabase(otherServer, "dup_db", "dup_owner"); err != nil {
+		t.Fatalf("createDatabase on a different server should not collide: %v", err)
+	}
+}

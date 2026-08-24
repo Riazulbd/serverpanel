@@ -150,4 +150,22 @@ CREATE TABLE IF NOT EXISTS backups (
 	status     TEXT NOT NULL,
 	created_at TEXT NOT NULL
 );
+
+-- databases records a MariaDB/MySQL database this control plane created via
+-- db.create, scoped to the server it lives on. The owner user's password is
+-- deliberately NOT a column here: it is generated server-side, shown to the
+-- caller exactly once in the create response (see databases.go), and never
+-- persisted anywhere — the same "shown once, never stored" pattern already
+-- used for bootstrap tokens/session tokens (as hashes) elsewhere in this
+-- schema, applied here because there is no hash-and-compare use case for a
+-- credential the operator needs to actually read back.
+CREATE TABLE IF NOT EXISTS databases (
+	id         TEXT PRIMARY KEY,
+	server_id  TEXT NOT NULL REFERENCES servers(id),
+	name       TEXT NOT NULL,
+	owner_user TEXT NOT NULL,
+	status     TEXT NOT NULL,
+	created_at TEXT NOT NULL,
+	UNIQUE(server_id, name)
+);
 `

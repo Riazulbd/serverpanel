@@ -253,6 +253,7 @@ EXISTS`, applied on every `openDB` call — idempotent, no separate migration to
 | `audit_log` | append-only: seq, timestamp, server, actor, action, detail |
 | `sites` | id, server, domain, system user, docroot, app type, PHP version, status |
 | `backups` | id, server, site, scope, path, size, sha256, status, created_at |
+| `databases` | id, server, name, owner user, status, created_at (owner password is never persisted — see §19a) |
 
 No ORM — every query is a small, explicit SQL statement in `store.go`. All secrets
 (session tokens, bootstrap tokens) are stored only as SHA-256 hashes; passwords use
@@ -369,6 +370,31 @@ control plane created and recorded — the restore is only ever given `archive_p
 caller-supplied free-form values. See `OPERATIONS.md` §Backup and restore for the
 operational walkthrough. Cross-server restore (copying a backup to a different agent
 first) remains a Phase 2 gap — see §21.
+
+## 19a. Database management and credential handling
+
+`db.create`/`db.delete`/`db.list` (`packages/capabilities/db.go`) were previously
+dispatchable only through the generic task-dispatch endpoint, with no control-plane
+persistence or dedicated UI (DB-001/DB-005 in `SERVERAVATAR_PARITY.md`). A dedicated
+`databases` table and API (`apps/controlplane/databases.go`,
+`POST|GET /api/v1/servers/{id}/databases`, `DELETE .../databases/{dbId}`) now mirror
+what backups already had: dispatch `db.create`/`db.delete`, and only on the agent
+confirming success, persist/remove the control-plane record — so the `databases` table
+reflects databases that actually exist on the server, never a stale or aspirational
+list.
+
+The owner user's password is deliberately **not** a column in `databases`: it is
+generated control-plane-side (`crypto/rand`, 24 bytes, base64url) and returned to the
+caller exactly once in the create response, then never stored anywhere — the same
+"shown once, no server-side copy" pattern already used for bootstrap tokens (there, a
+hash is kept for one-time redemption; here, there is no redemption use case, so nothing
+is kept at all). This sidesteps needing an at-rest encryption/key-rotation subsystem
+for reversible secrets before this feature could ship — a real gap (product-plan.md's
+"Secret management" phase still needs to build that for any future feature that *does*
+need to read a credential back, e.g. storing cloud-provider API keys), but not one this
+feature introduces or blocks on. The tradeoff: if the operator loses the password, there
+is no recovery path other than dropping and recreating the database — documented in
+`API.md`'s `POST .../databases` entry, not a silent gap.
 
 ## 20. Monitoring and alerting
 

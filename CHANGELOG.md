@@ -2,6 +2,44 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-24 — Database management: control-plane persistence and dashboard UI
+
+- **Closed DB-005** (`docs/SERVERAVATAR_PARITY.md`), the highest-priority gap flagged
+  by the previous session's own "good candidate for the next iteration" note: the
+  `db.create`/`db.delete`/`db.list` capabilities existed and were manually verified,
+  but were only reachable through generic task dispatch, with no control-plane record
+  and no dedicated UI — the same gap backups had before `backup.run`/`backup.restore`
+  got their own persistence layer.
+- Added a `databases` table (`server_id`, `name`, `owner_user`, `status`, `created_at`,
+  `UNIQUE(server_id, name)`) and three new endpoints
+  (`GET`/`POST /api/v1/servers/{id}/databases`, `DELETE .../databases/{dbId}`), following
+  the same dispatch-then-persist-on-success pattern `handleCreateSite`/
+  `handleCreateBackup` already use: `db.create`/`db.delete` are dispatched to the agent
+  first, and the control-plane record is only written/removed after the agent confirms
+  success — so `databases` never reflects a database that doesn't actually exist on the
+  server.
+- **Deliberately does not store the owner user's password.** It's generated
+  control-plane-side (`crypto/rand`, 24 random bytes, base64url) and returned to the
+  caller exactly once in the create response, then never persisted anywhere — avoids
+  needing an at-rest encryption/key-rotation subsystem to ship this feature, at the cost
+  of "lost password means drop and recreate" (documented in `docs/API.md` and
+  `docs/SYSTEM.md` §19a).
+- Added a "Databases" panel to the server-detail dashboard view: a create modal
+  (name/owner-user fields) that surfaces the generated password once with a "shown
+  once, save it now" notice, a databases table, and a delete action with a destructive-
+  action confirmation dialog — mirroring the existing "Sites"/"Backups" panels.
+- Added `TestDatabaseCreateListGetDeleteRoundTrip` and `TestDatabaseNameIsUniquePerServer`
+  (`apps/controlplane/store_test.go`), and `TestDatabaseEndpointsValidateBeforeDispatch`
+  (`apps/controlplane/http_test.go`, covering validation-before-dispatch ordering,
+  not-found handling, and that a failed dispatch never persists an orphan record).
+  `go test ./...` passes; `gofmt -l .` and `go vet ./...` are clean. The underlying
+  `db.create`/`db.delete` real-MariaDB round trip remains manually verified in a prior
+  session, not re-exercised here (no MariaDB in this environment) — same documented
+  environment limitation as the backup db/full-scope gap.
+- Updated `docs/API.md`, `docs/SYSTEM.md` (§8 schema table, new §19a), and
+  `docs/SERVERAVATAR_PARITY.md` (DB-001 promoted, DB-005 marked `COMPLETE`, progress
+  counts refreshed) in the same pass.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

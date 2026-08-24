@@ -46,6 +46,9 @@ protected route; there is no route that skips it by omission.
 | `GET` | `/api/v1/servers/{id}/sites/{siteId}/backups` | List backups for a site, newest first |
 | `POST` | `/api/v1/servers/{id}/sites/{siteId}/backups` | Dispatch `backup.run` and persist the resulting backup record |
 | `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a previously recorded backup |
+| `GET` | `/api/v1/servers/{id}/databases` | List databases recorded for a server, newest first |
+| `POST` | `/api/v1/servers/{id}/databases` | Dispatch `db.create` and persist the resulting database record |
+| `DELETE` | `/api/v1/servers/{id}/databases/{dbId}` | Dispatch `db.delete` and remove the database record |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -136,6 +139,34 @@ pre-restore safety backups taken automatically before anything was overwritten,
 isn't connected; `422` if `backup.restore` itself failed on the agent (the agent-side
 error message explains why, and any checkpoint already taken is named in it so it's
 never a silent loss).
+
+### `POST /api/v1/servers/{id}/databases`
+```json
+{"name": "wp_example", "owner_user": "wp_example"}
+```
+Both fields must match `^[a-z][a-z0-9_]{0,30}$` (validated here *and* re-validated
+agent-side — defense in depth, same allow-list regex on both ends). The owner's
+password is generated server-side (24 random bytes, base64url) and is never
+persisted anywhere — it is returned exactly once in this response and the caller
+must save it now; a lost password has no recovery path other than dropping and
+recreating the database. Dispatches `db.create`, and only on the agent reporting
+success, persists a `databases` row (name + owner user only, no password column).
+→ `201 {"ID", "ServerID", "Name", "OwnerUser", "Status", "CreatedAt", "owner_password"}`.
+`400` for an invalid/missing name or owner_user; `502` if the agent isn't connected;
+`422` if `db.create` itself failed on the agent (e.g. the name is already taken on
+that server, enforced both by a `UNIQUE(server_id, name)` constraint before dispatch
+persistence and by MariaDB's own `CREATE DATABASE` on the agent side).
+
+### `GET /api/v1/servers/{id}/databases`
+→ `200` with an array of database records (no passwords — see above), newest first.
+`404` if the server doesn't exist.
+
+### `DELETE /api/v1/servers/{id}/databases/{dbId}`
+No request body — the database's own recorded `name` and `owner_user` are read from
+the `databases` table and passed to `db.delete` verbatim; a caller can only ever
+delete a database that was actually created and recorded through this control plane.
+→ `204` on success. `404` if the database doesn't exist on that server; `502` if the
+agent isn't connected; `422` if `db.delete` itself failed on the agent.
 
 ### `POST /agents/register`
 ```json
