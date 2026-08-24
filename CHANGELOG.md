@@ -2,6 +2,47 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-24 — Database persistence/UI, SSL auto-renewal wiring
+
+- **Closed DB-005** (control-plane persistence + dashboard UI for databases), the item
+  the previous session explicitly flagged as the best next candidate (`db.create`/
+  `db.delete`/`db.list` existed agent-side but the control plane never recorded a
+  database the way it now does sites/backups). New `databases` table (id, server, site,
+  name, owner user, engine, status, created_at — deliberately never the owner
+  password); `createDatabase`/`listDatabases`/`getDatabase`/`deleteDatabase` store
+  methods, each scoped by server ID the same way `getSite`/`getBackup` are; three new
+  endpoints (`GET`/`POST /api/v1/servers/{id}/sites/{siteId}/databases`,
+  `DELETE /api/v1/servers/{id}/databases/{databaseId}`) following the same
+  dispatch-then-persist-on-success pattern as site/backup creation; and a "Databases"
+  panel per site in the dashboard (create-database modal, table, delete with
+  confirmation).
+- The owner password is generated control-plane-side with `crypto/rand` (never accepted
+  from the client) and returned exactly once in the create response — never persisted
+  anywhere, matching the "shown once" treatment the server bootstrap token already gets.
+  See `SYSTEM.md` §19a.
+- Fixed a real ordering bug caught while writing this feature's tests:
+  `handleDBDelete` validated `owner_user` only *after* already issuing `DROP DATABASE`
+  against a live connection, instead of up front like `handleDBCreate` does. A
+  malformed `owner_user` could previously drop the database while silently failing to
+  also drop its owner user, and the validation was unreachable without a live MariaDB
+  connection to even test it. Moved the check before the database connection is opened.
+- **Wired up SSL auto-renewal** (APP-016): `stack.install` now has two new idempotent
+  steps — confirming/enabling `certbot.timer` (present in the certbot Debian/Ubuntu
+  package but not always left enabled), and installing a certbot renewal deploy hook
+  (`/etc/letsencrypt/renewal-hooks/deploy/serverpanel-reload-nginx.sh`) that reloads
+  nginx after a certificate actually renews — certbot's own documented hook mechanism,
+  since a scheduled `certbot renew` run doesn't re-run the `--nginx` plugin's install
+  step the way an interactive issuance does. Not independently verified against a real
+  Let's Encrypt renewal in this session (no public DNS in this environment — same class
+  of gap as `stack.install`'s other systemd-dependent steps).
+- Added 5 new capability-layer tests for `db.go`'s input validation (invalid database
+  name/owner_user, short password, for both `db.create` and `db.delete`) — previously
+  untested at any layer; and 4 new control-plane tests (store round trip + cross-server
+  scoping, 404s for a nonexistent site/database, validation-before-dispatch, and that a
+  failed dispatch never leaves an orphan `databases` row).
+- Updated `docs/API.md`, `docs/SYSTEM.md`, and `docs/SERVERAVATAR_PARITY.md` (DB-001 →
+  `COMPLETE`, DB-005 closed, APP-016 → `PARTIAL`) to match.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

@@ -19,6 +19,10 @@ import (
 // read before deciding what to do.
 const stackReportPath = "/var/lib/serverpanel-agent/stack-report.json"
 
+// certbotDeployHookPath is where the nginx-reload renewal deploy hook is
+// installed — see the "certbot renewal deploy hook" install step below.
+const certbotDeployHookPath = "/etc/letsencrypt/renewal-hooks/deploy/serverpanel-reload-nginx.sh"
+
 // installStep is one idempotent unit of the stack installer. check reports
 // whether the step's target state already holds (so a retried
 // stack.install skips everything already done rather than re-running it),
@@ -137,6 +141,51 @@ func phase1LEMPSteps() []installStep {
 			Run: func(ctx context.Context) error {
 				_, err := aptInstall(ctx, "certbot", "python3-certbot-nginx")
 				return err
+			},
+		},
+		{
+			// The certbot Debian/Ubuntu package ships a systemd timer
+			// (certbot.timer, running "certbot renew" twice daily) but does
+			// not always leave it enabled+active out of the box, and a
+			// stack.install run on an already-provisioned server should
+			// still be able to confirm/repair this — hence its own
+			// idempotent step rather than assuming the package postinst
+			// handled it. Without this, ssl.issue_letsencrypt certificates
+			// silently expire after 90 days with nothing renewing them.
+			Name: "certbot automatic renewal timer",
+			Check: func(ctx context.Context) bool {
+				enabled, _ := run(ctx, "systemctl", "is-enabled", "certbot.timer")
+				active, _ := run(ctx, "systemctl", "is-active", "certbot.timer")
+				return strings.TrimSpace(enabled) == "enabled" && strings.TrimSpace(active) == "active"
+			},
+			Run: func(ctx context.Context) error {
+				_, err := run(ctx, "systemctl", "enable", "--now", "certbot.timer")
+				return err
+			},
+		},
+		{
+			// certbot's own renew command reloads whatever web server
+			// config it edited via its --nginx plugin as part of each
+			// certificate's install, but a scheduled "certbot renew" run
+			// (via the timer above) only invokes deploy hooks — it does not
+			// go through the interactive --nginx installer path again. A
+			// deploy hook is certbot's own documented, supported mechanism
+			// for "run this after a renewal actually replaces a
+			// certificate" (https://certbot.eff.org/ hooks reference); this
+			// installs one that reloads nginx so a renewed certificate is
+			// actually picked up by the running server without a manual
+			// step.
+			Name: "certbot renewal deploy hook (reload nginx)",
+			Check: func(ctx context.Context) bool {
+				_, err := os.Stat(certbotDeployHookPath)
+				return err == nil
+			},
+			Run: func(ctx context.Context) error {
+				if err := os.MkdirAll("/etc/letsencrypt/renewal-hooks/deploy", 0755); err != nil {
+					return err
+				}
+				hook := "#!/bin/sh\n# Managed by ServerPanel. Reloads nginx after certbot renews any\n# certificate, so a renewed cert is served without a manual step.\nsystemctl reload nginx\n"
+				return os.WriteFile(certbotDeployHookPath, []byte(hook), 0755)
 			},
 		},
 		{

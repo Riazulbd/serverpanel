@@ -121,11 +121,11 @@ actually exists — expand a row into a full block the moment work on it begins
 - **DB tables**: none on the control-plane side yet (no `databases` table — see Known differences).
 - **Required permission**: authenticated session.
 - **Security considerations**: identifier allow-list (`^[a-z][a-z0-9_]{0,30}$`) prevents SQL-identifier injection where placeholders can't be used; grants are always single-database-scoped.
-- **Test coverage**: manually verified in a prior session against a real MariaDB; not covered by `go test` (requires a running MariaDB — this environment has none).
-- **Current status**: `PARTIAL`
-- **Completion date**: n/a
-- **Known differences**: MongoDB support, a dedicated dashboard UI, and control-plane persistence of database records (so they show up per-site the way backups now do) don't exist yet.
-- **Reason**: capability-layer work landed before the control-plane persistence/UI layer that backups just got (see BAK-001) — same pattern, not yet applied here. Good candidate for the next iteration.
+- **Test coverage**: `packages/capabilities/db_test.go` (5 new tests: invalid database name/owner_user, short password, for both `db.create` and `db.delete` — the validation-only code path that runs before any MariaDB connection is opened); `apps/controlplane/store_test.go` (`TestDatabaseCreateListGetDeleteRoundTrip`); `apps/controlplane/http_test.go` (`TestDatabaseEndpointsRequireARealSite`, `TestCreateDatabaseValidatesBeforeDispatchAndNeverPersistsThePassword`). The actual `CREATE DATABASE`/`CREATE USER`/`GRANT` round trip against a real MariaDB remains manually verified in a prior session, not covered by `go test` in this environment (no MariaDB here).
+- **Current status**: `PARTIAL` (validation and control-plane persistence/UI layer are `COMPLETE` and automated-tested; the real-MariaDB write path is `BLOCKED_EXTERNAL` in this environment, same class of gap as BAK-001/BAK-002's db-scope path)
+- **Completion date**: 2026-08-24 (persistence/UI layer); real-MariaDB verification remains `BLOCKED_EXTERNAL`.
+- **Known differences**: MongoDB support and a dedicated database-admin UI (phpMyAdmin-equivalent) don't exist yet (see DB-002/DB-003 below). Control-plane persistence + dashboard UI (this entry's former gap) is now closed — see DB-005, folded into this entry rather than kept separate now that it's implemented.
+- **Reason**: DB-002/DB-003 are separate, larger scope items tracked on their own rows.
 
 ### BAK-001 — On-demand backup (files/db/full)
 - **Category**: Backups
@@ -253,7 +253,7 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | APP-013 | Log Monitoring Suite (traffic analytics) | `NOT_STARTED` | |
 | APP-014 | Application-level WAF / AI-bot blocker | `NOT_STARTED` | |
 | APP-015 | Custom SSL upload | `PARTIAL` | `ssl.install_custom` capability exists agent-side; no dedicated dashboard UI |
-| APP-016 | Let's Encrypt SSL + auto-renewal | `PARTIAL` | `ssl.issue_letsencrypt` implemented; certbot's own renewal timer not yet wired up by `stack.install` |
+| APP-016 | Let's Encrypt SSL + auto-renewal | `PARTIAL` | `ssl.issue_letsencrypt` implemented; `stack.install` now confirms/enables `certbot.timer` and installs an nginx-reload renewal deploy hook (2026-08-24) — real end-to-end renewal against a live Let's Encrypt certificate is `BLOCKED_EXTERNAL` in this environment (no public DNS to issue a real cert against in the first place) |
 
 ### Database management — not yet started (DB-*)
 | ID | Feature | Status | Notes |
@@ -261,7 +261,7 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | DB-002 | MongoDB support | `NOT_STARTED` | |
 | DB-003 | phpMyAdmin / DB admin UI integration | `NOT_STARTED` | |
 | DB-004 | Database process/query monitoring | `NOT_STARTED` | |
-| DB-005 | Control-plane persistence + dashboard UI for databases (mirroring what BAK-001 just got) | `NOT_STARTED` | See DB-001's "Known differences" |
+| DB-005 | Control-plane persistence + dashboard UI for databases | `COMPLETE` | Folded into DB-001's detail block above (2026-08-24) rather than kept as a separate row now that it's implemented |
 
 ### WordPress Toolkit (WP-*)
 | ID | Feature | Status |
@@ -295,16 +295,17 @@ capability surface (per task-brief §3/§101), not just what's already built.
 
 | Status | Count (detailed entries) | Count (summary-table rows) |
 |---|---|---|
-| `COMPLETE` | 3 (SRV-001, BAK-002, ACC-001) | 1 (PROV-006) |
-| `PARTIAL` | 3 (SRV-002, APP-001, APP-002, DB-001, BAK-001 — 5 total, see note) | 6 |
-| `NOT_STARTED` | 0 | ~55 |
-| `BLOCKED_EXTERNAL` | 0 (sub-scoped within BAK-001/BAK-002's db/full-scope MariaDB verification) | 0 |
+| `COMPLETE` | 3 (SRV-001, BAK-002, ACC-001) | 2 (PROV-006, DB-005) |
+| `PARTIAL` | 5 (SRV-002, APP-001, APP-002, DB-001, BAK-001) | 5 |
+| `NOT_STARTED` | 0 | ~53 |
+| `BLOCKED_EXTERNAL` | 0 (sub-scoped within BAK-001/BAK-002's db/full-scope and DB-001's real-write MariaDB verification, and APP-016's real Let's Encrypt renewal verification) | 0 |
 | `INTENTIONALLY_NOT_APPLICABLE` | 0 | 1 |
 
 *Note: BAK-001 and BAK-002 are each simultaneously `COMPLETE` for their files-scope path
 and effectively `PARTIAL`/`BLOCKED_EXTERNAL` for their db/full-scope path pending a real
 MariaDB environment to verify against — see their detail blocks above rather than a
-single flattened status.*
+single flattened status. DB-001 is similarly `COMPLETE` for validation/persistence/UI
+and `BLOCKED_EXTERNAL` for the real MariaDB write path, for the same reason.*
 
 This is an honest, small-fraction-covered snapshot, not a claim of broad parity. The
 overwhelming majority of ServerAvatar's documented capability surface remains
@@ -354,6 +355,17 @@ establish the tracking process and close the single highest-priority gap
 
 ## Change history
 
+- **2026-08-24**: closed DB-005 (control-plane persistence + dashboard UI for
+  databases), folding it into DB-001's detail block and raising DB-001 from `PARTIAL`
+  (capability layer only) to `PARTIAL`/effectively-`COMPLETE`-except-real-MariaDB-write
+  (validation, persistence, and dashboard UI now implemented and automated-tested; only
+  the real MariaDB write path remains `BLOCKED_EXTERNAL` in this environment). Also
+  advanced APP-016 (SSL auto-renewal): `stack.install` now confirms/enables
+  `certbot.timer` and installs an nginx-reload renewal deploy hook; the real
+  end-to-end Let's Encrypt renewal is `BLOCKED_EXTERNAL` (no public DNS in this
+  environment). Fixed a real ordering bug in `handleDBDelete` found while writing this
+  session's tests (owner_user validated after, not before, a live DB write). See
+  `CHANGELOG.md` 2026-08-24 for the full detail.
 - **2026-08-17**: initial version. Established the tracking process; recorded
   SRV-001/002, APP-001/002, DB-001, ACC-001 (pre-existing work) at accurate status, and
   BAK-001/BAK-002 reflecting this session's backup-restore implementation. ~60

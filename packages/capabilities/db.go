@@ -84,6 +84,15 @@ func handleDBDelete(ctx context.Context, params map[string]any, progress Progres
 	if !identifierRe.MatchString(name) {
 		return "", fmt.Errorf("invalid database name %q", name)
 	}
+	// Validated up front, before ever touching the database, the same as
+	// handleDBCreate — not after DROP DATABASE has already run. An invalid
+	// owner_user must never be interpolated into a DROP USER statement
+	// regardless of when it's checked, but validating late would also mean
+	// a malformed request silently succeeds at dropping the database while
+	// still failing to also drop its owner user.
+	if owner != "" && !identifierRe.MatchString(owner) {
+		return "", fmt.Errorf("invalid owner_user %q", owner)
+	}
 
 	db, err := mariaDBConn()
 	if err != nil {
@@ -95,9 +104,6 @@ func handleDBDelete(ctx context.Context, params map[string]any, progress Progres
 		return "", fmt.Errorf("drop database: %w", err)
 	}
 	if owner != "" {
-		if !identifierRe.MatchString(owner) {
-			return "", fmt.Errorf("invalid owner_user %q", owner)
-		}
 		db.ExecContext(ctx, fmt.Sprintf("DROP USER IF EXISTS `%s`@'localhost'", owner))
 	}
 	return fmt.Sprintf("database %q deleted", name), nil

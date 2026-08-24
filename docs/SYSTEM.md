@@ -73,7 +73,9 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | PHP-FPM, multiple PHP versions | 🚧 php-fpm pool-per-site works; only 8.3 is
   installed by `stack.install` today, though `site.set_php_version` and pool paths are
   already version-parameterized |
-| MariaDB/MySQL | ✅ install + per-DB least-privilege grants |
+| MariaDB/MySQL | ✅ install + per-DB least-privilege grants; ✅ control-plane persistence
+  (`databases` table) + dashboard "Databases" panel per site (create/list/delete), owner
+  password generated server-side and shown exactly once, never persisted |
 | Redis, Git, Composer, WP-CLI | ✅ installed by `stack.install` |
 | Node.js | ⬜ Phase 3 |
 | UFW firewall, Fail2Ban | 🚧 installed with safe defaults; no rule-editing UI |
@@ -103,8 +105,11 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | Maintenance mode | ⬜ not implemented |
 | Basic auth on a site | ⬜ not implemented |
 | Custom + Let's Encrypt SSL | ✅ `ssl.issue_letsencrypt` (certbot), `ssl.install_custom` |
-| Automatic SSL renewal | ⬜ not implemented (certbot's own renewal timer is not
-  wired up by `stack.install` yet) |
+| Automatic SSL renewal | ✅ `stack.install` now confirms/enables `certbot.timer` and
+  installs a renewal deploy hook that reloads nginx after a certificate actually
+  renews — see `SECURITY.md`/`OPERATIONS.md` for the mechanism; not independently
+  verified against a real Let's Encrypt renewal in this environment (no public DNS —
+  same class of gap as `stack.install`'s systemd-dependent steps generally, see §21) |
 | WordPress auto-login/auto-update | ⬜ not implemented |
 | Application enable/disable | ✅ `site.set_status` |
 | Secure file manager | ✅ `file.list/read/write/delete`, scoped + symlink-safe |
@@ -253,6 +258,8 @@ EXISTS`, applied on every `openDB` call — idempotent, no separate migration to
 | `audit_log` | append-only: seq, timestamp, server, actor, action, detail |
 | `sites` | id, server, domain, system user, docroot, app type, PHP version, status |
 | `backups` | id, server, site, scope, path, size, sha256, status, created_at |
+| `databases` | id, server, site, name, owner user, engine, status, created_at — never
+  the owner password, which is generated per-create and returned once (§19) |
 
 No ORM — every query is a small, explicit SQL statement in `store.go`. All secrets
 (session tokens, bootstrap tokens) are stored only as SHA-256 hashes; passwords use
@@ -369,6 +376,19 @@ control plane created and recorded — the restore is only ever given `archive_p
 caller-supplied free-form values. See `OPERATIONS.md` §Backup and restore for the
 operational walkthrough. Cross-server restore (copying a backup to a different agent
 first) remains a Phase 2 gap — see §21.
+
+## 19a. Database credential model
+
+`db.create` generates the owner password control-plane-side (`crypto/rand`, 24 random
+bytes, hex-encoded) rather than accepting one from the caller. It is passed to the
+agent for the `CREATE USER ... IDENTIFIED BY` statement and returned exactly once in
+the `POST .../databases` response body — the same "shown once, never persisted"
+treatment the server-creation bootstrap token gets (§11). The `databases` table records
+the database name, owner username, engine, and status, but never the password, in
+either plaintext or hashed form — there is nothing to hash, since nothing needs
+verifying against it later (unlike a login credential, a database password only needs
+to exist once, at creation time, for the operator to copy into the application's own
+config). Losing it means resetting it (delete + recreate), not recovering it.
 
 ## 20. Monitoring and alerting
 
