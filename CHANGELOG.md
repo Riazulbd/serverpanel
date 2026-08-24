@@ -2,6 +2,46 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-24 — Database management: control-plane persistence + dashboard UI
+
+- **Closed DB-001/DB-005's flagged gap**: databases now have their own durable
+  `databases` table and a "Databases" panel in the server-detail dashboard view,
+  mirroring the pattern backups (`BAK-001`) already established — previously,
+  `db.create`/`db.delete`/`db.list` existed only as agent-side capabilities reachable
+  through raw generic task dispatch, with nothing recorded on the control-plane side.
+- New `apps/controlplane/databases.go`: `handleCreateDatabase`/`handleListDatabases`/
+  `handleDeleteDatabase`, following the same dispatch-then-persist-on-success pattern as
+  `handleCreateSite`/`handleCreateBackup` — `db.create`/`db.delete` are dispatched to the
+  agent first, and the `databases` row is only written or removed after the agent
+  reports success, so a failed dispatch never leaves an orphan record. The owner
+  password is always generated server-side (`crypto/rand`, 24 bytes, base64url) and
+  returned exactly once in the create response; it is never persisted, matching the
+  bootstrap-token model.
+- New endpoints: `GET`/`POST /api/v1/servers/{id}/databases`,
+  `DELETE /api/v1/servers/{id}/databases/{dbId}`. New `databases` table (unique per
+  `(server_id, name)`) and store methods (`createDatabase`/`listDatabases`/
+  `getDatabase`/`deleteDatabase`, each scoped by server ID the same way
+  `getSite`/`getBackup` are).
+- Dashboard: a "Databases" panel under each server (alongside "Sites"), with a
+  create-database modal (name + optional owner user, defaulting to the database name)
+  that reveals the generated password exactly once, a databases table, and a delete
+  button with a destructive-action confirmation dialog.
+- Added 4 new tests: `TestDatabaseCreateListGetDeleteRoundTrip` and
+  `TestCreateDatabaseRejectsDuplicateNamePerServer` (store layer, real SQLite), and
+  `TestDatabaseEndpointsRequireARealServerAndValidName` (HTTP boundary — 404s for a
+  nonexistent server/database, 400 for an invalid name, 404 for a nonexistent
+  `site_id`, 502 for no agent connected, and an explicit assertion that a failed
+  dispatch leaves the databases list empty). Full suite: 64 test functions, `go vet`
+  clean. Also manually smoke-tested end-to-end against a running instance (`curl`
+  through signup → login → create server → invalid-name/no-agent/delete-nonexistent
+  responses) and confirmed the dashboard HTML serves the new panel's markup.
+- Updated `SYSTEM.md`, `API.md`, `TESTING.md`, and `SERVERAVATAR_PARITY.md` (DB-001
+  updated, new DB-005 detail entry added as `COMPLETE`) to reflect this.
+- The real agent-side `db.create`/`db.delete` MariaDB round trip remains
+  `BLOCKED_EXTERNAL` in this environment (no MariaDB available here) — same
+  pre-existing gap as BAK-001/BAK-002's db-scope path, not something this change
+  introduces or resolves.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

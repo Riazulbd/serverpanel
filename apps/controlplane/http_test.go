@@ -287,6 +287,66 @@ func TestCreateBackupRejectsInvalidScope(t *testing.T) {
 	}
 }
 
+func TestDatabaseEndpointsRequireARealServerAndValidName(t *testing.T) {
+	secureCookies = false
+	defer func() { secureCookies = true }()
+
+	a := newTestAPIServer(t)
+	h := a.routes()
+
+	doJSON(t, h, "POST", "/api/v1/auth/signup", map[string]string{
+		"Email": "dbops@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	rec := doJSON(t, h, "POST", "/api/v1/auth/login", map[string]string{
+		"Email": "dbops@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	cookie := sessionCookie(rec)
+
+	rec = doJSON(t, h, "GET", "/api/v1/servers/srv_nonexistent/databases", nil, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("list databases for nonexistent server: status = %d, want 404", rec.Code)
+	}
+
+	rec = doJSON(t, h, "DELETE", "/api/v1/servers/srv_nonexistent/databases/db_nonexistent", nil, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("delete nonexistent database: status = %d, want 404", rec.Code)
+	}
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers", map[string]any{"Name": "web-11"}, cookie)
+	var created struct {
+		ServerID string `json:"server_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/databases",
+		map[string]any{"name": "Not-Valid!"}, cookie)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("create database with invalid name: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/databases",
+		map[string]any{"name": "wp_ok", "site_id": "site_nonexistent"}, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("create database against nonexistent site: status = %d, want 404, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// A valid request against a server with no connected agent should fail
+	// as a gateway/dispatch error, not a validation error, and must never
+	// create a database record when dispatch fails.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/databases",
+		map[string]any{"name": "wp_ok"}, cookie)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("create database with no agent connected: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	rec = doJSON(t, h, "GET", "/api/v1/servers/"+created.ServerID+"/databases", nil, cookie)
+	var list []any
+	json.Unmarshal(rec.Body.Bytes(), &list)
+	if len(list) != 0 {
+		t.Fatalf("databases list after failed dispatch = %v, want empty (dispatch-then-persist-on-success)", list)
+	}
+}
+
 func TestRegisterEndpointRejectsBadToken(t *testing.T) {
 	a := newTestAPIServer(t)
 	h := a.routes()
