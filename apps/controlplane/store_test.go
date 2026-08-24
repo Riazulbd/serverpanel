@@ -297,3 +297,75 @@ func TestBackupCreateListGetRoundTrip(t *testing.T) {
 		t.Fatal("expected getBackup to refuse a backup ID under the wrong server")
 	}
 }
+
+func TestDatabaseCreateListGetDeleteRoundTrip(t *testing.T) {
+	st := newTestStore(t)
+	serverID, _, _ := st.createServer("web-9", "", nil, time.Hour, "admin@example.com")
+
+	rec, err := st.createDatabaseRecord(serverID, "", "wp_example", "wp_example_user")
+	if err != nil {
+		t.Fatalf("createDatabaseRecord: %v", err)
+	}
+	if rec.ID == "" || rec.Status != "active" {
+		t.Fatalf("unexpected database record: %+v", rec)
+	}
+
+	list := st.listDatabases(serverID)
+	if len(list) != 1 || list[0].Name != "wp_example" {
+		t.Fatalf("listDatabases = %+v, want one entry matching the created database", list)
+	}
+
+	got, ok := st.getDatabase(serverID, rec.ID)
+	if !ok {
+		t.Fatal("expected getDatabase to find the created database")
+	}
+	if got.OwnerUser != "wp_example_user" {
+		t.Fatalf("getDatabase = %+v, fields don't round-trip", got)
+	}
+
+	otherServer, _, _ := st.createServer("web-10", "", nil, time.Hour, "admin@example.com")
+	if _, ok := st.getDatabase(otherServer, rec.ID); ok {
+		t.Fatal("expected getDatabase to refuse a database ID under the wrong server")
+	}
+
+	if err := st.deleteDatabaseRecord(serverID, rec.ID); err != nil {
+		t.Fatalf("deleteDatabaseRecord: %v", err)
+	}
+	if _, ok := st.getDatabase(serverID, rec.ID); ok {
+		t.Fatal("expected getDatabase to return false after deleteDatabaseRecord")
+	}
+}
+
+func TestCreateDatabaseRecordRejectsDuplicateNameOnSameServer(t *testing.T) {
+	st := newTestStore(t)
+	serverID, _, _ := st.createServer("web-11", "", nil, time.Hour, "admin@example.com")
+
+	if _, err := st.createDatabaseRecord(serverID, "", "dup_db", "owner_one"); err != nil {
+		t.Fatalf("createDatabaseRecord: %v", err)
+	}
+	if _, err := st.createDatabaseRecord(serverID, "", "dup_db", "owner_two"); err == nil {
+		t.Fatal("expected a second database with the same name on the same server to be rejected")
+	}
+}
+
+func TestGenerateSecureSecretLengthAndCharset(t *testing.T) {
+	secret, err := generateSecureSecret(32)
+	if err != nil {
+		t.Fatalf("generateSecureSecret: %v", err)
+	}
+	if len(secret) != 32 {
+		t.Fatalf("len(secret) = %d, want 32", len(secret))
+	}
+	for _, c := range secret {
+		if !strings.ContainsRune("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789", c) {
+			t.Fatalf("secret contains unexpected character %q", c)
+		}
+	}
+	other, err := generateSecureSecret(32)
+	if err != nil {
+		t.Fatalf("generateSecureSecret (second call): %v", err)
+	}
+	if secret == other {
+		t.Fatal("two generated secrets were identical — expected cryptographically random output")
+	}
+}

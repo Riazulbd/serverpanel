@@ -2,6 +2,45 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-24 — Control-plane database persistence and dashboard UI (DB-005)
+
+- **Closed the "capability exists but isn't durably tracked" gap for databases**
+  (`db.create`/`db.delete` were already implemented agent-side but, unlike sites and
+  backups, nothing on the control plane recorded what had been created — parity item
+  DB-005). Added a `databases` table (`server_id`, optional `site_id`, `name` unique
+  per server, `owner_user`, `status`, `created_at` — deliberately no password column),
+  three new endpoints (`POST`/`GET /api/v1/servers/{id}/databases`,
+  `DELETE /api/v1/servers/{id}/databases/{dbId}`) in a new `apps/controlplane/databases.go`,
+  and a "Databases" panel in the server-detail dashboard view (create modal with
+  one-time password display, list table, per-row delete).
+- Both endpoints follow the same dispatch-then-persist-on-success pattern
+  `handleCreateSite`/`handleCreateBackup` already use: `db.create`/`db.delete` must
+  actually succeed on the agent before the control plane's own record is written or
+  removed, so the `databases` table can never claim a database exists (or has been
+  deleted) that the agent disagrees about.
+- The database owner's password is generated control-plane-side (32-character
+  `crypto/rand` secret — never accepted from the client, so it can't accidentally be
+  weak or reused) and returned exactly once in the create response, the same
+  one-time-disclosure treatment `handleCreateServer` already gives a bootstrap token.
+  It is never written to the `databases` table or logged.
+- Exported `capabilities.ValidIdentifier` (previously an unexported regex private to
+  `packages/capabilities/db.go`) so the control plane can reject an invalid database
+  or owner-user name before ever dispatching to an agent, using the exact same charset
+  rule the agent independently re-checks — one source of truth, checked twice.
+- Added `apps/controlplane/store_test.go` (`TestDatabaseCreateListGetDeleteRoundTrip`,
+  `TestCreateDatabaseRecordRejectsDuplicateNameOnSameServer`,
+  `TestGenerateSecureSecretLengthAndCharset`) and `apps/controlplane/http_test.go`
+  (`TestDatabaseEndpointsRequireARealServer`, `TestCreateDatabaseRejectsInvalidInput`)
+  covering the not-found/validation/validate-before-dispatch boundaries, matching the
+  existing backup-endpoint test shape. Manually smoke-tested the full signup → login →
+  create-server → create-database (400 on invalid name, 502 with no agent connected)
+  flow against a running instance.
+- Updated `docs/SYSTEM.md` (schema table, application-management feature table, §9
+  summary), `docs/API.md` (route table + full request/response reference for the three
+  new endpoints), and `docs/SERVERAVATAR_PARITY.md` (DB-001's detail block expanded to
+  reflect the new persistence/UI layer; the former DB-005 summary-table row is now
+  folded into DB-001 rather than tracked separately).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

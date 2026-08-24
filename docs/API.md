@@ -46,6 +46,9 @@ protected route; there is no route that skips it by omission.
 | `GET` | `/api/v1/servers/{id}/sites/{siteId}/backups` | List backups for a site, newest first |
 | `POST` | `/api/v1/servers/{id}/sites/{siteId}/backups` | Dispatch `backup.run` and persist the resulting backup record |
 | `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a previously recorded backup |
+| `GET` | `/api/v1/servers/{id}/databases` | List databases recorded for a server |
+| `POST` | `/api/v1/servers/{id}/databases` | Dispatch `db.create` and persist the resulting database record |
+| `DELETE` | `/api/v1/servers/{id}/databases/{dbId}` | Dispatch `db.delete` and remove the database record |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -136,6 +139,35 @@ pre-restore safety backups taken automatically before anything was overwritten,
 isn't connected; `422` if `backup.restore` itself failed on the agent (the agent-side
 error message explains why, and any checkpoint already taken is named in it so it's
 never a silent loss).
+
+### `POST /api/v1/servers/{id}/databases`
+```json
+{"name": "wp_example", "owner_user": "wp_example_user", "site_id": ""}
+```
+`name` and `owner_user` must each match `^[a-z][a-z0-9_]{0,30}$` (checked control-plane
+side via `capabilities.ValidIdentifier`, the same charset `db.create` itself enforces
+agent-side — defense in depth, not a second source of truth). `site_id` is optional and,
+if given, must reference an existing site on that server (association only; `db.create`
+itself is server-scoped, not site-scoped). The owner password is generated server-side
+(32 random alphanumeric characters, `crypto/rand`) — never accepted from the client —
+and dispatched to `db.create`. Only on the agent reporting success is a `databases` row
+persisted. → `201 {"database": {...databaseRecord}, "owner_password": "..."}`. The
+password is returned exactly once and is never stored in the control plane's database —
+same one-time-disclosure treatment as a server's bootstrap token. `404` if the server
+doesn't exist; `400` for an invalid name/owner_user/site_id; `502` if the agent isn't
+connected; `422` if `db.create` itself failed on the agent (e.g. the name is already
+taken on that MariaDB instance).
+
+### `GET /api/v1/servers/{id}/databases`
+→ `200` with an array of `databaseRecord` (`ID`, `ServerID`, `SiteID`, `Name`,
+`OwnerUser`, `Status`, `CreatedAt`), newest first. `404` if the server doesn't exist.
+
+### `DELETE /api/v1/servers/{id}/databases/{dbId}`
+No request body — the database's own recorded `name` and `owner_user` are read from the
+`databases` table and passed to `db.delete` verbatim. Only on the agent reporting
+success is the record removed. → `200 {"status": "deleted"}`. `404` if the database
+doesn't exist on that server; `502` if the agent isn't connected; `422` if `db.delete`
+itself failed on the agent.
 
 ### `POST /agents/register`
 ```json

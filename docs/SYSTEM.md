@@ -113,6 +113,12 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | Archive creation/extraction | ⬜ not implemented |
 | Application logs / advanced log viewer | 🚧 `logs.tail` (redacted) exists; no
   filtering/search UI yet |
+| Database management (control-plane persistence + dashboard UI) | ✅ `db.create`/
+  `db.delete` dispatch persists/removes a `databases` row (owner password generated
+  server-side, disclosed once, never stored); dashboard lists/creates/deletes per
+  server. `db.list` (agent-side, queries live MariaDB state) is not yet surfaced in the
+  dashboard — the control plane's own record is the source of truth for what it
+  created, not a live re-query |
 
 ### Git deployment
 All ⬜ — explicitly scoped to Phase 2 (`product-plan.md` §9). No Git deployment,
@@ -253,6 +259,7 @@ EXISTS`, applied on every `openDB` call — idempotent, no separate migration to
 | `audit_log` | append-only: seq, timestamp, server, actor, action, detail |
 | `sites` | id, server, domain, system user, docroot, app type, PHP version, status |
 | `backups` | id, server, site, scope, path, size, sha256, status, created_at |
+| `databases` | id, server, site (optional), name (unique per server), owner user, status, created_at — no password column; see §9 `POST .../databases` |
 
 No ORM — every query is a small, explicit SQL statement in `store.go`. All secrets
 (session tokens, bootstrap tokens) are stored only as SHA-256 hashes; passwords use
@@ -262,8 +269,9 @@ bcrypt (cost 12); nothing is stored in plaintext.
 
 Full list with request/response shapes in `API.md`. Summary: `/api/v1/auth/*`
 (signup/login/logout/TOTP enroll+verify/MFA challenge/me), `/api/v1/servers*` (CRUD,
-revoke, task dispatch, sites, audit), `/agents/register` (the one unauthenticated
-agent-facing endpoint, secured by the bootstrap token itself), `/healthz`.
+revoke, task dispatch, sites, backups, databases, audit), `/agents/register` (the one
+unauthenticated agent-facing endpoint, secured by the bootstrap token itself),
+`/healthz`.
 
 ## 10. Background jobs
 
