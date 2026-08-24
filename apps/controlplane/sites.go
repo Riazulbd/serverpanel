@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/riazulbd/serverpanel/packages/capabilities"
 	"github.com/riazulbd/serverpanel/packages/proto"
 )
 
@@ -70,4 +71,55 @@ func (a *apiServer) handleCreateSite(w http.ResponseWriter, r *http.Request) {
 		"site":        site,
 		"temp_domain": result.TempDomain,
 	})
+}
+
+// handleCheckSiteSSL dispatches the read-only ssl.status capability for a
+// site's domain and persists whatever it reports (including "none", if no
+// certificate is installed) — the one place the sites table's ssl_* columns
+// are ever written, mirroring how handleCreateSite is the one place a site
+// row itself is written. Safe to call as often as the dashboard wants;
+// unlike ssl.issue_letsencrypt/ssl.install_custom it never changes anything
+// on the agent.
+func (a *apiServer) handleCheckSiteSSL(w http.ResponseWriter, r *http.Request) {
+	actor := sessionFromContext(r.Context()).Email
+	serverID := r.PathValue("id")
+	siteID := r.PathValue("siteId")
+
+	site, ok := a.store.getSite(serverID, siteID)
+	if !ok {
+		writeErr(w, http.StatusNotFound, "site not found")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+
+	ev, err := a.gw.dispatch(ctx, serverID, actor, capabilities.CapSSLStatus, map[string]any{
+		"domain": site.Domain,
+	})
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	if ev.Status != proto.TaskSucceeded {
+		writeErr(w, http.StatusUnprocessableEntity, "ssl.status failed on the agent: "+ev.Message)
+		return
+	}
+
+	var result struct {
+		Status    string `json:"status"`
+		Issuer    string `json:"issuer"`
+		ExpiresAt string `json:"expires_at"`
+	}
+	if err := json.Unmarshal([]byte(ev.Detail), &result); err != nil {
+		writeErr(w, http.StatusInternalServerError, "ssl.status ran but its result could not be parsed: "+err.Error())
+		return
+	}
+
+	if err := a.store.updateSiteSSL(serverID, siteID, result.Status, result.Issuer, result.ExpiresAt); err != nil {
+		writeErr(w, http.StatusInternalServerError, "ssl status was checked but could not be recorded: "+err.Error())
+		return
+	}
+	updated, _ := a.store.getSite(serverID, siteID)
+	writeJSON(w, http.StatusOK, updated)
 }

@@ -2,6 +2,46 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-24 — SSL auto-renewal wiring and status visibility
+
+- **Closed the "certbot's own renewal timer is not wired up" gap** flagged in
+  `SYSTEM.md` since the initial pass: `stack.install` now has an explicit "certbot
+  auto-renewal timer" step (`packages/capabilities/stack.go`) that runs
+  `systemctl enable --now certbot.timer` and verifies it with `systemctl is-enabled`,
+  rather than assuming the Debian package's own postinst already enabled it. Every
+  certificate `ssl.issue_letsencrypt` obtains is issued with `--nginx`, so certbot
+  records itself as the site's installer plugin and reloads nginx on its own after each
+  renewal — no separate deploy-hook was needed.
+- **Added a new read-only capability, `ssl.status`** (`packages/capabilities/ssl.go`):
+  reports whether a domain has a certificate installed, who issued it
+  (`letsencrypt`/`custom`), and its expiry, classified as `valid`/`expiring_soon`
+  (within 14 days)/`expired`/`none`. Reads the certificate's `notAfter` via
+  `openssl x509`, never issues/renews/modifies anything, so it's safe to call as often
+  as the dashboard wants.
+- Wired it into the control plane: three new `sites` columns
+  (`ssl_status`/`ssl_issuer`/`ssl_expires_at`, migrated in via the existing
+  `addColumnIfMissing` pattern), a new `store.updateSiteSSL` method (scoped by server
+  ID the same way `getSite`/`getBackup` are), a new endpoint
+  (`POST /api/v1/servers/{id}/sites/{siteId}/ssl/check`) that dispatches `ssl.status`
+  and persists the result, and a new "SSL" panel in the site-detail dashboard view
+  ("Check status" button, status/issuer/expiry line).
+- Added 5 new capability-layer tests (invalid domain, no-cert, a real
+  `openssl`-generated Let's-Encrypt-path cert's `valid` status/expiry parsing, an
+  `expiring_soon` custom cert, and Let's-Encrypt-over-custom precedence) and 2 new
+  store tests (`updateSiteSSL` round trip and its cross-server scoping), plus an HTTP
+  boundary test for the new endpoint. Full suite: 68 test functions, `go vet`/`gofmt`
+  clean.
+- Updated `SYSTEM.md`, `API.md`, `TESTING.md`, and `docs/SERVERAVATAR_PARITY.md`
+  (APP-016 promoted from `PARTIAL` to a full `COMPLETE` detail entry; APP-015's note
+  updated to reflect the shared `ssl.status` visibility).
+- Picked per the task's prioritization order (security-critical defects → architecture
+  blockers → agent correctness → data integrity → core provisioning → application
+  lifecycle → databases → **SSL** → ...): a lapsed HTTPS certificate is a real
+  production/security failure mode, and it was the top explicitly-flagged `PARTIAL`
+  item under SSL. Scheduled/automatic re-checks and expiry-threshold alerts remain a
+  follow-up once the background-job-queue and notification-channel subsystems exist
+  (both still `NOT_STARTED`).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

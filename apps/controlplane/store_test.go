@@ -263,6 +263,44 @@ func TestGetSiteIsScopedToServerID(t *testing.T) {
 	}
 }
 
+func TestUpdateSiteSSLRoundTrip(t *testing.T) {
+	st := newTestStore(t)
+	serverID, _, _ := st.createServer("web-ssl", "", nil, time.Hour, "admin@example.com")
+	site, err := st.createSite(serverID, "c.example.com", "sp_c", "/home/sites/sp_c", "static", "")
+	if err != nil {
+		t.Fatalf("createSite: %v", err)
+	}
+	if site.SSLStatus != "" {
+		t.Fatalf("new site SSLStatus = %q, want empty (never checked yet)", site.SSLStatus)
+	}
+
+	if err := st.updateSiteSSL(serverID, site.ID, "valid", "letsencrypt", "2027-01-01T00:00:00Z"); err != nil {
+		t.Fatalf("updateSiteSSL: %v", err)
+	}
+
+	updated, ok := st.getSite(serverID, site.ID)
+	if !ok {
+		t.Fatal("expected getSite to still find the site")
+	}
+	if updated.SSLStatus != "valid" || updated.SSLIssuer != "letsencrypt" || updated.SSLExpiresAt != "2027-01-01T00:00:00Z" {
+		t.Fatalf("unexpected SSL fields after update: %+v", updated)
+	}
+}
+
+func TestUpdateSiteSSLScopedToServerID(t *testing.T) {
+	st := newTestStore(t)
+	serverA, _, _ := st.createServer("web-ssl-a", "", nil, time.Hour, "admin@example.com")
+	serverB, _, _ := st.createServer("web-ssl-b", "", nil, time.Hour, "admin@example.com")
+	site, err := st.createSite(serverA, "d.example.com", "sp_d", "/home/sites/sp_d", "static", "")
+	if err != nil {
+		t.Fatalf("createSite: %v", err)
+	}
+
+	if err := st.updateSiteSSL(serverB, site.ID, "valid", "letsencrypt", "2027-01-01T00:00:00Z"); err == nil {
+		t.Fatal("expected updateSiteSSL to refuse a site ID under the wrong server")
+	}
+}
+
 func TestBackupCreateListGetRoundTrip(t *testing.T) {
 	st := newTestStore(t)
 	serverID, _, _ := st.createServer("web-7", "", nil, time.Hour, "admin@example.com")

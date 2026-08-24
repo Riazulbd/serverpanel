@@ -237,6 +237,11 @@ func TestBackupEndpointsRequireARealSite(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("restore nonexistent backup: status = %d, want 404", rec.Code)
 	}
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/sites/site_nonexistent/ssl/check", nil, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("ssl check for nonexistent site: status = %d, want 404", rec.Code)
+	}
 }
 
 func TestCreateBackupRejectsInvalidScope(t *testing.T) {

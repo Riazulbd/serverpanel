@@ -53,6 +53,7 @@ func (a *apiServer) routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/servers/{id}/tasks", a.requireAuth(a.handleDispatchTask))
 	mux.HandleFunc("GET /api/v1/servers/{id}/sites", a.requireAuth(a.handleListSites))
 	mux.HandleFunc("POST /api/v1/servers/{id}/sites", a.requireAuth(a.handleCreateSite))
+	mux.HandleFunc("POST /api/v1/servers/{id}/sites/{siteId}/ssl/check", a.requireAuth(a.handleCheckSiteSSL))
 	mux.HandleFunc("GET /api/v1/servers/{id}/sites/{siteId}/backups", a.requireAuth(a.handleListBackups))
 	mux.HandleFunc("POST /api/v1/servers/{id}/sites/{siteId}/backups", a.requireAuth(a.handleCreateBackup))
 	mux.HandleFunc("POST /api/v1/servers/{id}/backups/{backupId}/restore", a.requireAuth(a.handleRestoreBackup))

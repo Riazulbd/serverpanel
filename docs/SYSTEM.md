@@ -103,8 +103,15 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | Maintenance mode | ⬜ not implemented |
 | Basic auth on a site | ⬜ not implemented |
 | Custom + Let's Encrypt SSL | ✅ `ssl.issue_letsencrypt` (certbot), `ssl.install_custom` |
-| Automatic SSL renewal | ⬜ not implemented (certbot's own renewal timer is not
-  wired up by `stack.install` yet) |
+| Automatic SSL renewal | ✅ `stack.install` now explicitly enables `certbot.timer`
+  (checked via `systemctl is-enabled`, not just assumed from the package's postinst);
+  every `ssl.issue_letsencrypt` cert is issued with `--nginx`, so certbot's own renewal
+  reloads nginx itself — no separate deploy-hook needed |
+| SSL status / expiry visibility | ✅ `ssl.status` (read-only: existence, issuer,
+  expiry, `valid`/`expiring_soon`/`expired`) — dispatched via
+  `POST /api/v1/servers/{id}/sites/{siteId}/ssl/check`, persisted on the site record,
+  surfaced in the dashboard's site-detail view. No scheduled/automatic re-check or
+  expiry alert yet — this is an on-demand check, not a background job (see §20) |
 | WordPress auto-login/auto-update | ⬜ not implemented |
 | Application enable/disable | ✅ `site.set_status` |
 | Secure file manager | ✅ `file.list/read/write/delete`, scoped + symlink-safe |
@@ -251,7 +258,7 @@ EXISTS`, applied on every `openDB` call — idempotent, no separate migration to
 | `bootstrap_tokens` | SHA-256-hashed single-use token → server, expiry |
 | `revoked_certs` | cert serial → server, revoked-at (checked on every gateway handshake) |
 | `audit_log` | append-only: seq, timestamp, server, actor, action, detail |
-| `sites` | id, server, domain, system user, docroot, app type, PHP version, status |
+| `sites` | id, server, domain, system user, docroot, app type, PHP version, status, SSL status/issuer/expiry (last `ssl.status` check, if any) |
 | `backups` | id, server, site, scope, path, size, sha256, status, created_at |
 
 No ORM — every query is a small, explicit SQL statement in `store.go`. All secrets
@@ -295,10 +302,11 @@ in `packages/capabilities/capabilities_test.go`), not just convention.
 
 Current capability list: `system.ping`, `service.control`, `diagnostics.basic`,
 `stack.install`, `site.create`, `site.set_php_version`, `site.set_status`,
-`app.wordpress_install`, `ssl.issue_letsencrypt`, `ssl.install_custom`, `db.create`,
-`db.delete`, `db.list`, `file.list`, `file.read`, `file.write`, `file.delete`,
-`backup.run`, `backup.restore`, `logs.tail`. Notably absent (by design, until reviewed
-and added): `git.deploy`, `cron.upsert`, `ssh.*`, `firewall.*`, `agent.self_update`.
+`app.wordpress_install`, `ssl.issue_letsencrypt`, `ssl.install_custom`, `ssl.status`,
+`db.create`, `db.delete`, `db.list`, `file.list`, `file.read`, `file.write`,
+`file.delete`, `backup.run`, `backup.restore`, `logs.tail`. Notably absent (by design,
+until reviewed and added): `git.deploy`, `cron.upsert`, `ssh.*`, `firewall.*`,
+`agent.self_update`.
 
 ## 13. Installation and deployment
 
@@ -373,9 +381,11 @@ first) remains a Phase 2 gap — see §21.
 ## 20. Monitoring and alerting
 
 Heartbeat-based only: uptime/load/mem%/disk% every connection cycle, surfaced in the
-dashboard's server-detail view. No threshold-based alerting, no email/Slack/Telegram/
-Discord/webhook notifications, no SSL-expiration or backup-failure alerts exist yet —
-all ⬜, scoped to Phase 2 per `product-plan.md` §9.
+dashboard's server-detail view. SSL certificate status/expiry (§2 above) is visible
+on-demand per site but not yet polled automatically or turned into an alert. No
+threshold-based alerting, no email/Slack/Telegram/Discord/webhook notifications, no
+scheduled SSL-expiration or backup-failure alerts exist yet — all ⬜, scoped to Phase 2
+per `product-plan.md` §9.
 
 ## 21. Known limitations
 

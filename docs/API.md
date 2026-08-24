@@ -46,6 +46,7 @@ protected route; there is no route that skips it by omission.
 | `GET` | `/api/v1/servers/{id}/sites/{siteId}/backups` | List backups for a site, newest first |
 | `POST` | `/api/v1/servers/{id}/sites/{siteId}/backups` | Dispatch `backup.run` and persist the resulting backup record |
 | `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a previously recorded backup |
+| `POST` | `/api/v1/servers/{id}/sites/{siteId}/ssl/check` | Dispatch `ssl.status` (read-only) and persist the result on the site record |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -123,6 +124,17 @@ on that server; `400` for an invalid/missing scope; `502` if the agent isn't con
 → `200` with an array of `backupRecord`, newest first. `404` if the site doesn't exist
 on that server.
 
+### `POST /api/v1/servers/{id}/sites/{siteId}/ssl/check`
+No request body. Dispatches `ssl.status` with the site's own recorded `domain` (never
+caller-supplied) and, on success, persists whatever it reports — including `"none"`, if
+no certificate is installed — onto the site's `ssl_status`/`ssl_issuer`/
+`ssl_expires_at` columns. Unlike `ssl.issue_letsencrypt`/`ssl.install_custom` this never
+changes anything on the agent, so it's safe to call as often as the dashboard wants
+(e.g. every time a site's detail view opens). 30s dispatch timeout (a local
+`openssl x509` read, not a network call). → `200` with the updated `siteRecord` JSON.
+`404` if the site doesn't exist on that server; `502` if the agent isn't connected;
+`422` if `ssl.status` itself failed on the agent.
+
 ### `POST /api/v1/servers/{id}/backups/{backupId}/restore`
 No request body — the backup's own recorded `archive_path`, `scope`, `db_name`, and
 `sha256` (as `expected_sha256`) are read from the `backups` table and passed to
@@ -177,8 +189,20 @@ The full allow-listed capability names `packages/capabilities.Default()` registe
 (see `SYSTEM.md` §12 for the allow-list rationale): `system.ping`, `service.control`,
 `diagnostics.basic`, `stack.install`, `site.create`, `site.set_php_version`,
 `site.set_status`, `app.wordpress_install`, `ssl.issue_letsencrypt`,
-`ssl.install_custom`, `db.create`, `db.delete`, `db.list`, `file.list`, `file.read`,
-`file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`.
+`ssl.install_custom`, `ssl.status`, `db.create`, `db.delete`, `db.list`, `file.list`,
+`file.read`, `file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`.
+
+### `ssl.status`
+```json
+{"domain": "example.com"}
+```
+Read-only: reports the currently installed certificate for a domain without issuing,
+renewing, or modifying anything. Checks `/etc/letsencrypt/live/<domain>/cert.pem` first
+(the path `ssl.issue_letsencrypt` produces), then falls back to
+`/etc/serverpanel-agent/ssl/<domain>/fullchain.pem` (the path `ssl.install_custom`
+writes). → detail JSON `{"domain": "...", "status": "none|valid|expiring_soon|expired",
+"issuer": "letsencrypt|custom", "expires_at": "<RFC3339, empty if status is none>"}`.
+`expiring_soon` is reported starting 14 days before actual expiry.
 
 ### `backup.restore`
 ```json

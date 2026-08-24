@@ -43,7 +43,15 @@ func openDB(path string) (*sql.DB, error) {
 // first — this is what keeps re-running openDB against an already-migrated
 // database a safe no-op instead of an error.
 func runMigrations(db *sql.DB) error {
-	return addColumnIfMissing(db, "backups", "db_name", "TEXT NOT NULL DEFAULT ''")
+	if err := addColumnIfMissing(db, "backups", "db_name", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	for _, col := range []string{"ssl_status", "ssl_issuer", "ssl_expires_at"} {
+		if err := addColumnIfMissing(db, "sites", col, "TEXT NOT NULL DEFAULT ''"); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func addColumnIfMissing(db *sql.DB, table, column, decl string) error {
@@ -127,15 +135,18 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 
 CREATE TABLE IF NOT EXISTS sites (
-	id           TEXT PRIMARY KEY,
-	server_id    TEXT NOT NULL REFERENCES servers(id),
-	domain       TEXT NOT NULL,
-	system_user  TEXT NOT NULL,
-	docroot      TEXT NOT NULL,
-	app_type     TEXT NOT NULL,
-	php_version  TEXT NOT NULL DEFAULT '',
-	status       TEXT NOT NULL DEFAULT 'active',
-	created_at   TEXT NOT NULL
+	id             TEXT PRIMARY KEY,
+	server_id      TEXT NOT NULL REFERENCES servers(id),
+	domain         TEXT NOT NULL,
+	system_user    TEXT NOT NULL,
+	docroot        TEXT NOT NULL,
+	app_type       TEXT NOT NULL,
+	php_version    TEXT NOT NULL DEFAULT '',
+	status         TEXT NOT NULL DEFAULT 'active',
+	created_at     TEXT NOT NULL,
+	ssl_status     TEXT NOT NULL DEFAULT '',
+	ssl_issuer     TEXT NOT NULL DEFAULT '',
+	ssl_expires_at TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS backups (

@@ -2,7 +2,7 @@
 
 ## 1. Current automated coverage
 
-`go test ./...` — 61 test functions across two packages, all passing, no `-race`
+`go test ./...` — 68 test functions across two packages, all passing, no `-race`
 failures, `go vet` clean, `gofmt -l` clean:
 
 ```
@@ -15,8 +15,8 @@ go test ./... -race
 
 | Package | Tests | What they cover |
 |---|---|---|
-| `apps/controlplane` | 27 | Auth/session lifecycle (create, MFA-verify, expiry, delete), bcrypt password rules, email normalization/uniqueness, TOTP round-trip/skew/rejection, bootstrap-token single-use/expiry/unknown-token, server create/list/get, revocation (cert-serial blocking + status transitions, including that a stray disconnect can't resurrect a revoked server), heartbeat recording, audit-log append, site create/list, `getSite`'s cross-server scoping, backup create/list/get round trip and its own cross-server scoping, and 6 full HTTP integration tests through `routes()` with `httptest` covering signup→login→protected-route, the full 2FA enroll→logout→login→MFA-challenge→access flow, server create/list/revoke, agent registration with a bad token, the backup endpoints' not-found boundaries, and backup-request validation (bad scope, missing `db_name`, and confirming validation runs before dispatch) |
-| `packages/capabilities` | 34 | Capability dispatch (unknown name rejected, `system.ping` works, nil `Progress` doesn't panic, the registry has a handler for every declared `Cap*` constant), `service.control`'s allow-list boundary (unit, action, and an explicit shell-metacharacter-injection attempt, all rejected before `systemctl` is ever invoked), the file manager's path-traversal and symlink-escape defenses (`resolveScopedPath`), oversized-read/write rejection, refusal to delete the site root itself, a real list+write round trip against a real filesystem, log redaction (token/password query params, `Authorization: Bearer`/`Basic`), `logs.tail`'s input validation, domain-name validation (including injection-shaped inputs), `systemUserForDomain`'s bounding/sanitization, the deterministic php-fpm-pool/socket/vhost path builders, `backup.run`'s scope validation and a real files-backup-and-checksum round trip, and `backup.restore`'s archive-location/checksum validation, a real files backup→corrupt→restore round trip (with a real throwaway system user, verifying both content restoration and pre-restore checkpoint creation), and `extractTarGzSafely`'s rejection of path-traversal entries, absolute-path entries, and oversized archives |
+| `apps/controlplane` | 29 | Auth/session lifecycle (create, MFA-verify, expiry, delete), bcrypt password rules, email normalization/uniqueness, TOTP round-trip/skew/rejection, bootstrap-token single-use/expiry/unknown-token, server create/list/get, revocation (cert-serial blocking + status transitions, including that a stray disconnect can't resurrect a revoked server), heartbeat recording, audit-log append, site create/list, `getSite`'s cross-server scoping, backup create/list/get round trip and its own cross-server scoping, `updateSiteSSL`'s round trip and its own cross-server scoping, and 6 full HTTP integration tests through `routes()` with `httptest` covering signup→login→protected-route, the full 2FA enroll→logout→login→MFA-challenge→access flow, server create/list/revoke, agent registration with a bad token, the backup/ssl-check endpoints' not-found boundaries, and backup-request validation (bad scope, missing `db_name`, and confirming validation runs before dispatch) |
+| `packages/capabilities` | 39 | Capability dispatch (unknown name rejected, `system.ping` works, nil `Progress` doesn't panic, the registry has a handler for every declared `Cap*` constant), `service.control`'s allow-list boundary (unit, action, and an explicit shell-metacharacter-injection attempt, all rejected before `systemctl` is ever invoked), the file manager's path-traversal and symlink-escape defenses (`resolveScopedPath`), oversized-read/write rejection, refusal to delete the site root itself, a real list+write round trip against a real filesystem, log redaction (token/password query params, `Authorization: Bearer`/`Basic`), `logs.tail`'s input validation, domain-name validation (including injection-shaped inputs), `systemUserForDomain`'s bounding/sanitization, the deterministic php-fpm-pool/socket/vhost path builders, `backup.run`'s scope validation and a real files-backup-and-checksum round trip, `backup.restore`'s archive-location/checksum validation, a real files backup→corrupt→restore round trip (with a real throwaway system user, verifying both content restoration and pre-restore checkpoint creation), `extractTarGzSafely`'s rejection of path-traversal entries, absolute-path entries, and oversized archives, and `ssl.status`'s invalid-domain rejection, no-cert/`none` result, a real `openssl`-generated Let's-Encrypt-path cert's `valid` status and expiry parsing, an `expiring_soon` classification on a near-expiry custom cert, and Let's-Encrypt-over-custom precedence when both paths have a certificate |
 
 None of this is mocked where a cheap real implementation was possible: sessions/users/
 servers/audit run against a real temp-file SQLite database with the real schema (not
@@ -30,7 +30,9 @@ stub.
 
 Capabilities that require real system services this environment can't safely or
 meaningfully fake are **not** exercised by the automated suite:
-`stack.install` (apt/systemd), `app.wordpress_install` (real `wp-cli` + a running
+`stack.install` (apt/systemd — including its new "certbot auto-renewal timer" step,
+which needs a real systemd/certbot-package environment to check `is-enabled` against),
+`app.wordpress_install` (real `wp-cli` + a running
 MariaDB), `ssl.issue_letsencrypt` (real ACME/public DNS), `db.create/delete/list`
 (a running MariaDB), `service.control`'s actual `systemctl` invocation, and the agent's
 registration/connect/reconnect loop against a live gateway. `backup.run`'s and
@@ -55,8 +57,12 @@ next testing investment worth making, tracked below.
 - `systemctl start/stop/restart` of installed services — this session's sandbox has no
   systemd as PID 1. The code path is a standard `systemctl <action> <unit>` argv
   invocation and should work unmodified on a real VPS, but hasn't been confirmed there.
-- Let's Encrypt issuance — no public DNS points at any environment this project has
-  been built/tested in.
+- Let's Encrypt issuance, and `certbot.timer`'s actual multi-day renewal behavior —
+  no public DNS points at any environment this project has been built/tested in, and
+  observing a real renewal firing would need either a genuine 60-90 day wait or mocking
+  certbot's clock; `stack.install`'s "enable the timer" step itself only invokes
+  `systemctl`, the same category of untested-here-but-standard operation as service
+  start/stop above.
 - Agent behavior across a real network disconnect/reconnect cycle, a real VPS reboot,
   or a real control-plane restart while agents are live.
 - Dashboard mobile responsiveness at 320/375/390/414/768px — no browser-automation

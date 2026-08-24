@@ -140,6 +140,28 @@ func phase1LEMPSteps() []installStep {
 			},
 		},
 		{
+			Name: "certbot auto-renewal timer",
+			// The certbot Debian/Ubuntu package ships a certbot.timer unit
+			// (runs `certbot renew` twice daily) that's normally enabled by
+			// the package's own postinst — but that's an assumption this
+			// installer shouldn't silently depend on. Explicitly enabling it
+			// is what actually closes the "certbot's own renewal timer is
+			// not wired up" gap: every certificate ssl.issue_letsencrypt
+			// obtains is recorded by certbot with --installer nginx, so
+			// `certbot renew` reloads nginx itself on each successful
+			// renewal — no extra deploy-hook is needed here.
+			Check: func(ctx context.Context) bool {
+				out, _ := run(ctx, "systemctl", "is-enabled", "certbot.timer")
+				return strings.TrimSpace(out) == "enabled"
+			},
+			Run: func(ctx context.Context) error {
+				if out, err := run(ctx, "systemctl", "enable", "--now", "certbot.timer"); err != nil {
+					return fmt.Errorf("enable certbot.timer: %w: %s", err, out)
+				}
+				return nil
+			},
+		},
+		{
 			Name:  "ufw",
 			Check: func(ctx context.Context) bool { return isPackageInstalled(ctx, "ufw") },
 			Run:   func(ctx context.Context) error { _, err := aptInstall(ctx, "ufw"); return err },

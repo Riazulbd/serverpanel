@@ -184,6 +184,12 @@
         <p class="muted" id="siteDetailMeta" style="margin:0 0 20px"></p>
 
         <div class="section-title" style="display:flex;justify-content:space-between;align-items:center">
+          <span>SSL</span>
+          <button onclick="checkSiteSSL()">Check status</button>
+        </div>
+        <p class="muted" id="sslStatusLine">Not checked yet.</p>
+
+        <div class="section-title" style="display:flex;justify-content:space-between;align-items:center">
           <span>Backups</span>
           <button class="primary" onclick="openNewBackupModal()">+ Create backup</button>
         </div>
@@ -475,7 +481,40 @@ async function openSiteDetail(siteId) {
     document.getElementById('siteDetailMeta').textContent =
       site.AppType + (site.PHPVersion ? (' · PHP ' + site.PHPVersion) : '') + ' · ' + site.Status;
   }
+  renderSSLStatus(site);
   await refreshBackups();
+}
+
+// renderSSLStatus shows the last-known ssl.status result for the selected
+// site (recorded via checkSiteSSL below) — never a live re-check on its
+// own, since site.SSLStatus is whatever the control plane last persisted,
+// not necessarily current.
+function renderSSLStatus(site) {
+  const el = document.getElementById('sslStatusLine');
+  if (!site || !site.SSLStatus) { el.textContent = 'Not checked yet.'; return; }
+  const labels = {
+    none: 'No certificate installed.',
+    valid: 'Valid',
+    expiring_soon: 'Expiring soon',
+    expired: 'Expired',
+  };
+  let text = labels[site.SSLStatus] || site.SSLStatus;
+  if (site.SSLIssuer) text += ' (' + site.SSLIssuer + ')';
+  if (site.SSLExpiresAt) text += ' · expires ' + new Date(site.SSLExpiresAt).toLocaleDateString();
+  el.textContent = text;
+}
+
+async function checkSiteSSL() {
+  const el = document.getElementById('sslStatusLine');
+  el.textContent = 'Checking...';
+  try {
+    const site = await api(API + '/servers/' + state.selectedServerId + '/sites/' + state.selectedSiteId + '/ssl/check', {method: 'POST'});
+    const idx = (state.sites || []).findIndex(s => s.ID === state.selectedSiteId);
+    if (idx !== -1) state.sites[idx] = site;
+    renderSSLStatus(site);
+  } catch (e) {
+    el.textContent = 'Check failed: ' + e.message;
+  }
 }
 
 async function refreshBackups() {
