@@ -140,6 +140,21 @@ func phase1LEMPSteps() []installStep {
 			},
 		},
 		{
+			Name: "certbot automatic renewal timer",
+			// The certbot .deb ships a certbot.timer unit (runs `certbot
+			// renew` twice daily) but does not enable it by default on
+			// every Ubuntu release — a fresh install can silently issue
+			// certificates that are never renewed. Enabling+starting it
+			// explicitly here is what closes that gap; renewal itself
+			// (including the nginx reload) is certbot's own job, not
+			// something this agent re-implements.
+			Check: func(ctx context.Context) bool { return certbotTimerActive(ctx) },
+			Run: func(ctx context.Context) error {
+				_, err := run(ctx, "systemctl", "enable", "--now", "certbot.timer")
+				return err
+			},
+		},
+		{
 			Name:  "ufw",
 			Check: func(ctx context.Context) bool { return isPackageInstalled(ctx, "ufw") },
 			Run:   func(ctx context.Context) error { _, err := aptInstall(ctx, "ufw"); return err },
@@ -259,6 +274,11 @@ func handleStackInstall(ctx context.Context, params map[string]any, progress Pro
 	report.Versions["composer"] = commandVersion(ctx, "/usr/local/bin/composer", "--version")
 	report.Versions["wp-cli"] = commandVersion(ctx, "/usr/local/bin/wp", "--version", "--allow-root")
 	report.InstalledAt = time.Now().UTC()
+	if certbotTimerActive(ctx) {
+		report.Versions["certbot.timer"] = "enabled+active"
+	} else {
+		report.Versions["certbot.timer"] = "not active"
+	}
 	report.Versions["cpu_count"] = fmt.Sprintf("%d", resources.CPUCount)
 	report.Versions["mem_total_mb"] = fmt.Sprintf("%d", resources.MemTotalMB)
 	report.Versions["disk_avail_mb_at_install"] = fmt.Sprintf("%d", resources.DiskAvailMB)
@@ -269,6 +289,19 @@ func handleStackInstall(ctx context.Context, params map[string]any, progress Pro
 
 	reportJSON, _ := json.Marshal(report)
 	return string(reportJSON), nil
+}
+
+// certbotTimerActive reports whether certbot.timer is both enabled
+// (survives reboot) and currently active, which is what makes the "already
+// installed" check for the renewal-timer step correct on a retried
+// stack.install rather than just checking package presence.
+func certbotTimerActive(ctx context.Context) bool {
+	enabled, _ := run(ctx, "systemctl", "is-enabled", "certbot.timer")
+	if strings.TrimSpace(enabled) != "enabled" {
+		return false
+	}
+	active, _ := run(ctx, "systemctl", "is-active", "certbot.timer")
+	return strings.TrimSpace(active) == "active"
 }
 
 func dpkgVersion(ctx context.Context, pkg string) string {

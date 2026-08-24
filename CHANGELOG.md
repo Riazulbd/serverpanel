@@ -2,6 +2,37 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-24 — SSL automatic renewal
+
+- **Closed the documented "certbot's own renewal timer is not wired up" gap**
+  (`SYSTEM.md` §21 / `SERVERAVATAR_PARITY.md` APP-016). `stack.install` now has an
+  idempotent "certbot automatic renewal timer" step (`packages/capabilities/stack.go`)
+  that runs `systemctl enable --now certbot.timer` — the renewal timer certbot's own
+  `.deb` ships but doesn't enable by default on every Ubuntu release. Previously a
+  fresh install could issue a certificate via `ssl.issue_letsencrypt` that would then
+  silently never renew.
+- Added a new `ssl.status` capability (`packages/capabilities/ssl.go`) that reports
+  every certificate `certbot certificates` knows about (domains, expiry date, days
+  remaining) plus whether the renewal timer is actually enabled+active, by parsing
+  certbot's own text output (`parseCertbotCertificates`) rather than re-deriving expiry
+  another way. Read-only — never mutates anything. Wired into the dashboard as a
+  "Check SSL certificates" action button (same generic task-dispatch pattern as "Run
+  diagnostics"), and reachable via the existing generic
+  `POST /api/v1/servers/{id}/tasks` endpoint with no new route needed.
+- Added 3 new unit tests for `parseCertbotCertificates` (multi-certificate output
+  including a soon-to-expire cert, no-certificates output, and an already-expired
+  certificate with no `VALID: N days` suffix — verifying it doesn't misattribute a
+  neighboring certificate's expiry or panic). `go test ./...`, `go vet ./...`, and
+  `gofmt -l .` all clean; 64 test functions total (was 61).
+- Updated `SYSTEM.md`, `API.md`, `TESTING.md`, and `SERVERAVATAR_PARITY.md` (APP-016
+  promoted from a summary-table row to a full detail block, `PARTIAL` — the
+  `systemctl`/`certbot` execution boundary itself remains `BLOCKED_EXTERNAL` for
+  real-host verification in this environment, same as the rest of `stack.install`).
+- **Known gap this does not close**: SSL-expiry alerting (a notification when
+  `days_left` drops below a threshold) — `ssl.status` gives that rule something to key
+  off, but no alert-threshold/notification-channel subsystem exists yet (tracked
+  separately, `product-plan.md` §9).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

@@ -2,8 +2,11 @@ package capabilities
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -70,4 +73,67 @@ func handleSSLInstallCustom(ctx context.Context, params map[string]any, progress
 	}
 	run(ctx, "systemctl", "reload", "nginx")
 	return "custom certificate installed for " + domain, nil
+}
+
+// certInfo is one Let's Encrypt certificate as reported by `certbot
+// certificates`, plus whether the automatic renewal timer that's supposed
+// to keep it current is actually enabled — the two things an operator or
+// an alerting rule actually needs to know: "is this about to expire" and
+// "will it renew itself before then."
+type certInfo struct {
+	Domains    []string `json:"domains"`
+	ExpiryDate string   `json:"expiry_date"`
+	DaysLeft   int      `json:"days_left"`
+}
+
+type sslStatusReport struct {
+	RenewalTimerActive bool       `json:"renewal_timer_active"`
+	Certificates       []certInfo `json:"certificates"`
+}
+
+// handleSSLStatus reports every Let's Encrypt certificate certbot knows
+// about on this server plus renewal-timer health, so the control plane can
+// surface "certificate expires in N days" without the dashboard having to
+// SSH in or duplicate certbot's own bookkeeping.
+func handleSSLStatus(ctx context.Context, params map[string]any, progress Progress) (string, error) {
+	report := sslStatusReport{RenewalTimerActive: certbotTimerActive(ctx)}
+
+	if _, err := os.Stat("/usr/bin/certbot"); err == nil {
+		out, _ := run(ctx, "certbot", "certificates")
+		report.Certificates = parseCertbotCertificates(out)
+	}
+
+	data, err := json.Marshal(report)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+var (
+	certDomainsRe = regexp.MustCompile(`(?m)^\s*Domains:\s*(.+)$`)
+	certExpiryRe  = regexp.MustCompile(`(?m)^\s*Expiry Date:\s*(\S+ \S+).*VALID:\s*(-?\d+)\s*days?\)`)
+)
+
+// parseCertbotCertificates extracts domain/expiry/days-remaining from the
+// human-readable output of `certbot certificates`. It's a pure function
+// (no exec, no filesystem) specifically so this parsing logic — which is
+// the part most likely to break across certbot versions — is unit-testable
+// without root or a real certbot install.
+func parseCertbotCertificates(output string) []certInfo {
+	domainMatches := certDomainsRe.FindAllStringSubmatch(output, -1)
+	expiryMatches := certExpiryRe.FindAllStringSubmatch(output, -1)
+
+	var certs []certInfo
+	for i := range domainMatches {
+		c := certInfo{Domains: strings.Fields(domainMatches[i][1])}
+		if i < len(expiryMatches) {
+			c.ExpiryDate = expiryMatches[i][1]
+			if days, err := strconv.Atoi(expiryMatches[i][2]); err == nil {
+				c.DaysLeft = days
+			}
+		}
+		certs = append(certs, c)
+	}
+	return certs
 }

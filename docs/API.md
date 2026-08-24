@@ -177,8 +177,30 @@ The full allow-listed capability names `packages/capabilities.Default()` registe
 (see `SYSTEM.md` §12 for the allow-list rationale): `system.ping`, `service.control`,
 `diagnostics.basic`, `stack.install`, `site.create`, `site.set_php_version`,
 `site.set_status`, `app.wordpress_install`, `ssl.issue_letsencrypt`,
-`ssl.install_custom`, `db.create`, `db.delete`, `db.list`, `file.list`, `file.read`,
-`file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`.
+`ssl.install_custom`, `ssl.status`, `db.create`, `db.delete`, `db.list`, `file.list`,
+`file.read`, `file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`.
+
+### `ssl.status`
+```json
+{}
+```
+No params. Reports the automatic-renewal timer's health and every Let's Encrypt
+certificate `certbot` knows about on the server, by running `certbot certificates` and
+parsing its output — never mutates anything. Returns:
+```json
+{"renewal_timer_active": true,
+ "certificates": [
+   {"domains": ["example.com", "www.example.com"],
+    "expiry_date": "2026-11-20 03:14:00+00:00", "days_left": 88}
+ ]}
+```
+`renewal_timer_active` reflects `systemctl is-enabled`/`is-active certbot.timer` (see
+`stack.install`'s "certbot automatic renewal timer" step, `SYSTEM.md` §12) — `false`
+here on a server that has certificates means renewal is not actually happening and is
+what an expiry-alerting rule (`SERVERAVATAR_PARITY.md` SRV-008) would key off first.
+If certbot isn't installed, `certificates` is empty and `renewal_timer_active` is
+`false` rather than erroring, since "no SSL configured yet" is a normal state, not a
+failure.
 
 ### `backup.restore`
 ```json
