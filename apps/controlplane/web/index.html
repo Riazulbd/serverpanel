@@ -184,6 +184,13 @@
         <p class="muted" id="siteDetailMeta" style="margin:0 0 20px"></p>
 
         <div class="section-title" style="display:flex;justify-content:space-between;align-items:center">
+          <span>Databases</span>
+          <button onclick="openNewDatabaseModal()">+ Create database</button>
+        </div>
+        <div id="databaseResult" class="task-result hidden"></div>
+        <div id="databasesList" class="muted">No databases yet.</div>
+
+        <div class="section-title" style="display:flex;justify-content:space-between;align-items:center">
           <span>Backups</span>
           <button class="primary" onclick="openNewBackupModal()">+ Create backup</button>
         </div>
@@ -468,6 +475,7 @@ async function openSiteDetail(siteId) {
   const site = (state.sites || []).find(s => s.ID === siteId);
   showTab('siteDetail');
   document.getElementById('backupResult').classList.add('hidden');
+  document.getElementById('databaseResult').classList.add('hidden');
   const server = (state.servers || []).find(s => s.ID === state.selectedServerId);
   document.getElementById('siteDetailServerName').textContent = server ? server.Name : 'Server';
   if (site) {
@@ -476,6 +484,84 @@ async function openSiteDetail(siteId) {
       site.AppType + (site.PHPVersion ? (' · PHP ' + site.PHPVersion) : '') + ' · ' + site.Status;
   }
   await refreshBackups();
+  await refreshDatabases();
+}
+
+async function refreshDatabases() {
+  try {
+    const databases = await api(API + '/servers/' + state.selectedServerId + '/sites/' + state.selectedSiteId + '/databases') || [];
+    renderDatabases(databases);
+  } catch (e) {}
+}
+
+function renderDatabases(databases) {
+  const el = document.getElementById('databasesList');
+  if (!databases.length) { el.textContent = 'No databases yet.'; return; }
+  el.innerHTML = '<table><thead><tr><th>Name</th><th>Owner user</th><th>Created</th><th></th></tr></thead><tbody>' +
+    databases.map(d => `
+      <tr>
+        <td>${escapeHtml(d.Name)}</td>
+        <td class="muted">${escapeHtml(d.OwnerUser)}</td>
+        <td class="muted">${new Date(d.CreatedAt).toLocaleString()}</td>
+        <td><button class="danger" onclick="deleteDatabase('${d.ID}','${escapeHtml(d.Name)}')">Delete</button></td>
+      </tr>`).join('') +
+    '</tbody></table>';
+}
+
+function openNewDatabaseModal() {
+  const root = document.getElementById('modalRoot');
+  root.innerHTML = `
+    <div class="modal-backdrop" onclick="if(event.target===this) closeModalNoRefresh()">
+      <div class="modal">
+        <h2>Create database</h2>
+        <div class="field"><label>Name</label><input id="newDatabaseName" placeholder="e.g. wp_example"></div>
+        <p class="muted" style="margin-top:0">Lowercase letters, digits, and underscores only, starting with a letter. A dedicated owner user with a strong, randomly generated password is created and scoped to this database only.</p>
+        <button class="primary" style="width:100%" onclick="createDatabase()">Create database</button>
+        <div class="error" id="newDatabaseError"></div>
+        <p class="muted" id="newDatabaseStatus"></p>
+      </div>
+    </div>`;
+}
+
+async function createDatabase() {
+  const name = document.getElementById('newDatabaseName').value.trim();
+  const err = document.getElementById('newDatabaseError');
+  const status = document.getElementById('newDatabaseStatus');
+  err.textContent = '';
+  status.textContent = 'Creating database and a scoped owner user...';
+  try {
+    const res = await api(API + '/servers/' + state.selectedServerId + '/sites/' + state.selectedSiteId + '/databases', {
+      method: 'POST', body: JSON.stringify({name})
+    });
+    closeModalNoRefresh();
+    const box = document.getElementById('databaseResult');
+    box.className = 'task-result ok';
+    box.innerHTML = 'Database <strong>' + escapeHtml(res.Name) + '</strong> created. Owner user: <strong>' +
+      escapeHtml(res.OwnerUser) + '</strong>. Password (shown once, not stored — save it now): <pre class="code">' +
+      escapeHtml(res.Password) + '</pre>';
+    box.classList.remove('hidden');
+    await refreshDatabases();
+  } catch (e) {
+    status.textContent = '';
+    err.textContent = e.message;
+  }
+}
+
+async function deleteDatabase(databaseId, name) {
+  if (!confirm('Delete database "' + name + '"? This drops the database and its owner user on the server. This cannot be undone.')) return;
+  const box = document.getElementById('databaseResult');
+  box.className = 'task-result running';
+  box.textContent = 'Deleting database...';
+  box.classList.remove('hidden');
+  try {
+    await api(API + '/servers/' + state.selectedServerId + '/databases/' + databaseId, {method: 'DELETE'});
+    box.className = 'task-result ok';
+    box.textContent = 'Database deleted.';
+    await refreshDatabases();
+  } catch (e) {
+    box.className = 'task-result fail';
+    box.textContent = 'Delete failed: ' + e.message;
+  }
 }
 
 async function refreshBackups() {

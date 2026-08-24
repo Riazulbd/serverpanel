@@ -2,6 +2,40 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-24 — Database management: control-plane persistence and dashboard UI
+
+- **Closed the DB-001 parity gap** flagged in the previous entry as "a good candidate
+  for the next iteration": databases created via `db.create` are now persisted
+  control-plane-side and surfaced in the dashboard, applying the same
+  dispatch-then-persist-on-success pattern `backup.run`/`backup.restore` established.
+- New `databases` table (`server_id`, `site_id`, `name`, `owner_user`, `status`,
+  `created_at`) and three new endpoints: `GET`/`POST
+  /api/v1/servers/{id}/sites/{siteId}/databases`, `DELETE
+  /api/v1/servers/{id}/databases/{databaseId}` (`apps/controlplane/databases.go`).
+- The owner password is now generated server-side (`crypto/rand`, 48 hex characters)
+  instead of being accepted from the caller — removes a weak/reused/caller-guessable
+  password as a possibility — and is returned exactly once in the creation response,
+  never persisted anywhere (the same "shown once" treatment bootstrap tokens get). A
+  database name is validated against the identifier allow-list at the control plane
+  *and* independently, again, by the agent before it ever reaches a SQL statement —
+  defense in depth, not a single point of failure.
+- Added a "Databases" panel to the site-detail dashboard view: create-database modal
+  (name only), a databases table, and a delete button with a destructive-action
+  confirmation dialog that surfaces the generated password once, in place, after
+  creation.
+- Added 3 new tests: `TestDatabaseCreateListGetDeleteRoundTrip` (store layer, including
+  cross-server scoping on both `getDatabase` and `deleteDatabaseRecord`),
+  `TestDatabaseEndpointsRequireARealSite`, `TestCreateDatabaseRejectsInvalidNameAndRequiresAgent`
+  (HTTP layer — validation-before-dispatch, same contract backups' tests establish).
+  `go test ./...` passes; `go vet`/`gofmt` clean. The underlying agent-side `db.create`/
+  `db.delete` SQL execution is unchanged from the prior pass and remains manually
+  verified against a real MariaDB in a prior session — a real-MariaDB round trip through
+  these new endpoints is `BLOCKED_EXTERNAL` in this environment, same caveat already
+  documented for BAK-001/BAK-002.
+- Split the remaining gap (a lost owner password has no recovery path short of deleting
+  and recreating the database) out as new parity row DB-005 rather than leaving it
+  implicit. See `docs/SERVERAVATAR_PARITY.md` for the full updated DB-001 entry.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the
