@@ -177,8 +177,29 @@ The full allow-listed capability names `packages/capabilities.Default()` registe
 (see `SYSTEM.md` §12 for the allow-list rationale): `system.ping`, `service.control`,
 `diagnostics.basic`, `stack.install`, `site.create`, `site.set_php_version`,
 `site.set_status`, `app.wordpress_install`, `ssl.issue_letsencrypt`,
-`ssl.install_custom`, `db.create`, `db.delete`, `db.list`, `file.list`, `file.read`,
-`file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`.
+`ssl.install_custom`, `ssl.status`, `db.create`, `db.delete`, `db.list`, `file.list`,
+`file.read`, `file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`.
+
+### `ssl.status`
+```json
+{}
+```
+Read-only — never issues, renews, or writes anything. Reports whether the
+unattended-renewal machinery `stack.install` sets up is actually active
+(`renewal_timer_active`: is `certbot.timer` running; `renewal_hook_active`: is the
+nginx-reload deploy hook present and executable) plus, for every certificate lineage
+under `/etc/letsencrypt/live`, its expiry and days remaining, read directly via
+`openssl x509 -enddate` rather than parsed from certbot's human-readable CLI output.
+Returns
+```json
+{"renewal_timer_active": true, "renewal_hook_active": true,
+ "certs": [{"domain": "example.com", "expires_at": "2027-01-15T12:00:00Z",
+            "days_left": 84, "needs_action": false}]}
+```
+`needs_action` is true when a cert has under 30 days left **and** auto-renewal isn't
+fully wired up (timer inactive or hook missing/not executable) — i.e. "this
+certificate will not renew itself; someone needs to intervene" — or when its expiry
+couldn't be read at all.
 
 ### `backup.restore`
 ```json

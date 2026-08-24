@@ -2,6 +2,37 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-24 — SSL auto-renewal wiring, ssl.status capability
+
+- **Wired up unattended Let's Encrypt renewal** (`packages/capabilities/stack.go`),
+  closing the parity gap flagged in the previous entry ("certbot's own renewal timer
+  not yet wired up by `stack.install`"). Two new idempotent `stack.install` steps:
+  writing a certbot deploy hook that gates an nginx reload on `nginx -t` passing
+  (`/etc/letsencrypt/renewal-hooks/deploy/serverpanel-reload-nginx.sh` — rewritten
+  unconditionally on every `stack.install` run, so a fix to the hook's content reaches
+  servers that installed it before the fix, not just new ones) and explicitly
+  `systemctl enable --now certbot.timer` rather than relying on the certbot `.deb`'s
+  postinst script to have done so.
+- **Added `ssl.status`** (`packages/capabilities/ssl.go`), a new read-only capability
+  (never issues, renews, or writes anything) reporting whether that renewal machinery
+  is actually active (timer running, hook present and executable) plus, for every
+  certificate lineage under `/etc/letsencrypt/live`, its expiry read directly via
+  `openssl x509 -enddate` — not parsed from certbot's human-readable CLI text, which
+  is not a stable interface to depend on. `needs_action` flags a certificate that's
+  both under 30 days from expiry and not fully covered by working auto-renewal.
+- Added 13 new capability-layer tests (`ssl_test.go`: expiry-date parsing and its
+  rejection of malformed input, live-cert-directory listing with README exclusion, a
+  read-only guarantee against a fixture directory, clean behavior with no certificates
+  issued yet; `stack_test.go`: the renewal-wiring steps exist and run in the correct
+  dependency order — certbot install → hook → timer enable — the hook script is
+  written executable and always overwrites stale content, and the timer step's
+  `Check` degrades safely rather than panicking when `systemctl` isn't on `PATH`).
+  Full suite: 74 test functions, `go vet`/`gofmt` clean.
+- Updated `SYSTEM.md`, `API.md`, `TESTING.md`, and `SERVERAVATAR_PARITY.md` (promoted
+  APP-016 from a summary-table row to a full detail block, `PARTIAL` — a real
+  scheduled-renewal execution has not been observed end-to-end in any environment this
+  codebase has had access to, so it isn't marked `COMPLETE`).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

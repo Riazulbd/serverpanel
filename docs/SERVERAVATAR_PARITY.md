@@ -163,6 +163,24 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Known differences**: same-server restore only — there is no capability to restore a backup onto a *different* server (that needs a transfer step first).
 - **Reason**: cross-server restore is coupled to cross-server migration/cloning, both explicitly Phase 2 (`product-plan.md` §9); tracked as a follow-up, not silently dropped.
 
+### APP-016 — Let's Encrypt SSL + auto-renewal
+- **Category**: Application Management → SSL
+- **Documentation page**: SSL → "Free SSL (Let's Encrypt)"
+- **Short description**: Issue a Let's Encrypt certificate for a domain and keep it renewed automatically without further manual action.
+- **Our implementation**: `ssl.issue_letsencrypt` (unchanged — certbot's `--nginx` plugin, issues and installs in one step) plus two new idempotent `stack.install` steps: writing an `nginx -t`-gated deploy hook (`/etc/letsencrypt/renewal-hooks/deploy/serverpanel-reload-nginx.sh`, rewritten on every `stack.install` run so a hook-content fix reaches already-installed servers, not just new ones) and enabling `certbot.timer` (`systemctl enable --now`) rather than relying on the certbot `.deb`'s postinst to have done so. A new read-only capability, `ssl.status`, reports whether that machinery is actually active plus each issued certificate's expiry (via `openssl x509 -enddate`, not by parsing certbot's CLI text output), so the control plane can distinguish "renewing" from "will silently expire" instead of assuming issuance implies renewal.
+- **Frontend**: not yet surfaced as a dashboard panel — `ssl.status`/`ssl.issue_letsencrypt`/`ssl.install_custom` are dispatchable via the generic task-dispatch endpoint, same stage BAK-001/DB-001 were in before their dedicated UI landed.
+- **Backend service**: `gateway.dispatch` → `packages/capabilities.handleSSLIssueLetsEncrypt` / `handleSSLStatus`; `phase1LEMPSteps` (`stack.go`) for the renewal wiring.
+- **API endpoint(s)**: `POST /api/v1/servers/{id}/tasks` (`capability: ssl.issue_letsencrypt | ssl.status`).
+- **Agent command**: `ssl.issue_letsencrypt`, `ssl.status`; `stack.install` (renewal wiring is part of the stack profile, not a separate capability).
+- **DB tables**: none — certificate state lives on disk (certbot's own `/etc/letsencrypt`) and is read back on demand by `ssl.status`, not mirrored into SQLite yet (see Known differences).
+- **Required permission**: authenticated session.
+- **Security considerations**: the deploy hook only ever runs `nginx -t` (read-only) and, conditional on that passing, `systemctl reload nginx` — a fixed two-line script with no caller-supplied input, so a compromised/malformed renewal can't turn the hook into an execution primitive; `ssl.status` performs no writes at all (asserted directly by `TestHandleSSLStatusIsReadOnly`).
+- **Test coverage**: `packages/capabilities/ssl_test.go` — certbot expiry-date parsing and its rejection of malformed input, live-cert-directory listing (README exclusion), a read-only guarantee test, and a no-certificates-yet fixture; `packages/capabilities/stack_test.go` — the hook/timer steps exist and run in dependency order (certbot → hook → timer), the hook script is written executable and always overwrites stale content, and the timer step's `Check` degrades safely (no panic) when `systemctl` isn't on `PATH`. Real `certbot renew`/a live ACME renewal round trip is not exercised — `BLOCKED_EXTERNAL` (needs a real Ubuntu host with public DNS and a live Let's Encrypt-issued cert already on it, ~60-90 days for a natural renewal window or a manually forced one).
+- **Current status**: `PARTIAL` (issuance + renewal wiring + status reporting are `COMPLETE` and covered by `go test`; a real scheduled-renewal execution has not been observed end-to-end in any environment this codebase has had access to)
+- **Completion date**: 2026-08-24 (renewal wiring); issuance itself completed 2026-08-14 (`ssl.issue_letsencrypt`).
+- **Known differences**: no dashboard UI for SSL yet (issue/status/install-custom all only reachable via generic task dispatch); certificate state isn't persisted into SQLite (a page reload re-queries the agent rather than reading a cached row); no proactive alerting when `ssl.status.needs_action` is true (that's ALT-* alerting scope, not this feature).
+- **Reason**: this pass's scope was specifically closing the "certbot's own renewal timer not yet wired up" gap flagged in the previous entry; dashboard UI and DB persistence are being deferred the same way BAK-001/DB-001 deferred theirs, and alerting is a separate documented feature (Notifications/Alerts, still `NOT_STARTED`).
+
 ### ACC-001 — Authentication, 2FA, session management
 - **Category**: Account Management
 - **Documentation page**: Account Management → "Update Account Info"
@@ -253,7 +271,6 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | APP-013 | Log Monitoring Suite (traffic analytics) | `NOT_STARTED` | |
 | APP-014 | Application-level WAF / AI-bot blocker | `NOT_STARTED` | |
 | APP-015 | Custom SSL upload | `PARTIAL` | `ssl.install_custom` capability exists agent-side; no dedicated dashboard UI |
-| APP-016 | Let's Encrypt SSL + auto-renewal | `PARTIAL` | `ssl.issue_letsencrypt` implemented; certbot's own renewal timer not yet wired up by `stack.install` |
 
 ### Database management — not yet started (DB-*)
 | ID | Feature | Status | Notes |
@@ -296,8 +313,8 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | Status | Count (detailed entries) | Count (summary-table rows) |
 |---|---|---|
 | `COMPLETE` | 3 (SRV-001, BAK-002, ACC-001) | 1 (PROV-006) |
-| `PARTIAL` | 3 (SRV-002, APP-001, APP-002, DB-001, BAK-001 — 5 total, see note) | 6 |
-| `NOT_STARTED` | 0 | ~55 |
+| `PARTIAL` | 6 (SRV-002, APP-001, APP-002, DB-001, BAK-001, APP-016 — see note) | 5 |
+| `NOT_STARTED` | 0 | ~54 |
 | `BLOCKED_EXTERNAL` | 0 (sub-scoped within BAK-001/BAK-002's db/full-scope MariaDB verification) | 0 |
 | `INTENTIONALLY_NOT_APPLICABLE` | 0 | 1 |
 
@@ -359,3 +376,9 @@ establish the tracking process and close the single highest-priority gap
   BAK-001/BAK-002 reflecting this session's backup-restore implementation. ~60
   capabilities enumerated overall (detailed + summary), the large majority honestly
   `NOT_STARTED`.
+- **2026-08-24**: promoted APP-016 (Let's Encrypt SSL + auto-renewal) from a
+  summary-table row to a full detail block, reflecting this session's work wiring up
+  `certbot.timer` + an `nginx -t`-gated reload deploy-hook in `stack.install`, and
+  adding the read-only `ssl.status` capability for renewal-state/expiry reporting.
+  Real scheduled-renewal execution remains unverified in any environment this
+  codebase has had access to, so the row stays `PARTIAL` rather than `COMPLETE`.

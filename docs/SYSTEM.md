@@ -103,8 +103,9 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | Maintenance mode | ⬜ not implemented |
 | Basic auth on a site | ⬜ not implemented |
 | Custom + Let's Encrypt SSL | ✅ `ssl.issue_letsencrypt` (certbot), `ssl.install_custom` |
-| Automatic SSL renewal | ⬜ not implemented (certbot's own renewal timer is not
-  wired up by `stack.install` yet) |
+| Automatic SSL renewal | ✅ `stack.install` enables `certbot.timer` and installs an
+  `nginx -t`-gated reload deploy-hook; `ssl.status` reports timer/hook state and
+  per-domain expiry for monitoring (see §12, §19) |
 | WordPress auto-login/auto-update | ⬜ not implemented |
 | Application enable/disable | ✅ `site.set_status` |
 | Secure file manager | ✅ `file.list/read/write/delete`, scoped + symlink-safe |
@@ -164,9 +165,10 @@ Phase boundaries and full milestone/estimate tables are in `product-plan.md` §6
 is the condensed status:
 
 - **Phase 1 — secure working foundation:** ~90% of the *capability* surface exists and
-  is tested per-capability (see the tables above); the biggest real gaps are backup
-  **restore**, an automated test suite (now added, see `TESTING.md`), SSL auto-renewal,
-  and agent cert auto-rotation. Not "GA-ready" yet, but the architecture and security
+  is tested per-capability (see the tables above); backup **restore**, an automated
+  test suite, and SSL auto-renewal (all previously flagged as the biggest gaps here)
+  are now implemented — the remaining real gap is agent cert auto-rotation. Not
+  "GA-ready" yet, but the architecture and security
   primitives it depends on (mTLS, allow-listed capabilities, per-app isolation, audit
   log) are real and proven, not stubs.
 - **Phase 2 — professional server management:** not started. Git deployment,
@@ -295,10 +297,20 @@ in `packages/capabilities/capabilities_test.go`), not just convention.
 
 Current capability list: `system.ping`, `service.control`, `diagnostics.basic`,
 `stack.install`, `site.create`, `site.set_php_version`, `site.set_status`,
-`app.wordpress_install`, `ssl.issue_letsencrypt`, `ssl.install_custom`, `db.create`,
-`db.delete`, `db.list`, `file.list`, `file.read`, `file.write`, `file.delete`,
-`backup.run`, `backup.restore`, `logs.tail`. Notably absent (by design, until reviewed
-and added): `git.deploy`, `cron.upsert`, `ssh.*`, `firewall.*`, `agent.self_update`.
+`app.wordpress_install`, `ssl.issue_letsencrypt`, `ssl.install_custom`, `ssl.status`,
+`db.create`, `db.delete`, `db.list`, `file.list`, `file.read`, `file.write`,
+`file.delete`, `backup.run`, `backup.restore`, `logs.tail`. Notably absent (by design,
+until reviewed and added): `git.deploy`, `cron.upsert`, `ssh.*`, `firewall.*`,
+`agent.self_update`.
+
+`stack.install` now also enables `certbot.timer` and writes an `nginx -t`-gated
+reload deploy-hook (`/etc/letsencrypt/renewal-hooks/deploy/serverpanel-reload-nginx.sh`)
+so a certificate issued via `ssl.issue_letsencrypt` keeps renewing unattended rather
+than needing a repeated manual `ssl.issue_letsencrypt` call every ~90 days. `ssl.status`
+is a read-only capability (never issues/renews/writes) that reports whether that
+machinery is actually active plus each certificate's expiry, letting the control plane
+surface real renewal state instead of assuming "issued once" means "will keep
+renewing."
 
 ## 13. Installation and deployment
 

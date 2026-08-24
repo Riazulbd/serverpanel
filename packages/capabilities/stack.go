@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -140,6 +141,33 @@ func phase1LEMPSteps() []installStep {
 			},
 		},
 		{
+			Name: "certbot renewal deploy-hook (reload nginx)",
+			// Rewritten unconditionally on every stack.install run (not
+			// gated by a Check that returns true once written) so a fix to
+			// the hook's own content reaches servers that installed it
+			// before the fix, the same way every other idempotent step
+			// here converges rather than "install once, never touch
+			// again."
+			Check: func(ctx context.Context) bool { return false },
+			Run:   func(ctx context.Context) error { return installSSLRenewalHook() },
+		},
+		{
+			Name: "certbot.timer enabled (automatic renewal)",
+			// Ubuntu's certbot .deb enables this timer on install, but
+			// that's package-manager behavior this code shouldn't rely on
+			// silently continuing to hold true — enable it explicitly so
+			// "SSL auto-renews" is this codebase's guarantee, not an
+			// assumption about apt's postinst script.
+			Check: func(ctx context.Context) bool {
+				out, _ := run(ctx, "systemctl", "is-active", "certbot.timer")
+				return strings.TrimSpace(out) == "active"
+			},
+			Run: func(ctx context.Context) error {
+				_, err := run(ctx, "systemctl", "enable", "--now", "certbot.timer")
+				return err
+			},
+		},
+		{
 			Name:  "ufw",
 			Check: func(ctx context.Context) bool { return isPackageInstalled(ctx, "ufw") },
 			Run:   func(ctx context.Context) error { _, err := aptInstall(ctx, "ufw"); return err },
@@ -190,6 +218,18 @@ func phase1LEMPSteps() []installStep {
 // currentSSHPort reads the configured SSH port out of sshd_config,
 // defaulting to the standard port 22 when no explicit Port directive is
 // present (sshd's own default) or the file can't be read.
+// installSSLRenewalHook writes the certbot deploy hook (script content and
+// path are defined in ssl.go, alongside handleSSLStatus which reads this
+// same path back to report whether it's present and executable) so it
+// exists before certbot.timer's first scheduled run, not just after the
+// first manual ssl.issue_letsencrypt call.
+func installSSLRenewalHook() error {
+	if err := os.MkdirAll(filepath.Dir(sslDeployHookPath), 0755); err != nil {
+		return err
+	}
+	return os.WriteFile(sslDeployHookPath, []byte(sslDeployHookScript), 0755)
+}
+
 func currentSSHPort() string {
 	data, err := os.ReadFile("/etc/ssh/sshd_config")
 	if err != nil {

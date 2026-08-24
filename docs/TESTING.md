@@ -2,7 +2,7 @@
 
 ## 1. Current automated coverage
 
-`go test ./...` — 61 test functions across two packages, all passing, no `-race`
+`go test ./...` — 74 test functions across two packages, all passing, no `-race`
 failures, `go vet` clean, `gofmt -l` clean:
 
 ```
@@ -16,7 +16,7 @@ go test ./... -race
 | Package | Tests | What they cover |
 |---|---|---|
 | `apps/controlplane` | 27 | Auth/session lifecycle (create, MFA-verify, expiry, delete), bcrypt password rules, email normalization/uniqueness, TOTP round-trip/skew/rejection, bootstrap-token single-use/expiry/unknown-token, server create/list/get, revocation (cert-serial blocking + status transitions, including that a stray disconnect can't resurrect a revoked server), heartbeat recording, audit-log append, site create/list, `getSite`'s cross-server scoping, backup create/list/get round trip and its own cross-server scoping, and 6 full HTTP integration tests through `routes()` with `httptest` covering signup→login→protected-route, the full 2FA enroll→logout→login→MFA-challenge→access flow, server create/list/revoke, agent registration with a bad token, the backup endpoints' not-found boundaries, and backup-request validation (bad scope, missing `db_name`, and confirming validation runs before dispatch) |
-| `packages/capabilities` | 34 | Capability dispatch (unknown name rejected, `system.ping` works, nil `Progress` doesn't panic, the registry has a handler for every declared `Cap*` constant), `service.control`'s allow-list boundary (unit, action, and an explicit shell-metacharacter-injection attempt, all rejected before `systemctl` is ever invoked), the file manager's path-traversal and symlink-escape defenses (`resolveScopedPath`), oversized-read/write rejection, refusal to delete the site root itself, a real list+write round trip against a real filesystem, log redaction (token/password query params, `Authorization: Bearer`/`Basic`), `logs.tail`'s input validation, domain-name validation (including injection-shaped inputs), `systemUserForDomain`'s bounding/sanitization, the deterministic php-fpm-pool/socket/vhost path builders, `backup.run`'s scope validation and a real files-backup-and-checksum round trip, and `backup.restore`'s archive-location/checksum validation, a real files backup→corrupt→restore round trip (with a real throwaway system user, verifying both content restoration and pre-restore checkpoint creation), and `extractTarGzSafely`'s rejection of path-traversal entries, absolute-path entries, and oversized archives |
+| `packages/capabilities` | 47 | Capability dispatch (unknown name rejected, `system.ping` works, nil `Progress` doesn't panic, the registry has a handler for every declared `Cap*` constant), `service.control`'s allow-list boundary (unit, action, and an explicit shell-metacharacter-injection attempt, all rejected before `systemctl` is ever invoked), the file manager's path-traversal and symlink-escape defenses (`resolveScopedPath`), oversized-read/write rejection, refusal to delete the site root itself, a real list+write round trip against a real filesystem, log redaction (token/password query params, `Authorization: Bearer`/`Basic`), `logs.tail`'s input validation, domain-name validation (including injection-shaped inputs), `systemUserForDomain`'s bounding/sanitization, the deterministic php-fpm-pool/socket/vhost path builders, `backup.run`'s scope validation and a real files-backup-and-checksum round trip, `backup.restore`'s archive-location/checksum validation, a real files backup→corrupt→restore round trip (with a real throwaway system user, verifying both content restoration and pre-restore checkpoint creation), `extractTarGzSafely`'s rejection of path-traversal entries, absolute-path entries, and oversized archives, `ssl.status`'s certificate-expiry parsing (`openssl x509 -enddate` output format, garbage-input rejection), its live-cert-directory listing (README exclusion, missing-directory error), that it's read-only against a fixture cert directory, and that it degrades cleanly with no certificates issued yet, and `phase1LEMPSteps`'s certbot-auto-renewal wiring — the deploy-hook step always overwrites (never "install once, ignore drift"), its written script is executable and gates the nginx reload on `nginx -t`, and the three renewal-related steps (certbot install → hook → timer enable) execute in that dependency order |
 
 None of this is mocked where a cheap real implementation was possible: sessions/users/
 servers/audit run against a real temp-file SQLite database with the real schema (not
@@ -30,8 +30,11 @@ stub.
 
 Capabilities that require real system services this environment can't safely or
 meaningfully fake are **not** exercised by the automated suite:
-`stack.install` (apt/systemd), `app.wordpress_install` (real `wp-cli` + a running
-MariaDB), `ssl.issue_letsencrypt` (real ACME/public DNS), `db.create/delete/list`
+`stack.install` (apt/systemd — including the certbot.timer-enable step's actual
+`systemctl enable --now` call, and `ssl.status`'s live `systemctl is-active
+certbot.timer`/`openssl x509` calls against a real certbot install), `app.wordpress_install`
+(real `wp-cli` + a running MariaDB), `ssl.issue_letsencrypt` (real ACME/public DNS),
+`db.create/delete/list`
 (a running MariaDB), `service.control`'s actual `systemctl` invocation, and the agent's
 registration/connect/reconnect loop against a live gateway. `backup.run`'s and
 `backup.restore`'s **files** scope are exercised for real (real files, real archive,
