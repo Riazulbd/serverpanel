@@ -46,6 +46,9 @@ protected route; there is no route that skips it by omission.
 | `GET` | `/api/v1/servers/{id}/sites/{siteId}/backups` | List backups for a site, newest first |
 | `POST` | `/api/v1/servers/{id}/sites/{siteId}/backups` | Dispatch `backup.run` and persist the resulting backup record |
 | `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a previously recorded backup |
+| `GET` | `/api/v1/servers/{id}/sites/{siteId}/databases` | List databases recorded for a site, newest first |
+| `POST` | `/api/v1/servers/{id}/sites/{siteId}/databases` | Dispatch `db.create` and persist the resulting database record |
+| `POST` | `/api/v1/servers/{id}/databases/{dbId}/delete` | Dispatch `db.delete` for a previously recorded database |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -136,6 +139,36 @@ pre-restore safety backups taken automatically before anything was overwritten,
 isn't connected; `422` if `backup.restore` itself failed on the agent (the agent-side
 error message explains why, and any checkpoint already taken is named in it so it's
 never a silent loss).
+
+### `POST /api/v1/servers/{id}/sites/{siteId}/databases`
+```json
+{"name": "wp_example", "owner_user": "wp_example"}
+```
+`owner_user` defaults to `name` when omitted. Both must match
+`^[a-z][a-z0-9_]{0,30}$` — validated here *and* again independently by the agent
+(`packages/capabilities/db.go`), so a malformed identifier never reaches a `CREATE
+DATABASE`/`CREATE USER` statement. The owner password is **generated server-side**
+(24 random bytes, hex) rather than accepted from the caller, dispatched to `db.create`,
+and returned exactly once in the response — it is never persisted by the control plane,
+so there is no plaintext database credential at rest to leak. Only on the agent
+reporting success is a `databases` row persisted.
+→ `201 {"database": {...databaseRecord}, "owner_password": "..."}`. `404` if the site
+doesn't exist on that server; `400` for a missing/malformed identifier; `502` if the
+agent isn't connected; `422` if `db.create` itself failed on the agent.
+
+### `GET /api/v1/servers/{id}/sites/{siteId}/databases`
+→ `200` with an array of `databaseRecord` (`ID`, `ServerID`, `SiteID`, `Name`,
+`OwnerUser`, `Status`, `CreatedAt`), newest first. `404` if the site doesn't exist on
+that server. Passwords are not part of this record and are never returned here.
+
+### `POST /api/v1/servers/{id}/databases/{dbId}/delete`
+No request body — the `name` and `owner_user` sent to `db.delete` are read from the
+stored `databases` row, never accepted as client input, so a caller can only ever drop
+a database this control plane actually recorded. The record is removed only after the
+agent confirms the drop succeeded: a failed dispatch deliberately leaves the row in
+place rather than orphaning a real database the control plane no longer knows about.
+→ `200 {"status": "deleted"}`. `404` if the database doesn't exist on that server;
+`502` if the agent isn't connected; `422` if `db.delete` itself failed on the agent.
 
 ### `POST /agents/register`
 ```json

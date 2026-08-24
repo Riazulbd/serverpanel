@@ -184,6 +184,13 @@
         <p class="muted" id="siteDetailMeta" style="margin:0 0 20px"></p>
 
         <div class="section-title" style="display:flex;justify-content:space-between;align-items:center">
+          <span>Databases</span>
+          <button onclick="openNewDatabaseModal()">+ Create database</button>
+        </div>
+        <div id="databaseResult" class="task-result hidden"></div>
+        <div id="databasesList" class="muted">No databases yet.</div>
+
+        <div class="section-title" style="display:flex;justify-content:space-between;align-items:center">
           <span>Backups</span>
           <button class="primary" onclick="openNewBackupModal()">+ Create backup</button>
         </div>
@@ -226,7 +233,7 @@
 
 <script>
 const API = '/api/v1';
-let state = { me: null, servers: [], selectedServerId: null, sites: [], selectedSiteId: null, pollTimer: null };
+let state = { me: null, servers: [], selectedServerId: null, sites: [], selectedSiteId: null, databases: [], pollTimer: null };
 
 async function api(path, opts) {
   opts = opts || {};
@@ -468,6 +475,7 @@ async function openSiteDetail(siteId) {
   const site = (state.sites || []).find(s => s.ID === siteId);
   showTab('siteDetail');
   document.getElementById('backupResult').classList.add('hidden');
+  document.getElementById('databaseResult').classList.add('hidden');
   const server = (state.servers || []).find(s => s.ID === state.selectedServerId);
   document.getElementById('siteDetailServerName').textContent = server ? server.Name : 'Server';
   if (site) {
@@ -475,7 +483,91 @@ async function openSiteDetail(siteId) {
     document.getElementById('siteDetailMeta').textContent =
       site.AppType + (site.PHPVersion ? (' · PHP ' + site.PHPVersion) : '') + ' · ' + site.Status;
   }
+  await refreshDatabases();
   await refreshBackups();
+}
+
+async function refreshDatabases() {
+  try {
+    const dbs = await api(API + '/servers/' + state.selectedServerId + '/sites/' + state.selectedSiteId + '/databases') || [];
+    state.databases = dbs;
+    renderDatabases(dbs);
+  } catch (e) {}
+}
+
+function renderDatabases(dbs) {
+  const el = document.getElementById('databasesList');
+  if (!dbs.length) { el.textContent = 'No databases yet.'; return; }
+  el.innerHTML = '<table><thead><tr><th>Name</th><th>Owner user</th><th>Created</th><th></th></tr></thead><tbody>' +
+    dbs.map(d => `
+      <tr>
+        <td>${escapeHtml(d.Name)}</td>
+        <td class="muted">${escapeHtml(d.OwnerUser)}</td>
+        <td class="muted">${new Date(d.CreatedAt).toLocaleString()}</td>
+        <td><button class="danger" onclick="deleteDatabase('${d.ID}','${escapeHtml(d.Name)}')">Delete</button></td>
+      </tr>`).join('') +
+    '</tbody></table>';
+}
+
+function openNewDatabaseModal() {
+  const root = document.getElementById('modalRoot');
+  root.innerHTML = `
+    <div class="modal-backdrop" onclick="if(event.target===this) closeModal()">
+      <div class="modal">
+        <h2>Create database</h2>
+        <p class="muted" style="margin-top:0">A dedicated user is created alongside it, with privileges granted on this one database only. The password is generated on the server and shown once — it is never stored by the control plane.</p>
+        <div class="field"><label>Database name</label><input id="newDbName" placeholder="e.g. wp_example"></div>
+        <div class="field"><label>Owner user (defaults to the database name)</label><input id="newDbOwner" placeholder="e.g. wp_example"></div>
+        <button class="primary" style="width:100%" onclick="createDatabase()">Create database</button>
+        <div class="error" id="newDbError"></div>
+        <p class="muted" id="newDbStatus"></p>
+        <div id="newDbCredsBox" class="hidden">
+          <p class="section-title" style="margin-top:20px">Connection credentials — copy them now:</p>
+          <pre class="code" id="newDbCredsText"></pre>
+          <button style="width:100%" onclick="closeModalNoRefresh()">Done</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+async function createDatabase() {
+  const name = document.getElementById('newDbName').value.trim();
+  const owner = document.getElementById('newDbOwner').value.trim();
+  const err = document.getElementById('newDbError');
+  const status = document.getElementById('newDbStatus');
+  err.textContent = '';
+  status.textContent = 'Creating database and scoped owner user...';
+  try {
+    const res = await api(API + '/servers/' + state.selectedServerId + '/sites/' + state.selectedSiteId + '/databases', {
+      method: 'POST', body: JSON.stringify({name, owner_user: owner})
+    });
+    status.textContent = '';
+    document.getElementById('newDbCredsText').textContent =
+      'Host:     localhost\nDatabase: ' + res.database.Name +
+      '\nUser:     ' + res.database.OwnerUser + '\nPassword: ' + res.owner_password;
+    document.getElementById('newDbCredsBox').classList.remove('hidden');
+    await refreshDatabases();
+  } catch (e) {
+    status.textContent = '';
+    err.textContent = e.message;
+  }
+}
+
+async function deleteDatabase(dbId, name) {
+  if (!confirm('Delete the database "' + name + '" and its owner user? All data in it is dropped permanently. Take a backup first if you need it.')) return;
+  const box = document.getElementById('databaseResult');
+  box.className = 'task-result running';
+  box.textContent = 'Deleting database ' + name + '...';
+  box.classList.remove('hidden');
+  try {
+    await api(API + '/servers/' + state.selectedServerId + '/databases/' + dbId + '/delete', {method: 'POST'});
+    box.className = 'task-result ok';
+    box.textContent = 'Database ' + name + ' deleted.';
+    await refreshDatabases();
+  } catch (e) {
+    box.className = 'task-result fail';
+    box.textContent = 'Delete failed: ' + e.message;
+  }
 }
 
 async function refreshBackups() {
@@ -523,8 +615,10 @@ function openNewBackupModal() {
           </select>
         </div>
         <div class="field hidden" id="newBackupDbField">
-          <label>Database name</label>
-          <input id="newBackupDbName" placeholder="e.g. wp_example">
+          <label>Database</label>
+          ${(state.databases||[]).length
+            ? '<select id="newBackupDbName">' + state.databases.map(d => '<option value="'+escapeHtml(d.Name)+'">'+escapeHtml(d.Name)+'</option>').join('') + '</select>'
+            : '<input id="newBackupDbName" placeholder="e.g. wp_example"><p class="muted">No databases are recorded for this site yet — enter the name manually, or create one in the Databases panel.</p>'}
         </div>
         <button class="primary" style="width:100%" onclick="createBackup()">Create backup</button>
         <div class="error" id="newBackupError"></div>

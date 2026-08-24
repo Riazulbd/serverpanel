@@ -2,6 +2,43 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-24 — Database management wired end-to-end (DB-005)
+
+- **Databases are now a first-class, per-site resource in the control plane**, closing
+  the gap flagged in `SERVERAVATAR_PARITY.md` DB-001: the `db.create`/`db.delete`
+  capabilities existed agent-side but were only reachable through generic task dispatch,
+  with nothing recorded and no dashboard surface. Added a `databases` table
+  (`server_id`, `site_id`, `name`, `owner_user`, `status`, `created_at`), store methods
+  (`createDatabase`/`listDatabases`/`getDatabase`/`deleteDatabase`, each scoped by
+  server ID the same way `getSite`/`getBackup` are), and three endpoints:
+  `GET`/`POST /api/v1/servers/{id}/sites/{siteId}/databases` and
+  `POST /api/v1/servers/{id}/databases/{dbId}/delete`.
+- **The owner password is generated server-side and never stored.** It is not accepted
+  from the caller (so it can't be weak or reused), is returned exactly once in the
+  creation response the way a bootstrap token is, and has no column in the `databases`
+  table — a compromise of the control plane's SQLite file yields no usable database
+  credential. Delete reads `name`/`owner_user` from the stored row rather than from
+  client input, so a caller can only ever drop a database this control plane recorded.
+- The identifier allow-list (`^[a-z][a-z0-9_]{0,30}$`) is now enforced twice
+  independently — control plane before dispatch, agent before the statement — matching
+  the defense-in-depth pattern `stack.install`'s OS/resource preflight checks use.
+- Dashboard: site-detail "Databases" panel (create modal showing the generated
+  credentials once, databases table, per-row delete behind a destructive-action
+  confirmation). The backup modal's database field is now a select populated from the
+  site's recorded databases instead of free text, falling back to a text input when
+  none are recorded yet.
+- A failed `db.delete` dispatch deliberately leaves the record in place rather than
+  removing it: dropping the row on a transport failure would orphan a real database the
+  control plane no longer knows about. Covered by its own regression test.
+- Added 3 tests (1 store CRUD/scoping round trip, 2 HTTP integration tests covering
+  not-found boundaries, six malformed-identifier rejections, and both
+  persist-nothing-on-failed-create and keep-record-on-failed-delete). Full suite: 64
+  test functions, `go vet`/`gofmt` clean.
+- Updated `SYSTEM.md`, `API.md`, `TESTING.md`, and `SERVERAVATAR_PARITY.md` (DB-005
+  `NOT_STARTED` → `COMPLETE`; DB-001's remaining gaps narrowed to MongoDB,
+  phpMyAdmin integration, query monitoring, multi-user-per-database, and remote-host
+  access rules).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

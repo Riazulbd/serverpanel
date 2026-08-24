@@ -295,3 +295,114 @@ func TestRegisterEndpointRejectsBadToken(t *testing.T) {
 		t.Fatalf("register with bad token status = %d, want 401", rec.Code)
 	}
 }
+
+func TestDatabaseEndpointsValidateBeforeDispatch(t *testing.T) {
+	secureCookies = false
+	defer func() { secureCookies = true }()
+
+	a := newTestAPIServer(t)
+	h := a.routes()
+
+	doJSON(t, h, "POST", "/api/v1/auth/signup", map[string]string{
+		"Email": "ops3@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	rec := doJSON(t, h, "POST", "/api/v1/auth/login", map[string]string{
+		"Email": "ops3@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	cookie := sessionCookie(rec)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers", map[string]any{"Name": "web-13"}, cookie)
+	var created struct {
+		ServerID string `json:"server_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+
+	// Unknown site: 404 before any validation or dispatch.
+	rec = doJSON(t, h, "GET", "/api/v1/servers/"+created.ServerID+"/sites/site_nonexistent/databases", nil, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("list databases for nonexistent site: status = %d, want 404", rec.Code)
+	}
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/sites/site_nonexistent/databases",
+		map[string]any{"name": "wp_x"}, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("create database for nonexistent site: status = %d, want 404", rec.Code)
+	}
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/databases/db_nonexistent/delete", nil, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("delete nonexistent database: status = %d, want 404", rec.Code)
+	}
+
+	site, err := a.store.createSite(created.ServerID, "e.example.com", "sp_e", "/home/sites/sp_e", "wordpress", "8.3")
+	if err != nil {
+		t.Fatalf("createSite: %v", err)
+	}
+
+	// Identifier allow-list is enforced control-plane-side, so a malformed
+	// name never reaches the agent at all.
+	for _, bad := range []map[string]any{
+		{"name": ""},
+		{"name": "wp x"},
+		{"name": "wp`x"},
+		{"name": "Wp_x"},
+		{"name": "1wp"},
+		{"name": "wp_x", "owner_user": "bad user"},
+	} {
+		rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/sites/"+site.ID+"/databases", bad, cookie)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("create database %v: status = %d, want 400 (body = %s)", bad, rec.Code, rec.Body.String())
+		}
+	}
+
+	// A well-formed request against a site whose server has no connected
+	// agent must fail at dispatch, not validation — proving validation runs
+	// first and that nothing is persisted without the agent confirming.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/sites/"+site.ID+"/databases",
+		map[string]any{"name": "wp_e"}, cookie)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("create database with no agent connected: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if dbs := a.store.listDatabases(created.ServerID, site.ID); len(dbs) != 0 {
+		t.Fatalf("a failed dispatch persisted %d database record(s); want 0", len(dbs))
+	}
+}
+
+func TestDeleteDatabaseKeepsRecordWhenAgentUnreachable(t *testing.T) {
+	secureCookies = false
+	defer func() { secureCookies = true }()
+
+	a := newTestAPIServer(t)
+	h := a.routes()
+
+	doJSON(t, h, "POST", "/api/v1/auth/signup", map[string]string{
+		"Email": "ops4@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	rec := doJSON(t, h, "POST", "/api/v1/auth/login", map[string]string{
+		"Email": "ops4@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	cookie := sessionCookie(rec)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers", map[string]any{"Name": "web-14"}, cookie)
+	var created struct {
+		ServerID string `json:"server_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+
+	site, err := a.store.createSite(created.ServerID, "f.example.com", "sp_f", "/home/sites/sp_f", "php", "8.3")
+	if err != nil {
+		t.Fatalf("createSite: %v", err)
+	}
+	dbRec, err := a.store.createDatabase(created.ServerID, site.ID, "wp_f", "wp_f")
+	if err != nil {
+		t.Fatalf("createDatabase: %v", err)
+	}
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/databases/"+dbRec.ID+"/delete", nil, cookie)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("delete database with no agent connected: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	// The record must survive: dropping it here would leave a real database
+	// on the server that the control plane no longer knows about.
+	if _, ok := a.store.getDatabase(created.ServerID, dbRec.ID); !ok {
+		t.Fatal("a failed db.delete dispatch removed the database record anyway")
+	}
+}
