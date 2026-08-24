@@ -2,6 +2,47 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-24 — Database control-plane persistence and dashboard UI (DB-005)
+
+- **Implemented control-plane persistence and a dashboard UI for databases**, closing
+  the gap DB-001's parity entry had explicitly flagged as the recommended next
+  iteration: the `db.create`/`db.delete`/`db.list` agent capabilities existed but were
+  only reachable via generic task dispatch, with no durable record and no dedicated UI
+  (the same gap backups had before `BAK-001`).
+- Added a `databases` table (`server_id`, `site_id`, `name`, `owner_user`, `status`,
+  `created_at`), new `store` methods (`createDatabase`/`listDatabases`/`getDatabase`/
+  `deleteDatabaseRecord`, each scoped by server ID the same way `getSite`/`getBackup`
+  are), and three new endpoints (`GET`/`POST /api/v1/servers/{id}/sites/{siteId}/databases`,
+  `DELETE /api/v1/servers/{id}/databases/{databaseId}`) in a new
+  `apps/controlplane/databases.go`, following the same dispatch-then-persist-on-success
+  pattern `handleCreateSite`/`handleCreateBackup` use.
+- The owner password is generated server-side with `crypto/rand` (never accepted from
+  the request body) and returned exactly once in the create response — it is not a
+  column in the `databases` table and is never persisted anywhere, the same "shown
+  once" treatment `createServer`'s bootstrap-token install command already gets.
+  Deletion reads the database's `name`/`owner_user` from the stored row, never from
+  caller input, mirroring `backup.restore`'s trust pattern.
+- Request-level identifier validation (`^[a-z][a-z0-9_]{0,30}$`) is checked in
+  `apps/controlplane/databases.go` before a task is ever dispatched, in addition to the
+  agent's own independent check in `packages/capabilities/db.go` — defense in depth,
+  not a replacement for it.
+- Added a "Databases" panel to the site-detail dashboard view (`apps/controlplane/web/index.html`),
+  mirroring the existing "Backups" panel: a "New database" modal (name + owner user,
+  showing the generated password once), a databases table, and a delete action per row
+  with a destructive-action confirmation.
+- Added 3 new store-layer tests (`TestDatabaseCreateListGetDeleteRoundTrip` — create/
+  list/get/delete round trip, cross-server scoping, and that deleting an already-deleted
+  or wrong-server database errors rather than silently no-opping) and 2 new HTTP
+  boundary tests (`TestDatabaseEndpointsRequireARealSite`,
+  `TestCreateDatabaseRejectsInvalidIdentifiers` — not-found boundaries, invalid-identifier
+  rejection before dispatch, and confirming no `owner_password` is ever accepted from or
+  required in the request). Full suite: 64 test functions, `go vet`/`gofmt` clean.
+- Updated `SYSTEM.md`, `API.md`, `TESTING.md`, and `SERVERAVATAR_PARITY.md` (DB-001
+  promoted to a detailed parity entry; DB-005 marked `COMPLETE` and folded into it). The
+  agent-side `db.create`/`delete`/`list` MariaDB round trip itself remains
+  manually-verified-only (no MariaDB in this environment), unchanged from before this
+  session — only the control-plane layer around it is new and automated-tested.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the
