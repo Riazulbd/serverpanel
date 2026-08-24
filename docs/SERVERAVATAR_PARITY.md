@@ -253,7 +253,7 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | APP-013 | Log Monitoring Suite (traffic analytics) | `NOT_STARTED` | |
 | APP-014 | Application-level WAF / AI-bot blocker | `NOT_STARTED` | |
 | APP-015 | Custom SSL upload | `PARTIAL` | `ssl.install_custom` capability exists agent-side; no dedicated dashboard UI |
-| APP-016 | Let's Encrypt SSL + auto-renewal | `PARTIAL` | `ssl.issue_letsencrypt` implemented; certbot's own renewal timer not yet wired up by `stack.install` |
+| APP-016 | Let's Encrypt SSL + auto-renewal | `PARTIAL` | `ssl.issue_letsencrypt` implemented; `stack.install` now explicitly enables+starts `certbot.timer` and installs a deploy hook that reloads nginx after every renewal (`certbotTimerActive`/`writeCertbotDeployHook` in `stack.go`), and reports `certbot_timer_active` in the stack report — but there is still no dashboard visibility into renewal status/failures and no alerting on a renewal that silently stops working (needs SRV-008's alerting) |
 
 ### Database management — not yet started (DB-*)
 | ID | Feature | Status | Notes |
@@ -359,3 +359,8 @@ establish the tracking process and close the single highest-priority gap
   BAK-001/BAK-002 reflecting this session's backup-restore implementation. ~60
   capabilities enumerated overall (detailed + summary), the large majority honestly
   `NOT_STARTED`.
+- **2026-08-24**: APP-016 — `stack.install` now explicitly enables+starts
+  `certbot.timer` and installs an idempotent nginx-reload deploy hook, closing the gap
+  where an issued Let's Encrypt certificate had no guaranteed renewal path (packaging
+  behavior varied by image/history rather than being asserted). Still `PARTIAL`: no
+  renewal-failure alerting or dashboard visibility yet, tracked against SRV-008.

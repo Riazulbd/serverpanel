@@ -140,6 +140,34 @@ func phase1LEMPSteps() []installStep {
 			},
 		},
 		{
+			Name: "certbot auto-renewal (systemd timer + nginx reload hook)",
+			// The certbot deb package ships a certbot.timer unit, but
+			// whether it ends up enabled/active depends on packaging
+			// version and install history (e.g. it can be masked or
+			// disabled by an image/snapshot this server was provisioned
+			// from) — a certificate issued by ssl.issue_letsencrypt is
+			// worthless in ~90 days if renewal silently isn't running, so
+			// stack.install asserts the desired state explicitly rather
+			// than trusting apt's postinst to have done it. The deploy
+			// hook is defense in depth: certbot's nginx installer plugin
+			// already reloads nginx on renewal for certs it issued, but a
+			// hook that reloads unconditionally on every successful
+			// renewal costs nothing and covers any future authenticator
+			// combination that doesn't.
+			Check: func(ctx context.Context) bool {
+				return certbotTimerActive(ctx) && hasCertbotDeployHook()
+			},
+			Run: func(ctx context.Context) error {
+				if _, err := run(ctx, "systemctl", "enable", "--now", "certbot.timer"); err != nil {
+					return fmt.Errorf("enable certbot.timer: %w", err)
+				}
+				if err := writeCertbotDeployHook(); err != nil {
+					return fmt.Errorf("write certbot renewal deploy hook: %w", err)
+				}
+				return nil
+			},
+		},
+		{
 			Name:  "ufw",
 			Check: func(ctx context.Context) bool { return isPackageInstalled(ctx, "ufw") },
 			Run:   func(ctx context.Context) error { _, err := aptInstall(ctx, "ufw"); return err },
@@ -262,6 +290,7 @@ func handleStackInstall(ctx context.Context, params map[string]any, progress Pro
 	report.Versions["cpu_count"] = fmt.Sprintf("%d", resources.CPUCount)
 	report.Versions["mem_total_mb"] = fmt.Sprintf("%d", resources.MemTotalMB)
 	report.Versions["disk_avail_mb_at_install"] = fmt.Sprintf("%d", resources.DiskAvailMB)
+	report.Versions["certbot_timer_active"] = fmt.Sprintf("%t", certbotTimerActive(ctx))
 
 	if err := writeStackReport(report); err != nil {
 		progress(fmt.Sprintf("warning: could not persist install report: %v", err))
@@ -269,6 +298,47 @@ func handleStackInstall(ctx context.Context, params map[string]any, progress Pro
 
 	reportJSON, _ := json.Marshal(report)
 	return string(reportJSON), nil
+}
+
+// certbotDeployHookPath is where certbot runs every executable script after
+// *every* successful renewal, regardless of which domain(s) renewed
+// (certbot's own "deploy hook" contract — see certbot(1)).
+const certbotDeployHookPath = "/etc/letsencrypt/renewal-hooks/deploy/serverpanel-reload-nginx.sh"
+
+// certbotDeployHookScript is factored out from writeCertbotDeployHook so its
+// exact contents are unit-testable without touching the filesystem.
+func certbotDeployHookScript() string {
+	return "#!/bin/sh\n" +
+		"# Managed by ServerPanel. Runs after every successful certbot renewal\n" +
+		"# (certbot's RENEWED_DOMAINS/RENEWED_LINEAGE deploy-hook contract) to\n" +
+		"# make sure nginx actually picks up the renewed certificate.\n" +
+		"set -e\n" +
+		"systemctl reload nginx\n"
+}
+
+func writeCertbotDeployHook() error {
+	if err := os.MkdirAll("/etc/letsencrypt/renewal-hooks/deploy", 0755); err != nil {
+		return err
+	}
+	return os.WriteFile(certbotDeployHookPath, []byte(certbotDeployHookScript()), 0755)
+}
+
+func hasCertbotDeployHook() bool {
+	data, err := os.ReadFile(certbotDeployHookPath)
+	return err == nil && string(data) == certbotDeployHookScript()
+}
+
+// certbotTimerActive reports whether the systemd timer that drives
+// automatic renewal (`certbot renew` twice daily) is both enabled (survives
+// reboot) and currently active, rather than trusting package-install state
+// alone.
+func certbotTimerActive(ctx context.Context) bool {
+	enabled, err := run(ctx, "systemctl", "is-enabled", "certbot.timer")
+	if err != nil || strings.TrimSpace(enabled) != "enabled" {
+		return false
+	}
+	active, err := run(ctx, "systemctl", "is-active", "certbot.timer")
+	return err == nil && strings.TrimSpace(active) == "active"
 }
 
 func dpkgVersion(ctx context.Context, pkg string) string {

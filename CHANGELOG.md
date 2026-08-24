@@ -2,6 +2,30 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-24 — Let's Encrypt auto-renewal wiring
+
+- **`stack.install` now guarantees Let's Encrypt certificates actually renew**
+  (`packages/capabilities/stack.go`). Previously the installer only apt-installed the
+  `certbot`/`python3-certbot-nginx` packages and relied on the Debian package's
+  postinst to have enabled `certbot.timer` — true on some images, not guaranteed on
+  others (a server provisioned from a stripped-down or older snapshot could silently
+  never renew, and a cert issued via `ssl.issue_letsencrypt` expires in ~90 days). A
+  new idempotent install step (`certbotTimerActive` / `systemctl enable --now
+  certbot.timer`) asserts the timer is both enabled and active, and installs a
+  deploy hook (`writeCertbotDeployHook`, `/etc/letsencrypt/renewal-hooks/deploy/`)
+  that unconditionally reloads nginx after every successful renewal — defense in
+  depth alongside certbot's own nginx-installer-plugin reload behavior. The stack
+  report now records `certbot_timer_active` so the state is auditable after the fact,
+  not just asserted during install.
+- Added `packages/capabilities/stack_test.go`: step ordering (renewal step must run
+  after certbot's own install step), the fail-closed behavior of
+  `certbotTimerActive` when `systemctl` is unavailable, and a pinned assertion on the
+  deploy hook's contents (shebang, `set -e`, the actual reload command).
+- Updated `docs/SERVERAVATAR_PARITY.md` (APP-016) — still `PARTIAL`: renewal now
+  actually runs, but there's no dashboard visibility or alerting yet if a renewal
+  starts failing (tracked against SRV-008, historical monitoring/alerts, which is
+  still `NOT_STARTED`/`PARTIAL`).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the
