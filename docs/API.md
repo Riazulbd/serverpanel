@@ -177,8 +177,22 @@ The full allow-listed capability names `packages/capabilities.Default()` registe
 (see `SYSTEM.md` §12 for the allow-list rationale): `system.ping`, `service.control`,
 `diagnostics.basic`, `stack.install`, `site.create`, `site.set_php_version`,
 `site.set_status`, `app.wordpress_install`, `ssl.issue_letsencrypt`,
-`ssl.install_custom`, `db.create`, `db.delete`, `db.list`, `file.list`, `file.read`,
-`file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`.
+`ssl.install_custom`, `ssl.renewal_status`, `db.create`, `db.delete`, `db.list`,
+`file.list`, `file.read`, `file.write`, `file.delete`, `backup.run`, `backup.restore`,
+`logs.tail`.
+
+### `ssl.renewal_status`
+Params: none. Reports whether certbot's own systemd renewal timer
+(`certbot.timer`, enabled by `stack.install`) is active, plus every issued Let's
+Encrypt certificate's domain and days-until-expiry — parsed directly from each
+certificate's X.509 `NotAfter` field, not by scraping `certbot`'s CLI output. Returns a
+plain-text, newline-separated report (matching `file.list`/`db.list`'s convention of
+returning human-readable `detail` rather than a JSON blob), e.g.:
+```
+certbot.timer: enabled, active
+example.com: expires 2026-11-20 (88 days)
+staging.example.com: expires 2026-08-30 (6 days) — renewal due soon
+```
 
 ### `backup.restore`
 ```json

@@ -83,7 +83,7 @@
   .stat .label { font-size: 11px; color: var(--muted); text-transform: uppercase; }
   .stat .value { font-size: 20px; font-weight: 700; margin-top: 2px; }
   .actions-grid { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
-  .task-result { margin-top: 12px; }
+  .task-result { margin-top: 12px; white-space: pre-line; }
   .task-result.running { color: var(--warn); }
   .task-result.ok { color: var(--ok); }
   .task-result.fail { color: var(--danger); }
@@ -182,6 +182,15 @@
       <div class="card">
         <h2 id="siteDetailDomain" style="margin:0 0 4px"></h2>
         <p class="muted" id="siteDetailMeta" style="margin:0 0 20px"></p>
+
+        <div class="section-title" style="display:flex;justify-content:space-between;align-items:center">
+          <span>SSL</span>
+          <span>
+            <button onclick="checkSSLRenewalStatus()">Check renewal status</button>
+            <button class="primary" onclick="openIssueSSLModal()">Issue Let's Encrypt certificate</button>
+          </span>
+        </div>
+        <div id="sslResult" class="task-result hidden"></div>
 
         <div class="section-title" style="display:flex;justify-content:space-between;align-items:center">
           <span>Backups</span>
@@ -468,6 +477,7 @@ async function openSiteDetail(siteId) {
   const site = (state.sites || []).find(s => s.ID === siteId);
   showTab('siteDetail');
   document.getElementById('backupResult').classList.add('hidden');
+  document.getElementById('sslResult').classList.add('hidden');
   const server = (state.servers || []).find(s => s.ID === state.selectedServerId);
   document.getElementById('siteDetailServerName').textContent = server ? server.Name : 'Server';
   if (site) {
@@ -553,6 +563,70 @@ async function createBackup() {
 }
 
 function closeModalNoRefresh() { document.getElementById('modalRoot').innerHTML = ''; }
+
+function openIssueSSLModal() {
+  const site = (state.sites || []).find(s => s.ID === state.selectedSiteId);
+  const root = document.getElementById('modalRoot');
+  root.innerHTML = `
+    <div class="modal-backdrop" onclick="if(event.target===this) closeModal()">
+      <div class="modal">
+        <h2>Issue Let's Encrypt certificate</h2>
+        <p class="muted">The domain's DNS must already point at this server, and port 80 must be reachable, before Let's Encrypt can validate it.</p>
+        <div class="field">
+          <label>Domain</label>
+          <input id="newSSLDomain" value="${escapeHtml(site ? site.Domain : '')}">
+        </div>
+        <div class="field">
+          <label>Contact email (for Let's Encrypt expiry/urgent notices)</label>
+          <input id="newSSLEmail" type="email" placeholder="admin@example.com">
+        </div>
+        <button class="primary" style="width:100%" onclick="issueSSL()">Issue certificate</button>
+        <div class="error" id="newSSLError"></div>
+        <p class="muted" id="newSSLStatus"></p>
+      </div>
+    </div>`;
+}
+
+async function issueSSL() {
+  const domain = document.getElementById('newSSLDomain').value.trim();
+  const email = document.getElementById('newSSLEmail').value.trim();
+  const err = document.getElementById('newSSLError');
+  const status = document.getElementById('newSSLStatus');
+  err.textContent = '';
+  if (!domain || !email) { err.textContent = 'Domain and email are required.'; return; }
+  status.textContent = 'Requesting certificate from Let\'s Encrypt...';
+  try {
+    const res = await api(API + '/servers/' + state.selectedServerId + '/tasks', {
+      method: 'POST', body: JSON.stringify({capability: 'ssl.issue_letsencrypt', params: {domain, email}})
+    });
+    if (res.status !== 'succeeded') throw new Error(res.detail || res.message || 'issuance failed');
+    closeModalNoRefresh();
+    const box = document.getElementById('sslResult');
+    box.className = 'task-result ok';
+    box.textContent = 'Certificate issued for ' + domain + '. It will renew automatically — use "Check renewal status" to confirm.';
+    box.classList.remove('hidden');
+  } catch (e) {
+    status.textContent = '';
+    err.textContent = e.message;
+  }
+}
+
+async function checkSSLRenewalStatus() {
+  const box = document.getElementById('sslResult');
+  box.className = 'task-result running';
+  box.textContent = 'Checking renewal timer and certificate expiry...';
+  box.classList.remove('hidden');
+  try {
+    const res = await api(API + '/servers/' + state.selectedServerId + '/tasks', {
+      method: 'POST', body: JSON.stringify({capability: 'ssl.renewal_status', params: {}})
+    });
+    box.className = 'task-result ' + (res.status === 'succeeded' ? 'ok' : 'fail');
+    box.textContent = res.detail || res.message || res.status;
+  } catch (e) {
+    box.className = 'task-result fail';
+    box.textContent = 'Could not check renewal status: ' + e.message;
+  }
+}
 
 async function restoreBackup(backupId) {
   if (!confirm('Restore this backup? The site\'s current files/database will be replaced with the backed-up version. A safety checkpoint of the current state is taken automatically before anything is changed.')) return;

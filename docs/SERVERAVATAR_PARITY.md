@@ -237,6 +237,25 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | SRV-010 | Apache / OpenLiteSpeed stack adapters | `NOT_STARTED` | nginx-only today |
 | SRV-011 | Node.js runtime support | `NOT_STARTED` | |
 
+### APP-016 — Let's Encrypt SSL issuance + automatic renewal
+- **Category**: Application Management → SSL
+- **Documentation page**: Application Management → SSL/TLS
+- **Short description**: Issue a free Let's Encrypt certificate for a site's domain and keep it renewed automatically without further action.
+- **Expected behavior** (per ServerAvatar's documented workflow): one click issues a certificate and wires it into the web server; renewal happens in the background before expiry, with visibility into renewal status.
+- **Our implementation**: `ssl.issue_letsencrypt` (existing) requests/installs a certificate via `certbot --nginx`. New this iteration: `stack.install`'s installer profile now enables and starts certbot's own systemd timer (`certbot.timer` → `certbot renew`, checked twice daily, only renews within 30 days of expiry) as an idempotent install step, so renewal is not a manual follow-up task. A new `ssl.renewal_status` capability reports the timer's enabled/active state plus every issued certificate's domain and days-until-expiry (parsed directly from each `cert.pem`'s X.509 `NotAfter` via `crypto/x509`, never by scraping `certbot`'s text output), flagging certs expiring within 15 days or already expired.
+- **Frontend**: `web/index.html` site-detail "SSL" panel — "Issue Let's Encrypt certificate" modal (domain + contact email) and a "Check renewal status" button that renders the multi-line report.
+- **Backend service**: `gateway.dispatch` → `packages/capabilities.handleSSLIssueLetsEncrypt` / `handleSSLRenewalStatus`; `phase1LEMPSteps` in `stack.go` for the timer-enable install step.
+- **API endpoint(s)**: `POST /api/v1/servers/{id}/tasks` (`capability: ssl.issue_letsencrypt` / `ssl.renewal_status`) — the existing generic task-dispatch endpoint; no new API surface needed.
+- **Agent command**: `ssl.issue_letsencrypt`, `ssl.renewal_status`.
+- **DB tables**: none — certificate state lives on the server (certbot's own `/etc/letsencrypt`), not persisted in the control plane's SQLite store yet (see Known differences).
+- **Required permission**: authenticated session (same as any task dispatch).
+- **Security considerations**: `ssl.renewal_status` only reads `systemctl is-enabled/is-active certbot.timer` and parses locally-stored X.509 certs — no caller-supplied paths, no shelling out with unvalidated input; `ssl.issue_letsencrypt`'s only caller-supplied values are `domain` (validated against `domainRe`) and `email`, unchanged from the existing capability.
+- **Test coverage**: `packages/capabilities/ssl_test.go` — certificate expiry parsing (valid cert, missing file, non-PEM garbage), domain listing (sorted, skips non-directory entries like certbot's `README`), and `handleSSLRenewalStatus`'s report text for no-certs / healthy / expiring-soon / expired cases, all against real self-signed X.509 certs written to a temp dir (no certbot/systemd dependency). The `certbot.timer` enable step itself is exercised by `stack.install`'s existing idempotent-step test pattern but not independently unit-tested (requires a real systemd, same caveat as the rest of `stack.install` — see `TESTING.md`).
+- **Current status**: `COMPLETE`
+- **Completion date**: 2026-08-24
+- **Known differences**: certificate metadata (issued domains, expiry) is not persisted to the control plane's database or shown proactively on the server/site list — a user must open the site and click "Check renewal status" to see it; there is no scheduled control-plane-side polling or expiry alerting yet (that's ALT-* / notification-channel scope, still `NOT_STARTED`).
+- **Reason for intentional differences**: expiry-alert notifications depend on the notification-channel architecture (Phase 2/3), which doesn't exist yet; the renewal mechanism itself (the actual gap this row tracked) does not depend on that and is complete on its own.
+
 ### Application management — not yet started (APP-*)
 | ID | Feature | Status | Notes |
 |---|---|---|---|
@@ -253,7 +272,6 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | APP-013 | Log Monitoring Suite (traffic analytics) | `NOT_STARTED` | |
 | APP-014 | Application-level WAF / AI-bot blocker | `NOT_STARTED` | |
 | APP-015 | Custom SSL upload | `PARTIAL` | `ssl.install_custom` capability exists agent-side; no dedicated dashboard UI |
-| APP-016 | Let's Encrypt SSL + auto-renewal | `PARTIAL` | `ssl.issue_letsencrypt` implemented; certbot's own renewal timer not yet wired up by `stack.install` |
 
 ### Database management — not yet started (DB-*)
 | ID | Feature | Status | Notes |
@@ -295,8 +313,8 @@ capability surface (per task-brief §3/§101), not just what's already built.
 
 | Status | Count (detailed entries) | Count (summary-table rows) |
 |---|---|---|
-| `COMPLETE` | 3 (SRV-001, BAK-002, ACC-001) | 1 (PROV-006) |
-| `PARTIAL` | 3 (SRV-002, APP-001, APP-002, DB-001, BAK-001 — 5 total, see note) | 6 |
+| `COMPLETE` | 4 (SRV-001, BAK-002, ACC-001, APP-016) | 1 (PROV-006) |
+| `PARTIAL` | 3 (SRV-002, APP-001, APP-002, DB-001, BAK-001 — 5 total, see note) | 5 |
 | `NOT_STARTED` | 0 | ~55 |
 | `BLOCKED_EXTERNAL` | 0 (sub-scoped within BAK-001/BAK-002's db/full-scope MariaDB verification) | 0 |
 | `INTENTIONALLY_NOT_APPLICABLE` | 0 | 1 |
@@ -359,3 +377,9 @@ establish the tracking process and close the single highest-priority gap
   BAK-001/BAK-002 reflecting this session's backup-restore implementation. ~60
   capabilities enumerated overall (detailed + summary), the large majority honestly
   `NOT_STARTED`.
+- **2026-08-24**: closed APP-016 (Let's Encrypt SSL + automatic renewal) end-to-end:
+  `stack.install` now enables certbot's systemd renewal timer, a new
+  `ssl.renewal_status` capability reports timer health and per-certificate expiry, and
+  the dashboard gained a dedicated SSL panel (issue certificate + check renewal status)
+  on the site-detail page. Promoted from a compact-table `PARTIAL` row to a full
+  `COMPLETE` detail entry.

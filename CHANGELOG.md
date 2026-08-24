@@ -2,6 +2,36 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-24 — Automatic SSL renewal (APP-016)
+
+- **`stack.install` now enables certbot's own systemd renewal timer**
+  (`packages/capabilities/stack.go`): a new idempotent install step runs
+  `systemctl enable --now certbot.timer` right after certbot itself installs. This is
+  what turns "a certificate was issued once" into "the certificate renews itself" —
+  the timer checks twice daily and only actually renews certs within 30 days of expiry,
+  with no further action needed after the initial `ssl.issue_letsencrypt` call.
+- **New `ssl.renewal_status` capability** (`packages/capabilities/ssl.go`): reports the
+  renewal timer's enabled/active state plus every issued certificate's domain and
+  days-until-expiry, flagging anything expiring within 15 days or already expired.
+  Expiry is read directly from each certificate's parsed X.509 `NotAfter` field
+  (`crypto/x509`), never by scraping `certbot`'s CLI text output, which is not a stable
+  interface across certbot versions.
+- **Dashboard**: the site-detail page gained an "SSL" panel with an "Issue Let's
+  Encrypt certificate" modal (domain + contact email, dispatching the existing
+  `ssl.issue_letsencrypt` capability, which had no dedicated UI before this) and a
+  "Check renewal status" button rendering `ssl.renewal_status`'s report. Both use the
+  existing generic `POST /api/v1/servers/{id}/tasks` dispatch endpoint — no new API
+  surface was needed.
+- **Tests**: `packages/capabilities/ssl_test.go` (new) covers certificate-expiry
+  parsing, sorted/filtered domain listing, and the renewal-status report's text for the
+  no-certs/healthy/expiring-soon/expired cases, all against real self-signed X.509
+  certificates written to a temp directory — no certbot or systemd dependency. Full
+  suite: 67 test functions, all passing (`go build`, `go vet`, `gofmt -l`, `go test
+  ./...` all clean).
+- **Docs**: `docs/SERVERAVATAR_PARITY.md`'s APP-016 promoted from a compact `PARTIAL`
+  row to a full `COMPLETE` detail entry; `docs/SYSTEM.md`, `docs/API.md`, and
+  `docs/TESTING.md` updated to match.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the
