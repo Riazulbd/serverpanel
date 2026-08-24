@@ -2,6 +2,47 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-24 — Database control-plane persistence and dashboard UI
+
+- **Closed DB-005** (flagged as the recommended next step in the previous parity
+  pass): databases created via `db.create` are now durably recorded by the control
+  plane and manageable from the dashboard, the same dispatch-then-persist-on-success
+  pattern `backups`/`sites` already use, rather than existing only as an
+  agent-dispatchable capability with no control-plane-side record.
+- Added a `databases` table (`server_id`, `name`, `owner_user`, `engine`, `status`,
+  `created_at`, unique on `server_id, name`) and `store` methods
+  (`createDatabase`/`listDatabases`/`getDatabase`/`deleteDatabase`, each scoped by
+  server ID the same way `getSite`/`getBackup` are, so a database recorded under one
+  server can never be addressed or deleted through another server's endpoint).
+- New endpoints: `GET`/`POST /api/v1/servers/{id}/databases`,
+  `POST /api/v1/servers/{id}/databases/{dbId}/delete`. The owner password is
+  generated control-plane-side (24 random bytes, hex-encoded — never caller-supplied,
+  never persisted) and returned exactly once in the create response; deletion reads
+  the database/owner names back from the stored record rather than trusting
+  free-form client input, matching `handleRestoreBackup`'s pattern for destructive
+  actions.
+- `db.create`'s agent-side handler (`packages/capabilities/db.go`) now returns a
+  structured JSON result (`{name, owner_user}`) instead of a human-readable string,
+  so the control plane can parse and persist it — the same `siteResult`/backup-result
+  convention `site.create`/`backup.run` already follow.
+- Added a "Databases" panel to the server-detail dashboard view: create-database
+  modal (name + optional owner user), a databases table, a one-time
+  password-reveal notice on creation, and a delete button with a destructive-action
+  confirmation dialog.
+- Added 5 new capability-layer tests (identifier allow-list accept/reject including
+  an explicit SQL-injection-shaped input, `db.create`/`db.delete` validation-layer
+  rejection, and a `dbResult` JSON round-trip check) and 2 new control-plane tests
+  (database CRUD round trip with cross-server scoping, and HTTP boundary/validation
+  tests — invalid name rejected before dispatch, no-agent-connected surfaces as a
+  gateway error not a validation error, not-found and cross-server-scoping checks on
+  delete). Full suite green, `go vet`/`gofmt` clean.
+- Updated `docs/SERVERAVATAR_PARITY.md` (DB-001 promoted from `PARTIAL` with an open
+  "known difference" to `COMPLETE`; new DB-005 detail entry) and `docs/API.md`.
+- **Known differences carried forward**: no password-reset endpoint for an existing
+  database's owner user (losing the one-time-shown password means deleting and
+  recreating the database today); MongoDB support and a phpMyAdmin-equivalent admin
+  UI remain `NOT_STARTED` (DB-002/DB-003).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

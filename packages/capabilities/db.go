@@ -3,11 +3,24 @@ package capabilities
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"regexp"
 
 	_ "github.com/go-sql-driver/mysql"
 )
+
+// dbResult is what db.create returns as its TaskEvent detail (JSON) — the
+// control plane parses this to persist a database record; see
+// apps/controlplane/databases.go handleCreateDatabase. Deliberately excludes
+// the owner password: that value is shown to the caller exactly once, at
+// creation time, from the control plane's own request/response cycle
+// (db.create receives it as an input param, generated control-plane-side —
+// it never needs to round-trip back out through the agent's result).
+type dbResult struct {
+	Name  string `json:"name"`
+	Owner string `json:"owner_user"`
+}
 
 // identifierRe is the allow-list for database/user names. MySQL has no
 // placeholder syntax for identifiers (only for values), so the standard
@@ -75,7 +88,8 @@ func handleDBCreate(ctx context.Context, params map[string]any, progress Progres
 		return "", fmt.Errorf("flush privileges: %w", err)
 	}
 
-	return fmt.Sprintf("database %q created, owned by user %q with grants scoped to that database only", name, owner), nil
+	out, _ := json.Marshal(dbResult{Name: name, Owner: owner})
+	return string(out), nil
 }
 
 func handleDBDelete(ctx context.Context, params map[string]any, progress Progress) (string, error) {
