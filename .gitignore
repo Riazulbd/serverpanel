@@ -11,4 +11,5 @@
 *.db-wal
 agent-ca-cert.pem
 agent-ca-key.pem
+secret.key
 /serverpanel-agent/

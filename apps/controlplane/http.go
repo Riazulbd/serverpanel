@@ -24,7 +24,8 @@ type apiServer struct {
 	gw          *gateway
 	gatewayAddr string
 	tokenTTL    time.Duration
-	publicDir   string // static dashboard assets; see dashboard.go
+	publicDir   string              // static dashboard assets; see dashboard.go
+	secretKey   [secretKeySize]byte // at-rest encryption for re-displayable secrets; see secrets.go
 }
 
 func (a *apiServer) routes() http.Handler {
@@ -56,6 +57,10 @@ func (a *apiServer) routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/servers/{id}/sites/{siteId}/backups", a.requireAuth(a.handleListBackups))
 	mux.HandleFunc("POST /api/v1/servers/{id}/sites/{siteId}/backups", a.requireAuth(a.handleCreateBackup))
 	mux.HandleFunc("POST /api/v1/servers/{id}/backups/{backupId}/restore", a.requireAuth(a.handleRestoreBackup))
+	mux.HandleFunc("GET /api/v1/servers/{id}/databases", a.requireAuth(a.handleListDatabases))
+	mux.HandleFunc("POST /api/v1/servers/{id}/databases", a.requireAuth(a.handleCreateDatabase))
+	mux.HandleFunc("GET /api/v1/servers/{id}/databases/{databaseId}/credentials", a.requireAuth(a.handleGetDatabaseCredentials))
+	mux.HandleFunc("DELETE /api/v1/servers/{id}/databases/{databaseId}", a.requireAuth(a.handleDeleteDatabase))
 	mux.HandleFunc("GET /api/v1/audit", a.requireAuth(a.handleAudit))
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })

@@ -118,14 +118,14 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Backend service**: `gateway.dispatch` → `packages/capabilities.handleDBCreate/Delete/List`.
 - **API endpoint(s)**: `POST /api/v1/servers/{id}/tasks`.
 - **Agent command**: `db.create`, `db.delete`, `db.list`.
-- **DB tables**: none on the control-plane side yet (no `databases` table — see Known differences).
+- **DB tables**: `databases` (`server_id`, `name`, `owner_user`, `owner_password_enc`, `status`, `created_at`, `UNIQUE(server_id, name)`) — added 2026-08-24.
 - **Required permission**: authenticated session.
-- **Security considerations**: identifier allow-list (`^[a-z][a-z0-9_]{0,30}$`) prevents SQL-identifier injection where placeholders can't be used; grants are always single-database-scoped.
-- **Test coverage**: manually verified in a prior session against a real MariaDB; not covered by `go test` (requires a running MariaDB — this environment has none).
-- **Current status**: `PARTIAL`
-- **Completion date**: n/a
-- **Known differences**: MongoDB support, a dedicated dashboard UI, and control-plane persistence of database records (so they show up per-site the way backups now do) don't exist yet.
-- **Reason**: capability-layer work landed before the control-plane persistence/UI layer that backups just got (see BAK-001) — same pattern, not yet applied here. Good candidate for the next iteration.
+- **Security considerations**: identifier allow-list (`^[a-z][a-z0-9_]{0,30}$`), enforced both control-plane-side (fast 400, before any dispatch) and agent-side, prevents SQL-identifier injection where placeholders can't be used; grants are always single-database-scoped; the owner password is generated control-plane-side (never client-supplied), never logged, and stored only AES-256-GCM-encrypted at rest (`apps/controlplane/secrets.go`) — decrypted only on an explicit, audit-logged "view credentials" request.
+- **Test coverage**: `apps/controlplane/store_test.go` (`TestDatabaseCreateListGetDeleteRoundTrip` — CRUD, uniqueness, cross-server scoping), `apps/controlplane/http_test.go` (`TestDatabaseEndpointsValidateAndRequireARealDatabase`, `TestDatabaseCredentialsRoundTripThroughEncryption`), `apps/controlplane/secrets_test.go` (encrypt/decrypt round trip, fail-closed under tampering/wrong key, key persistence). The capability layer's real-MariaDB path (`db.create`/`db.delete` actually running) remains manually verified only, same as before — not covered by `go test` (requires a running MariaDB, absent in this environment).
+- **Current status**: `PARTIAL` (control-plane persistence/UI/credential-encryption layer is `COMPLETE` and tested; the underlying agent capability's real-MariaDB execution path is `BLOCKED_EXTERNAL` for automated verification in this environment, same sub-scoping pattern as BAK-001/BAK-002)
+- **Completion date**: 2026-08-24 (control-plane persistence/UI/encryption layer)
+- **Known differences**: MongoDB support and a dedicated database-admin UI (phpMyAdmin-equivalent) don't exist yet; databases are server-scoped records, not linked to a specific site/application the way backups are.
+- **Reason**: MongoDB (DB-002) and phpMyAdmin integration (DB-003) are separate, larger pieces of work tracked in the summary table below.
 
 ### BAK-001 — On-demand backup (files/db/full)
 - **Category**: Backups
@@ -261,7 +261,6 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | DB-002 | MongoDB support | `NOT_STARTED` | |
 | DB-003 | phpMyAdmin / DB admin UI integration | `NOT_STARTED` | |
 | DB-004 | Database process/query monitoring | `NOT_STARTED` | |
-| DB-005 | Control-plane persistence + dashboard UI for databases (mirroring what BAK-001 just got) | `NOT_STARTED` | See DB-001's "Known differences" |
 
 ### WordPress Toolkit (WP-*)
 | ID | Feature | Status |
@@ -296,8 +295,8 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | Status | Count (detailed entries) | Count (summary-table rows) |
 |---|---|---|
 | `COMPLETE` | 3 (SRV-001, BAK-002, ACC-001) | 1 (PROV-006) |
-| `PARTIAL` | 3 (SRV-002, APP-001, APP-002, DB-001, BAK-001 — 5 total, see note) | 6 |
-| `NOT_STARTED` | 0 | ~55 |
+| `PARTIAL` | 5 (SRV-002, APP-001, APP-002, DB-001, BAK-001, see note) | 6 |
+| `NOT_STARTED` | 0 | ~54 |
 | `BLOCKED_EXTERNAL` | 0 (sub-scoped within BAK-001/BAK-002's db/full-scope MariaDB verification) | 0 |
 | `INTENTIONALLY_NOT_APPLICABLE` | 0 | 1 |
 
@@ -354,6 +353,12 @@ establish the tracking process and close the single highest-priority gap
 
 ## Change history
 
+- **2026-08-24**: DB-001 promoted from a capability-layer-only `PARTIAL` to a `PARTIAL`
+  with the control-plane persistence/dashboard-UI/credential-encryption layer
+  `COMPLETE` and tested (closing the gap flagged as the recommended next iteration in
+  the 2026-08-17 entry below). DB-005 (the tracking row for that same gap) removed from
+  the not-started table now that it's folded into DB-001's detail block. See
+  `CHANGELOG.md` 2026-08-24 for the full implementation writeup.
 - **2026-08-17**: initial version. Established the tracking process; recorded
   SRV-001/002, APP-001/002, DB-001, ACC-001 (pre-existing work) at accurate status, and
   BAK-001/BAK-002 reflecting this session's backup-restore implementation. ~60

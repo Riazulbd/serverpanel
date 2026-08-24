@@ -2,6 +2,50 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-24 — Database management: control-plane persistence, dashboard UI, at-rest secret encryption
+
+- **Closed the DB-005 parity gap** flagged as the recommended next step in DB-001's
+  entry: `db.create`/`db.delete` were dispatchable agent capabilities with no
+  control-plane record of the databases they created, no dashboard UI, and no way to
+  see a database's credentials again after creation. This applied the same
+  dispatch-then-persist-on-success pattern `backup.run`/`site.create` already use.
+- Added a `databases` table (`id`, `server_id`, `name`, `owner_user`,
+  `owner_password_enc`, `status`, `created_at`, `UNIQUE(server_id, name)`) and matching
+  `store.go` CRUD methods (`createDatabase`/`listDatabases`/`getDatabase`/
+  `deleteDatabase`, each scoped by server ID like `getSite`/`getBackup`).
+- Added four endpoints (`apps/controlplane/databases.go`):
+  `GET`/`POST /api/v1/servers/{id}/databases`,
+  `GET /api/v1/servers/{id}/databases/{databaseId}/credentials`,
+  `DELETE /api/v1/servers/{id}/databases/{databaseId}`. Creation generates the owner
+  password server-side (never client-supplied), dispatches `db.create`, and only
+  persists a record once the agent confirms success; deletion dispatches `db.delete`
+  first and only removes the record once the agent confirms the database is actually
+  gone.
+- **New: at-rest secret encryption** (`apps/controlplane/secrets.go`). Until now every
+  stored secret only ever needed to be *verified* (session/bootstrap tokens — SHA-256
+  hashed). A database owner password is different: an operator legitimately needs to
+  see it again later (to configure an application, for instance), so hashing doesn't
+  work. Added `loadOrCreateSecretKey` (a 32-byte key auto-generated on first run and
+  persisted 0600 next to the agent CA's own key file, mirroring `ca.go`'s pattern) and
+  AES-256-GCM `encryptSecret`/`decryptSecret`. The credentials endpoint is the only
+  place a password is ever decrypted, and every call is audit-logged
+  (`database.credentials_viewed`) — establishes the pattern for future secrets that
+  need the same property (SSL private keys, cloud-provider credentials, Git deploy
+  keys).
+- Added a "Databases" panel to the server-detail dashboard view: create-database modal
+  (name + optional owner user, defaulting to the database name), a databases table with
+  "View credentials" and "Delete" actions, and a one-time post-creation password
+  display that also explains credentials remain viewable afterward.
+- Added 9 new test functions: 3 store-level CRUD/uniqueness/cross-server-scoping round
+  trip, 2 HTTP validation-boundary + credentials-round-trip-through-real-encryption, 3
+  `secrets.go` unit tests (encrypt/decrypt round trip, fail-closed under tampering or
+  wrong key, key persistence across reload), plus the test helper now wiring a real
+  `secretKey` into every test `apiServer` the same way it wires a real CA. Full suite
+  green, `go vet`/`gofmt` clean.
+- Updated `SYSTEM.md` (§2 server management, §8 schema, §9 endpoints, §16 flags, §18
+  security model) and `docs/SERVERAVATAR_PARITY.md` (DB-001 promoted to a detailed
+  entry reflecting the closed gap; DB-005 removed from the not-started table).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

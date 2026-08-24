@@ -297,3 +297,47 @@ func TestBackupCreateListGetRoundTrip(t *testing.T) {
 		t.Fatal("expected getBackup to refuse a backup ID under the wrong server")
 	}
 }
+
+func TestDatabaseCreateListGetDeleteRoundTrip(t *testing.T) {
+	st := newTestStore(t)
+	serverID, _, _ := st.createServer("web-10", "", nil, time.Hour, "admin@example.com")
+
+	db, err := st.createDatabase(serverID, "wp_example", "wp_example", "encrypted-blob")
+	if err != nil {
+		t.Fatalf("createDatabase: %v", err)
+	}
+	if db.ID == "" || db.Status != "active" {
+		t.Fatalf("unexpected database record: %+v", db)
+	}
+
+	// Same (server, name) pair must be rejected, matching the UNIQUE(server_id, name)
+	// constraint — a database record can't silently shadow another one.
+	if _, err := st.createDatabase(serverID, "wp_example", "wp_example", "encrypted-blob"); err == nil {
+		t.Fatal("expected duplicate (server, name) database to be rejected")
+	}
+
+	list := st.listDatabases(serverID)
+	if len(list) != 1 || list[0].Name != "wp_example" {
+		t.Fatalf("listDatabases = %+v, want one entry matching the created database", list)
+	}
+
+	got, ok := st.getDatabase(serverID, db.ID)
+	if !ok {
+		t.Fatal("expected getDatabase to find the created database")
+	}
+	if got.OwnerUser != "wp_example" || got.OwnerPasswordEnc != "encrypted-blob" {
+		t.Fatalf("getDatabase = %+v, fields don't round-trip", got)
+	}
+
+	otherServer, _, _ := st.createServer("web-11", "", nil, time.Hour, "admin@example.com")
+	if _, ok := st.getDatabase(otherServer, db.ID); ok {
+		t.Fatal("expected getDatabase to refuse a database ID under the wrong server")
+	}
+
+	if err := st.deleteDatabase(serverID, db.ID); err != nil {
+		t.Fatalf("deleteDatabase: %v", err)
+	}
+	if _, ok := st.getDatabase(serverID, db.ID); ok {
+		t.Fatal("expected getDatabase to fail after deletion")
+	}
+}
