@@ -98,7 +98,7 @@ e.g.:
 | `site.set_php_version` | `{site_id, php_version}` | Validated against installed PHP versions only |
 | `ssl.issue_letsencrypt` | `{domain}` | Invokes certbot/ACME client with fixed flags, no shell interpolation of user input |
 | `service.control` | `{unit: "nginx", action: "restart"}` | `unit` restricted to an allow-list of managed systemd units |
-| `db.create` | `{name, owner}` | Executes via MySQL client library with parameter binding, not raw SQL string concat |
+| `db.create` | `{name, owner_user, owner_password}` | Executes via MySQL client library with parameter binding, not raw SQL string concat; the control plane generates `owner_password` per-request and never persists it (see `SYSTEM.md` §8) |
 | `cron.upsert` | `{schedule, command_id, user}` | `command_id` maps to a pre-registered, reviewed command template — not a free-text shell string |
 | `firewall.apply_rules` | `{rules: [...]}` | Validated, dry-run diffed, applied via the commit-confirm flow (see security doc) |
 | `backup.run` | `{scope: "db"\|"files"\|"full", target}` | Streams progress events back over the same channel |

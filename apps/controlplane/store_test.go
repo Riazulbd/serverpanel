@@ -297,3 +297,69 @@ func TestBackupCreateListGetRoundTrip(t *testing.T) {
 		t.Fatal("expected getBackup to refuse a backup ID under the wrong server")
 	}
 }
+
+func TestDatabaseCreateListGetDeleteRoundTrip(t *testing.T) {
+	st := newTestStore(t)
+	serverID, _, _ := st.createServer("web-11", "", nil, time.Hour, "admin@example.com")
+
+	rec, err := st.createDatabase(serverID, "app_db", "app_user")
+	if err != nil {
+		t.Fatalf("createDatabase: %v", err)
+	}
+	if rec.ID == "" || rec.Status != "active" {
+		t.Fatalf("unexpected database record: %+v", rec)
+	}
+
+	list := st.listDatabases(serverID)
+	if len(list) != 1 || list[0].Name != "app_db" {
+		t.Fatalf("listDatabases = %+v, want one entry matching the created database", list)
+	}
+
+	got, ok := st.getDatabase(serverID, rec.ID)
+	if !ok || got.OwnerUser != "app_user" {
+		t.Fatalf("getDatabase = %+v, ok=%v, fields don't round-trip", got, ok)
+	}
+
+	byName, ok := st.getDatabaseByName(serverID, "app_db")
+	if !ok || byName.ID != rec.ID {
+		t.Fatalf("getDatabaseByName did not find the created database: ok=%v, rec=%+v", ok, byName)
+	}
+
+	if err := st.deleteDatabaseRecord(serverID, rec.ID); err != nil {
+		t.Fatalf("deleteDatabaseRecord: %v", err)
+	}
+	if _, ok := st.getDatabase(serverID, rec.ID); ok {
+		t.Fatal("expected getDatabase to find nothing after deleteDatabaseRecord")
+	}
+	if err := st.deleteDatabaseRecord(serverID, rec.ID); err == nil {
+		t.Fatal("expected deleteDatabaseRecord to error on an already-deleted database")
+	}
+}
+
+func TestGetDatabaseIsScopedToServerID(t *testing.T) {
+	st := newTestStore(t)
+	serverA, _, _ := st.createServer("web-c", "", nil, time.Hour, "admin@example.com")
+	serverB, _, _ := st.createServer("web-d", "", nil, time.Hour, "admin@example.com")
+
+	rec, err := st.createDatabase(serverA, "shared_name", "owner_a")
+	if err != nil {
+		t.Fatalf("createDatabase: %v", err)
+	}
+	if _, ok := st.getDatabase(serverB, rec.ID); ok {
+		t.Fatal("expected getDatabase to refuse a database ID under the wrong server")
+	}
+
+	// The (server_id, name) uniqueness constraint is per-server, so the
+	// same database name on a different server must be allowed.
+	if _, err := st.createDatabase(serverB, "shared_name", "owner_b"); err != nil {
+		t.Fatalf("expected the same database name on a different server to be allowed, got: %v", err)
+	}
+
+	// But a duplicate on the *same* server must be rejected at the schema
+	// level (the HTTP layer also checks this first via getDatabaseByName —
+	// see TestCreateDatabaseRejectsDuplicateName — this is the underlying
+	// constraint that check depends on).
+	if _, err := st.createDatabase(serverA, "shared_name", "owner_a2"); err == nil {
+		t.Fatal("expected a duplicate (server_id, name) to be rejected")
+	}
+}

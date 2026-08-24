@@ -74,6 +74,9 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
   installed by `stack.install` today, though `site.set_php_version` and pool paths are
   already version-parameterized |
 | MariaDB/MySQL | ✅ install + per-DB least-privilege grants |
+| Database create/delete/list, persisted + dashboard UI | ✅ `databases` table, "Databases" panel on the server-detail view (dispatch-then-persist, same pattern as sites/backups) |
+| MongoDB support | ⬜ not started |
+| Database admin UI (phpMyAdmin or equivalent) | ⬜ not started |
 | Redis, Git, Composer, WP-CLI | ✅ installed by `stack.install` |
 | Node.js | ⬜ Phase 3 |
 | UFW firewall, Fail2Ban | 🚧 installed with safe defaults; no rule-editing UI |
@@ -253,6 +256,7 @@ EXISTS`, applied on every `openDB` call — idempotent, no separate migration to
 | `audit_log` | append-only: seq, timestamp, server, actor, action, detail |
 | `sites` | id, server, domain, system user, docroot, app type, PHP version, status |
 | `backups` | id, server, site, scope, path, size, sha256, status, created_at |
+| `databases` | id, server, name, owner_user, status, created_at — no password field: the owner password is generated per-request and disclosed once in the create response, never persisted |
 
 No ORM — every query is a small, explicit SQL statement in `store.go`. All secrets
 (session tokens, bootstrap tokens) are stored only as SHA-256 hashes; passwords use

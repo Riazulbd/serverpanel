@@ -3,6 +3,7 @@ package capabilities
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"regexp"
 
@@ -75,7 +76,23 @@ func handleDBCreate(ctx context.Context, params map[string]any, progress Progres
 		return "", fmt.Errorf("flush privileges: %w", err)
 	}
 
-	return fmt.Sprintf("database %q created, owned by user %q with grants scoped to that database only", name, owner), nil
+	// JSON detail (never including the password — that value only ever
+	// flows one-directional, control plane -> agent -> MariaDB) so the
+	// control plane can parse and persist the resulting database record,
+	// the same pattern packages/capabilities/backup.go and site.go use.
+	detail, err := json.Marshal(dbCreateResult{Name: name, OwnerUser: owner})
+	if err != nil {
+		return "", err
+	}
+	return string(detail), nil
+}
+
+// dbCreateResult is db.create's structured success detail. Deliberately
+// has no password field: the owner password is caller-supplied purely to
+// be handed to MariaDB and is never echoed back or logged.
+type dbCreateResult struct {
+	Name      string `json:"name"`
+	OwnerUser string `json:"owner_user"`
 }
 
 func handleDBDelete(ctx context.Context, params map[string]any, progress Progress) (string, error) {

@@ -2,6 +2,45 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-24 — Database create/delete/list: control-plane persistence and dashboard UI
+
+- **Closed the gap flagged as "good candidate for next iteration" in the prior entry**
+  (`SERVERAVATAR_PARITY.md` DB-001/former DB-005): databases created via `db.create` are
+  now persisted control-plane-side and manageable from the dashboard, applying the same
+  dispatch-then-persist pattern the 2026-08-17 backup work established.
+- New `databases` table (`server_id`, `name`, `owner_user`, `status`, `created_at`,
+  `UNIQUE(server_id, name)`) — deliberately has no password column. `db.create`'s
+  handler now returns structured JSON detail (`{name, owner_user}`, never the password)
+  so the control plane can parse and persist its result, matching `site.create`/
+  `backup.run`.
+- New `apps/controlplane/databases.go`: `POST`/`GET /api/v1/servers/{id}/databases`,
+  `DELETE /api/v1/servers/{id}/databases/{databaseId}`. The owner password is generated
+  control-plane-side (`crypto/rand`, 48 hex chars) — never accepted from the client,
+  never persisted anywhere, disclosed to the caller exactly once in the create response
+  (the same one-time-disclosure pattern `POST /api/v1/servers` already uses for
+  bootstrap tokens). A duplicate database name for the same server is rejected with
+  `409` *before* dispatch, so a retried request can't create an agent-side database this
+  table never learns about.
+- New "Databases" panel on the server-detail dashboard view: create modal (name + owner
+  username, with the generated password shown once in a save-it-now dialog), a
+  databases table, and a delete button per row.
+- Added 4 new capability-layer tests (`db.create`/`db.delete` invalid-name/owner/
+  password rejection, validation-only so no MariaDB is required), 2 new store tests
+  (create/list/get/delete round trip against real SQLite, including the
+  `(server_id, name)` uniqueness constraint and cross-server scoping), and 3 new HTTP
+  integration tests (validation, duplicate-name `409`, not-found `404`, and confirming
+  validation/duplicate-checking run before dispatch). Full suite: 70 test functions,
+  `go vet`/`gofmt` clean. Additionally smoke-tested against a real running
+  control-plane binary over HTTP in this session (signup → login → create server →
+  list/create-invalid/create-duplicate/delete-nonexistent databases, and confirmed the
+  dashboard HTML serves the new panel).
+- Updated `API.md`, `SYSTEM.md`, `ARCHITECTURE.md`, `TESTING.md`, and
+  `SERVERAVATAR_PARITY.md` (DB-001 detail block rewritten; the former DB-005 summary row
+  folded into it) to reflect the new capability.
+- The real MariaDB write inside `db.create`/`db.delete` remains unverified by `go test`
+  in this environment (no MariaDB here) — same documented limitation as the 2026-08-17
+  backup work's db/full-scope path.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the
