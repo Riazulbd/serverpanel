@@ -2,6 +2,50 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-25 — Database control-plane persistence and dashboard UI (DB-005)
+
+- Closed the gap `SERVERAVATAR_PARITY.md` flagged as the natural next step after
+  backups: databases created via `db.create` are now durably recorded and manageable
+  from the dashboard, the same way sites and backups already are — previously the
+  capability existed agent-side but the control plane never learned a database had
+  been created, so nothing showed up anywhere after the one-shot task dispatch
+  finished.
+- Added a `databases` table (`id`, `server_id`, `site_id`, `name`, `owner_user`,
+  `status`, `created_at`) and `store` methods (`createDatabaseRecord`/
+  `listDatabases`/`getDatabase`/`deleteDatabaseRecord`), all scoped by server ID the
+  same way `getSite`/`getBackup` are, so one server's databases can never be addressed
+  through another server's ID.
+- New endpoints (`apps/controlplane/databases.go`), following the same
+  dispatch-then-persist-on-success pattern as `handleCreateBackup`:
+  `GET`/`POST /api/v1/servers/{id}/sites/{siteId}/databases` and
+  `DELETE .../databases/{databaseId}`. The owner password is generated server-side
+  (32 random bytes, hex-encoded — never caller-supplied, so it can't be weak) and
+  returned exactly once in the creation response, matching the bootstrap-token
+  reveal-once pattern; it is never persisted anywhere, including in the new
+  `databases` table itself. The control plane also validates the database-name/
+  owner-user identifier allow-list before ever dispatching to the agent, so a bad
+  name fails fast with a `400` instead of a round trip that would fail agent-side
+  anyway.
+- Changed `db.create`'s `TaskEvent` detail from a human-readable string to JSON
+  (`dbCreateResult{name, owner_user}`), matching the `siteResult`/`backupResult`
+  pattern `site.create`/`backup.run` already use — this is what let the control
+  plane parse and persist the result at all.
+- Added a "Databases" panel to the per-site dashboard view: a table of existing
+  databases, a create-database modal that reveals the generated credentials exactly
+  once, and delete with a destructive-action confirmation dialog.
+- Added 5 new capability-layer validation tests (`db.create`/`db.delete` reject
+  invalid names, invalid owner users, and short passwords — all before touching
+  MariaDB), 1 new store round-trip test (create/list/get/delete, plus cross-server
+  scoping), and 2 new HTTP tests (site-not-found boundaries, invalid-identifier
+  rejection, and proving validation runs before dispatch). Full suite: 69 test
+  functions, `go vet`/`gofmt` clean. Verified end-to-end with a real build against a
+  live signup → login → server-create → validation flow in this session (real
+  `db.create` against MariaDB remains `BLOCKED_EXTERNAL` in this environment, same as
+  `db.create`'s pre-existing status — no MariaDB instance is available here).
+- Updated `SYSTEM.md`, `API.md`, and `SERVERAVATAR_PARITY.md` (DB-001 promoted with
+  a full detail block reflecting the new persistence/UI layer; DB-005 marked
+  `COMPLETE`).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the
