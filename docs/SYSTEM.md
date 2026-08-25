@@ -102,9 +102,14 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | Site cloning, cross-server migration | ⬜ Phase 2 |
 | Maintenance mode | ⬜ not implemented |
 | Basic auth on a site | ⬜ not implemented |
-| Custom + Let's Encrypt SSL | ✅ `ssl.issue_letsencrypt` (certbot), `ssl.install_custom` |
-| Automatic SSL renewal | ⬜ not implemented (certbot's own renewal timer is not
-  wired up by `stack.install` yet) |
+| Custom + Let's Encrypt SSL | ✅ `ssl.issue_letsencrypt` (certbot), `ssl.install_custom`,
+  wired into the dashboard's per-site SSL panel |
+| SSL status/expiry visibility | ✅ `ssl.status`; persisted on the `sites` row
+  (`ssl_issuer`/`ssl_expires_at`/`ssl_checked_at`) after every issue/install/refresh |
+| Automatic SSL renewal | ✅ `ssl.renew` (`certbot renew`, itself renewal-window-aware)
+  dispatched on a control-plane-side ticker (`-ssl-renew-interval`, default 12h) for
+  every site with a recorded `letsencrypt` issuer — see `SYSTEM.md` §10 for why this is
+  a ticker and not a durable job queue |
 | WordPress auto-login/auto-update | ⬜ not implemented |
 | Application enable/disable | ✅ `site.set_status` |
 | Secure file manager | ✅ `file.list/read/write/delete`, scoped + symlink-safe |
@@ -164,11 +169,13 @@ Phase boundaries and full milestone/estimate tables are in `product-plan.md` §6
 is the condensed status:
 
 - **Phase 1 — secure working foundation:** ~90% of the *capability* surface exists and
-  is tested per-capability (see the tables above); the biggest real gaps are backup
-  **restore**, an automated test suite (now added, see `TESTING.md`), SSL auto-renewal,
-  and agent cert auto-rotation. Not "GA-ready" yet, but the architecture and security
-  primitives it depends on (mTLS, allow-listed capabilities, per-app isolation, audit
-  log) are real and proven, not stubs.
+  is tested per-capability (see the tables above); backup **restore**, an automated
+  test suite, and **SSL renewal visibility/automation** (`ssl.status`/`ssl.renew`, the
+  per-site SSL dashboard panel, and the renewal scheduler) are now done. The remaining
+  real gap is agent cert auto-rotation (30-day mTLS certs still require manual
+  re-registration before expiry — see §21). Not "GA-ready" yet, but the architecture
+  and security primitives it depends on (mTLS, allow-listed capabilities, per-app
+  isolation, audit log) are real and proven, not stubs.
 - **Phase 2 — professional server management:** not started. Git deployment,
   cron/process management, SSH/firewall management UI, remote backups, cross-server
   migration all remain ⬜.
@@ -251,7 +258,9 @@ EXISTS`, applied on every `openDB` call — idempotent, no separate migration to
 | `bootstrap_tokens` | SHA-256-hashed single-use token → server, expiry |
 | `revoked_certs` | cert serial → server, revoked-at (checked on every gateway handshake) |
 | `audit_log` | append-only: seq, timestamp, server, actor, action, detail |
-| `sites` | id, server, domain, system user, docroot, app type, PHP version, status |
+| `sites` | id, server, domain, system user, docroot, app type, PHP version, status,
+  `ssl_issuer`/`ssl_expires_at`/`ssl_checked_at` (empty until an `ssl.*` capability
+  has been dispatched and recorded at least once) |
 | `backups` | id, server, site, scope, path, size, sha256, status, created_at |
 
 No ORM — every query is a small, explicit SQL statement in `store.go`. All secrets
@@ -269,8 +278,13 @@ agent-facing endpoint, secured by the bootstrap token itself), `/healthz`.
 
 None exist as a separate durable queue today — see the "Background job queue" ⬜ row
 above. Task dispatch (`gateway.dispatch`) is synchronous: the HTTP handler blocks
-(bounded by a 120s context timeout) waiting for the agent's terminal `TaskEvent`. This
-is a known scaling limit, not an oversight — see `ARCHITECTURE.md` §1 "As built" and
+(bounded by a 120s context timeout) waiting for the agent's terminal `TaskEvent`. The
+one exception is the SSL renewal sweep (`ssl_renewal.go`, `runSSLRenewalLoop`): a plain
+`time.Ticker` goroutine started from `main.go`, not backed by a durable queue either —
+a control-plane restart mid-tick just resumes on the next tick, and a stuck agent can
+only ever block that one site's 2-minute-timeout dispatch, not the sweep as a whole (see
+`renewDueSSLCertificates`). This is a known scaling limit, not an oversight — see
+`ARCHITECTURE.md` §1 "As built" and
 the recommended next step in `OPERATIONS.md`.
 
 ## 11. Agent authentication and security
@@ -295,10 +309,11 @@ in `packages/capabilities/capabilities_test.go`), not just convention.
 
 Current capability list: `system.ping`, `service.control`, `diagnostics.basic`,
 `stack.install`, `site.create`, `site.set_php_version`, `site.set_status`,
-`app.wordpress_install`, `ssl.issue_letsencrypt`, `ssl.install_custom`, `db.create`,
-`db.delete`, `db.list`, `file.list`, `file.read`, `file.write`, `file.delete`,
-`backup.run`, `backup.restore`, `logs.tail`. Notably absent (by design, until reviewed
-and added): `git.deploy`, `cron.upsert`, `ssh.*`, `firewall.*`, `agent.self_update`.
+`app.wordpress_install`, `ssl.issue_letsencrypt`, `ssl.install_custom`, `ssl.status`,
+`ssl.renew`, `db.create`, `db.delete`, `db.list`, `file.list`, `file.read`,
+`file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`. Notably
+absent (by design, until reviewed and added): `git.deploy`, `cron.upsert`, `ssh.*`,
+`firewall.*`, `agent.self_update`.
 
 ## 13. Installation and deployment
 
@@ -324,7 +339,9 @@ is structured so adding a new stack profile or app type is additive (a new capab
 
 Control plane (`apps/controlplane`, all flags, no env vars read directly):
 `-api-addr`, `-gateway-addr`, `-gateway-public-addr`, `-bootstrap-token-ttl`, `-db`,
-`-ca-dir`, `-public-dir`, `-insecure-cookies`. See `main.go` for defaults.
+`-ca-dir`, `-public-dir`, `-insecure-cookies`, `-ssl-renew-interval` (default `12h`; how
+often the SSL renewal scheduler sweeps every `letsencrypt`-issuer site — `0` disables
+it). See `main.go` for defaults.
 
 Agent (`apps/agent`): `-api`, `-token`, `-data-dir`, `-register-only`. `run()`
 (`packages/capabilities/exec_helpers.go`) sets `DEBIAN_FRONTEND=noninteractive` and
@@ -373,9 +390,13 @@ first) remains a Phase 2 gap — see §21.
 ## 20. Monitoring and alerting
 
 Heartbeat-based only: uptime/load/mem%/disk% every connection cycle, surfaced in the
-dashboard's server-detail view. No threshold-based alerting, no email/Slack/Telegram/
-Discord/webhook notifications, no SSL-expiration or backup-failure alerts exist yet —
-all ⬜, scoped to Phase 2 per `product-plan.md` §9.
+dashboard's server-detail view. SSL expiry is tracked per site (`ssl_expires_at`) and
+Let's Encrypt certificates renew automatically (§10, §12) — but this is unattended
+automation, not alerting: no threshold-based alerting and no email/Slack/Telegram/
+Discord/webhook notification channel exist yet, so a renewal that keeps failing (e.g.
+DNS moved away from this server) has no way to surface that fact other than reading the
+audit log's `ssl.renew_failed` entries or the control plane's own process log. All ⬜,
+scoped to Phase 2 per `product-plan.md` §9.
 
 ## 21. Known limitations
 
@@ -392,9 +413,14 @@ all ⬜, scoped to Phase 2 per `product-plan.md` §9.
 - Single-user model: no organizations/teams/RBAC yet.
 - The in-process CA, while functionally correct, is not yet isolated as its own
   tightly-scoped trust boundary (see `SECURITY.md` §2).
-- `systemctl start/stop/restart` and Let's Encrypt issuance have not been verified in
-  *this* environment (no systemd as PID 1, no public DNS) — see `TESTING.md` §What
-  hasn't been verified.
+- `systemctl start/stop/restart` and Let's Encrypt issuance/renewal have not been
+  verified end-to-end in *this* environment (no systemd as PID 1, no public DNS, no
+  certbot/nginx installed) — see `TESTING.md` §What hasn't been verified. The certificate
+  expiry parsing (`certExpiry`) and every validation/error path in `ssl.go` *are*
+  covered by automated tests against real openssl-generated self-signed certificates.
+- No SSL-expiry alerting — renewal is automatic, but a renewal that keeps failing
+  (e.g. DNS moved away from the server) only shows up as `ssl.renew_failed` audit-log
+  entries, not a notification (see §20).
 - Dashboard mobile responsiveness (320–768px) has not been verified with real browser
   automation in this session — see `TESTING.md` §Known gaps.
 - No CI pipeline / automated vulnerability scanning configured yet.

@@ -24,6 +24,8 @@ go build -o controlplane ./apps/controlplane
 - The agent gateway (`-gateway-addr`) does its own TLS/mTLS termination directly
   (`gateway.listenAndServe`) — do not put a reverse proxy in front of it, since that
   would terminate the mTLS the agent's identity depends on.
+- `-ssl-renew-interval` (default `12h`) controls the background Let's Encrypt renewal
+  sweep — see §4. Set to `0` to disable it.
 
 There is currently **no process manager / systemd unit checked into this repo for the
 control plane itself** (only the agent ships one, via `install.sh`). Run it under
@@ -78,22 +80,61 @@ task detail) recorded, verify its SHA-256 matches, then either re-run the same r
 via a direct `backup.restore` task dispatch or extract/restore by hand as a last
 resort.
 
-## 4. Monitoring and alerting
+## 4. SSL certificates
+
+**Issue** (implemented): from the dashboard, open a server → a site → "Issue Let's
+Encrypt cert", supply a notification email, confirm. This calls
+`POST /api/v1/servers/{id}/sites/{siteId}/ssl/issue`, which dispatches
+`ssl.issue_letsencrypt` (`packages/capabilities/ssl.go`) — certbot's `--nginx` plugin
+issues the certificate and wires it into the site's existing vhost. The domain
+requesting a certificate must already resolve (public DNS A/AAAA record) to the
+server, since Let's Encrypt validates ownership over the HTTP challenge before issuing
+— a request against a domain that doesn't resolve yet fails with certbot's own error,
+surfaced verbatim in the dashboard and the `ssl.issue_failed` audit entry.
+
+**Custom certificate** (implemented): "Upload custom cert" on the same panel accepts a
+pasted certificate/key PEM pair, dispatches `ssl.install_custom`, and — critically —
+only activates it after `nginx -t` passes; a malformed pair never reaches a live reload.
+
+**Renewal** (implemented, automatic): the control plane runs a background sweep
+(`ssl_renewal.go`, `-ssl-renew-interval`, default `12h`) that dispatches `ssl.renew`
+(`certbot renew --cert-name <domain>`) for every site with a recorded `letsencrypt`
+issuer. `certbot renew` is itself renewal-window-aware (a no-op unless the certificate
+is within ~30 days of expiry), so the sweep runs unconditionally rather than the
+control plane trying to duplicate that decision. Each attempt is logged to the
+server's audit trail as `ssl.renew_checked` (success, whether or not a renewal actually
+happened) or `ssl.renew_failed`; a site whose server isn't currently connected is
+skipped silently for that tick and retried on the next one — offline agents between
+ticks are the expected common case, not an error worth persisting to the audit log.
+Set `-ssl-renew-interval=0` to disable the sweep entirely (e.g. if certbot's own
+systemd timer is already configured on every managed VPS and you'd rather not renew
+from two places).
+
+**Status/refresh** (implemented): "Refresh status" dispatches the read-only
+`ssl.status` capability and re-syncs the dashboard's expiry display to whatever's
+actually on disk — useful right after a manual `certbot` run on the VPS outside this
+API, or just to confirm a scheduled renewal took effect.
+
+Known gap: no proactive alerting if renewal keeps failing (e.g. DNS moved away from the
+server) — see §5.
+
+## 5. Monitoring and alerting
 
 Server health is visible in the dashboard's server-detail view (uptime, 1-minute load
-average, memory-used %, disk-used %), sourced from the agent's periodic heartbeat.
-There is no threshold-based alerting and no external notification channel (email/
-Slack/Telegram/Discord/webhook) implemented yet — an operator must actively check the
-dashboard; nothing pushes a notification if a server goes offline, a backup fails, or
-a certificate is about to expire. This is a known Phase 2 gap (`product-plan.md` §9),
-not an oversight.
+average, memory-used %, disk-used %), sourced from the agent's periodic heartbeat. SSL
+certificate expiry is visible per site (§4) and Let's Encrypt certificates renew
+themselves automatically — but there is still no threshold-based alerting and no
+external notification channel (email/Slack/Telegram/Discord/webhook) implemented yet:
+an operator must actively check the dashboard or the audit log; nothing pushes a
+notification if a server goes offline, a backup fails, or an SSL renewal keeps failing.
+This is a known Phase 2 gap (`product-plan.md` §9), not an oversight.
 
 Operationally, watch: the control plane's own process (no self-monitoring endpoint
 beyond `GET /healthz`, which only confirms the HTTP listener is up — it does not check
 DB connectivity or gateway health), and `journalctl -u serverpanel-agent` on each VPS
 for reconnect-loop messages, which indicate a network or certificate problem.
 
-## 5. Upgrade and rollback
+## 6. Upgrade and rollback
 
 **Control plane**: no automated upgrade mechanism. Build a new binary, stop the old
 process, start the new one pointed at the same `-db`/`-ca-dir`. Because every schema
@@ -117,7 +158,7 @@ project yet — see `TESTING.md` §5 item 2 (this is one of the scenarios a scri
 real-VPS/container test pass should cover before either is called a supported,
 tested procedure rather than a documented manual fallback).
 
-## 6. Troubleshooting
+## 7. Troubleshooting
 
 | Symptom | Cause / fix |
 |---|---|
@@ -130,7 +171,7 @@ tested procedure rather than a documented manual fallback).
 | Login succeeds but every subsequent API call returns `403 two-factor verification required` | Expected behavior once 2FA is enabled — call `POST /api/v1/auth/mfa/challenge` with a valid TOTP code before any other route will accept the session. |
 | Any privileged action's effect isn't showing up | Check `GET /api/v1/audit` — every capability dispatch is logged with its `task_id` before being sent, and its terminal outcome is logged as `task.event`; cross-reference the task ID to see whether the agent actually reported success. |
 
-## 7. Data/secrets hygiene
+## 8. Data/secrets hygiene
 
 Never commit `.db` files, CA key material, or agent identity files. `.gitignore`
 already excludes the common build/data artifacts (`*.db`/`*.db-shm`/`*.db-wal`,

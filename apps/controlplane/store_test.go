@@ -263,6 +263,68 @@ func TestGetSiteIsScopedToServerID(t *testing.T) {
 	}
 }
 
+func TestUpdateSiteSSLRoundTripsAndIsScopedToServerID(t *testing.T) {
+	st := newTestStore(t)
+	serverA, _, _ := st.createServer("web-ssl-a", "", nil, time.Hour, "admin@example.com")
+	serverB, _, _ := st.createServer("web-ssl-b", "", nil, time.Hour, "admin@example.com")
+	site, err := st.createSite(serverA, "ssl.example.com", "sp_ssl", "/home/sites/sp_ssl", "static", "")
+	if err != nil {
+		t.Fatalf("createSite: %v", err)
+	}
+	if site.SSLIssuer != "" || site.SSLExpiresAt != "" {
+		t.Fatalf("newly created site should start with no recorded SSL status, got %+v", site)
+	}
+
+	// A site under the wrong server can never have its SSL status
+	// overwritten — same cross-tenant-addressing guarantee getSite has.
+	if err := st.updateSiteSSL(serverB, site.ID, "letsencrypt", "2030-01-01T00:00:00Z"); err == nil {
+		t.Fatal("expected updateSiteSSL to refuse a site ID under the wrong server")
+	}
+
+	if err := st.updateSiteSSL(serverA, site.ID, "letsencrypt", "2030-01-01T00:00:00Z"); err != nil {
+		t.Fatalf("updateSiteSSL: %v", err)
+	}
+	got, ok := st.getSite(serverA, site.ID)
+	if !ok {
+		t.Fatal("getSite: not found")
+	}
+	if got.SSLIssuer != "letsencrypt" || got.SSLExpiresAt != "2030-01-01T00:00:00Z" {
+		t.Fatalf("unexpected SSL fields after update: %+v", got)
+	}
+	if got.SSLCheckedAt == "" {
+		t.Fatal("expected ssl_checked_at to be stamped by updateSiteSSL")
+	}
+}
+
+func TestListSitesWithIssuerSpansServersAndFiltersByIssuer(t *testing.T) {
+	st := newTestStore(t)
+	serverA, _, _ := st.createServer("web-issuer-a", "", nil, time.Hour, "admin@example.com")
+	serverB, _, _ := st.createServer("web-issuer-b", "", nil, time.Hour, "admin@example.com")
+
+	leSite, _ := st.createSite(serverA, "le.example.com", "sp_le", "/home/sites/sp_le", "static", "")
+	customSite, _ := st.createSite(serverA, "custom.example.com", "sp_c", "/home/sites/sp_c", "static", "")
+	leSite2, _ := st.createSite(serverB, "le2.example.com", "sp_le2", "/home/sites/sp_le2", "static", "")
+
+	if err := st.updateSiteSSL(serverA, leSite.ID, "letsencrypt", "2030-01-01T00:00:00Z"); err != nil {
+		t.Fatalf("updateSiteSSL: %v", err)
+	}
+	if err := st.updateSiteSSL(serverA, customSite.ID, "custom", "2030-01-01T00:00:00Z"); err != nil {
+		t.Fatalf("updateSiteSSL: %v", err)
+	}
+	if err := st.updateSiteSSL(serverB, leSite2.ID, "letsencrypt", "2030-02-01T00:00:00Z"); err != nil {
+		t.Fatalf("updateSiteSSL: %v", err)
+	}
+
+	got := st.listSitesWithIssuer("letsencrypt")
+	if len(got) != 2 {
+		t.Fatalf("listSitesWithIssuer(letsencrypt) returned %d sites, want 2: %+v", len(got), got)
+	}
+	ids := map[string]bool{got[0].ID: true, got[1].ID: true}
+	if !ids[leSite.ID] || !ids[leSite2.ID] {
+		t.Fatalf("listSitesWithIssuer(letsencrypt) = %+v, want the two letsencrypt sites across both servers", got)
+	}
+}
+
 func TestBackupCreateListGetRoundTrip(t *testing.T) {
 	st := newTestStore(t)
 	serverID, _, _ := st.createServer("web-7", "", nil, time.Hour, "admin@example.com")

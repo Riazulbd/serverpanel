@@ -137,6 +137,36 @@ isn't connected; `422` if `backup.restore` itself failed on the agent (the agent
 error message explains why, and any checkpoint already taken is named in it so it's
 never a silent loss).
 
+### `POST /api/v1/servers/{id}/sites/{siteId}/ssl/issue`
+```json
+{"email": "ops@example.com"}
+```
+Dispatches `ssl.issue_letsencrypt` for the site's own recorded `domain` (never
+caller-supplied). 5-minute dispatch timeout (ACME HTTP challenge + certbot network
+calls). On success, persists the agent-reported issuer/expiry onto the `sites` row
+(`ssl_issuer`, `ssl_expires_at`, `ssl_checked_at`) and logs `ssl.issued`. →
+`200 {"domain", "status": "active", "issuer": "letsencrypt", "expires_at", "days_remaining"}`.
+`400` if `email` is missing; `404` if the site doesn't exist on that server; `502` if
+the agent isn't connected; `422` if issuance failed on the agent (logged as
+`ssl.issue_failed`, e.g. DNS not yet pointed at the server, certbot not installed).
+
+### `POST /api/v1/servers/{id}/sites/{siteId}/ssl/custom`
+```json
+{"cert_pem": "-----BEGIN CERTIFICATE-----...", "key_pem": "-----BEGIN PRIVATE KEY-----..."}
+```
+Dispatches `ssl.install_custom` with a caller-supplied certificate/key pair for the
+site's domain. Same success/persist/log behavior as `.../ssl/issue`, logged as
+`ssl.custom_installed` (or `ssl.custom_install_failed`). `400` if either PEM blob is
+missing.
+
+### `POST /api/v1/servers/{id}/sites/{siteId}/ssl/refresh`
+No request body. Dispatches the read-only `ssl.status` capability for the site's
+domain and syncs the stored SSL fields to whatever the agent actually finds on
+disk — useful after a certificate was replaced outside this API, or to confirm a
+background renewal took effect. Same response shape as `.../ssl/issue`, with
+`status: "none"` (and empty `issuer`/`expires_at`) if no certificate is currently
+installed. Does not write an audit-log entry (read-only).
+
 ### `POST /agents/register`
 ```json
 {"token": "<bootstrap token>", "csr_pem": "<PEM-encoded CSR>"}
@@ -177,8 +207,35 @@ The full allow-listed capability names `packages/capabilities.Default()` registe
 (see `SYSTEM.md` §12 for the allow-list rationale): `system.ping`, `service.control`,
 `diagnostics.basic`, `stack.install`, `site.create`, `site.set_php_version`,
 `site.set_status`, `app.wordpress_install`, `ssl.issue_letsencrypt`,
-`ssl.install_custom`, `db.create`, `db.delete`, `db.list`, `file.list`, `file.read`,
-`file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`.
+`ssl.install_custom`, `ssl.status`, `ssl.renew`, `db.create`, `db.delete`, `db.list`,
+`file.list`, `file.read`, `file.write`, `file.delete`, `backup.run`, `backup.restore`,
+`logs.tail`.
+
+### `ssl.status`
+```json
+{"domain": "example.com"}
+```
+Read-only. Reads whichever known certificate path exists for `domain` — certbot's own
+`/etc/letsencrypt/live/<domain>/fullchain.pem` layout takes precedence over
+`ssl.install_custom`'s `/etc/serverpanel-agent/ssl/<domain>/fullchain.pem` if both
+somehow exist — and asks `openssl x509 -enddate` for its expiry (never parses the
+certificate's ASN.1 by hand). Returns
+`{"domain", "status": "active"|"none", "issuer": "letsencrypt"|"custom", "expires_at", "days_remaining"}`;
+`status: "none"` with no `issuer`/`expires_at` if nothing is installed for the domain.
+
+### `ssl.renew`
+```json
+{"domain": "example.com"}
+```
+Runs `certbot renew --cert-name <domain> --non-interactive --agree-tos`, which is
+itself renewal-window-aware (a safe no-op unless the certificate is within ~30 days of
+expiry) — this capability deliberately doesn't duplicate that decision in Go. Fails if
+certbot isn't installed or no Let's Encrypt certificate exists yet for the domain
+(nothing to renew — issue one via `ssl.issue_letsencrypt` first). Returns the same
+shape as `ssl.status` for the (possibly renewed, possibly unchanged) certificate.
+Dispatched automatically by the control plane's SSL renewal scheduler (`-ssl-renew-interval`,
+default 12h — see `OPERATIONS.md`) for every site with a recorded `letsencrypt` issuer,
+regardless of connectivity gaps between ticks.
 
 ### `backup.restore`
 ```json

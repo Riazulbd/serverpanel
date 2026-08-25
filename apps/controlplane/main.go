@@ -8,6 +8,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 	"net/http"
@@ -24,6 +25,7 @@ func main() {
 	caDir := flag.String("ca-dir", "", "directory to persist the internal agent CA's cert/key (defaults next to -db)")
 	publicDir := flag.String("public-dir", "", "directory of static dashboard assets to serve (defaults to apps/controlplane/web relative to the binary's working dir)")
 	insecureCookies := flag.Bool("insecure-cookies", false, "allow session cookies over plain HTTP (local development only, never in production)")
+	sslRenewInterval := flag.Duration("ssl-renew-interval", 12*time.Hour, "how often to check every site's Let's Encrypt certificate for renewal (0 disables the background check)")
 	flag.Parse()
 
 	if *gatewayPublic == "" {
@@ -61,6 +63,11 @@ func main() {
 	}()
 
 	api := &apiServer{store: st, ca: ca, gw: gw, gatewayAddr: *gatewayPublic, tokenTTL: *tokenTTL, publicDir: *publicDir}
+
+	if *sslRenewInterval > 0 {
+		go api.runSSLRenewalLoop(context.Background(), *sslRenewInterval)
+	}
+
 	log.Printf("public API listening on %s (db: %s)", *apiAddr, *dbPath)
 	if err := http.ListenAndServe(*apiAddr, api.routes()); err != nil {
 		log.Fatalf("public API: %v", err)

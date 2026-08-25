@@ -2,6 +2,55 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-25 — SSL status, custom SSL dashboard UI, automatic Let's Encrypt renewal
+
+- **Closed the top gap `SYSTEM.md` had flagged since the last entry**: SSL certificates
+  could be issued (`ssl.issue_letsencrypt`) or custom-installed (`ssl.install_custom`)
+  agent-side, but neither had any dashboard wiring, there was no way to see a
+  certificate's expiry, and nothing renewed a Let's Encrypt certificate before it
+  expired.
+- Added two agent capabilities (`packages/capabilities/ssl.go`): `ssl.status`
+  (read-only — locates whichever known certificate path exists for a domain and reads
+  its real expiry via `openssl x509 -enddate`, never a caller-claimed value) and
+  `ssl.renew` (`certbot renew --cert-name <domain>`, itself renewal-window-aware, so the
+  control plane never has to duplicate certbot's own due-date decision). Refactored
+  `ssl.issue_letsencrypt`/`ssl.install_custom` to return the same structured
+  `{status, issuer, expires_at, days_remaining}` JSON on success, via a shared
+  `certExpiry` helper — one round trip to learn a certificate's real state, not two.
+- Added a `sites.ssl_issuer`/`ssl_expires_at`/`ssl_checked_at` migration and three new
+  control-plane endpoints (`POST /api/v1/servers/{id}/sites/{siteId}/ssl/{issue,custom,refresh}`),
+  following the same dispatch-then-persist-on-success pattern as backups/sites — a raw
+  agent success never gets recorded without also updating the site's stored SSL state.
+- Added a control-plane-side renewal scheduler (`apps/controlplane/ssl_renewal.go`,
+  `-ssl-renew-interval` flag, default `12h`): a plain `time.Ticker` goroutine that
+  sweeps every site with a recorded `letsencrypt` issuer and dispatches `ssl.renew`
+  unconditionally, relying on certbot's own renewal-window logic rather than
+  reimplementing it. A disconnected server is skipped for that tick (logged, not
+  treated as a failure or persisted to the audit log) and retried on the next one; a
+  failed dispatch never overwrites a site's last-known-good SSL state.
+- Added the dashboard's first SSL UI: a per-site "SSL certificate" panel showing
+  issuer/expiry/days-remaining, "Issue Let's Encrypt cert", "Upload custom cert", and
+  "Refresh status" actions.
+- Added 17 new tests (61 → 78 total, `go vet`/`gofmt` clean): `certExpiry` against real
+  openssl-generated self-signed certificates under both the Let's Encrypt and custom
+  on-disk layouts (including "no certificate" and "both exist, Let's Encrypt wins"),
+  every `ssl.*` handler's input validation and its clean-failure behavior when
+  certbot/nginx aren't installed (both real conditions in this environment, not
+  mocked), `updateSiteSSL`'s round trip and cross-server-scoping rejection,
+  `listSitesWithIssuer`'s cross-server aggregation, the renewal scheduler's two safety
+  properties (a disconnected server is a no-op, a `custom`-issuer site is never
+  touched), and HTTP boundary tests for all three new endpoints.
+- Updated `SYSTEM.md`, `API.md`, `OPERATIONS.md`, `TESTING.md`, and
+  `SERVERAVATAR_PARITY.md` (promoted APP-015/APP-016 from `PARTIAL` summary rows to
+  full `COMPLETE` detailed entries — the real certbot/nginx network-dependent success
+  paths are marked `BLOCKED_EXTERNAL`, not claimed as verified).
+- Manually smoke-tested end-to-end against a locally built binary (signup → login →
+  server/site creation → all three SSL endpoints' validation and no-agent-connected
+  error paths → confirmed the new `ssl_issuer`/`ssl_expires_at`/`ssl_checked_at` fields
+  round-trip through the sites list API and render in the dashboard's embedded JS).
+  Real certbot/nginx network calls remain `BLOCKED_EXTERNAL` in this environment — see
+  `SERVERAVATAR_PARITY.md` §4.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

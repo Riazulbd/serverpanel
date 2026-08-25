@@ -334,21 +334,37 @@ func (s *store) auditLog() []auditEntry {
 }
 
 type siteRecord struct {
-	ID         string
-	ServerID   string
-	Domain     string
-	SystemUser string
-	Docroot    string
-	AppType    string
-	PHPVersion string
-	Status     string
-	CreatedAt  time.Time
+	ID           string
+	ServerID     string
+	Domain       string
+	SystemUser   string
+	Docroot      string
+	AppType      string
+	PHPVersion   string
+	Status       string
+	SSLIssuer    string
+	SSLExpiresAt string
+	SSLCheckedAt string
+	CreatedAt    time.Time
+}
+
+const siteColumns = `id, server_id, domain, system_user, docroot, app_type, php_version, status, ssl_issuer, ssl_expires_at, ssl_checked_at, created_at`
+
+func scanSite(row rowScanner) (*siteRecord, error) {
+	var rec siteRecord
+	var createdAt string
+	if err := row.Scan(&rec.ID, &rec.ServerID, &rec.Domain, &rec.SystemUser, &rec.Docroot,
+		&rec.AppType, &rec.PHPVersion, &rec.Status, &rec.SSLIssuer, &rec.SSLExpiresAt, &rec.SSLCheckedAt,
+		&createdAt); err != nil {
+		return nil, err
+	}
+	rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+	return &rec, nil
 }
 
 func (s *store) listSites(serverID string) []*siteRecord {
 	rows, err := s.db.Query(
-		`SELECT id, server_id, domain, system_user, docroot, app_type, php_version, status, created_at
-		 FROM sites WHERE server_id = ? ORDER BY created_at DESC`, serverID)
+		`SELECT `+siteColumns+` FROM sites WHERE server_id = ? ORDER BY created_at DESC`, serverID)
 	if err != nil {
 		return nil
 	}
@@ -356,14 +372,11 @@ func (s *store) listSites(serverID string) []*siteRecord {
 
 	var out []*siteRecord
 	for rows.Next() {
-		var rec siteRecord
-		var createdAt string
-		if err := rows.Scan(&rec.ID, &rec.ServerID, &rec.Domain, &rec.SystemUser, &rec.Docroot,
-			&rec.AppType, &rec.PHPVersion, &rec.Status, &createdAt); err != nil {
+		rec, err := scanSite(rows)
+		if err != nil {
 			continue
 		}
-		rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
-		out = append(out, &rec)
+		out = append(out, rec)
 	}
 	return out
 }
@@ -390,17 +403,58 @@ func (s *store) createSite(serverID, domain, systemUser, docroot, appType, phpVe
 // backup/restore request for site X on server A can't be redirected at
 // site X's docroot if X actually belongs to server B).
 func (s *store) getSite(serverID, siteID string) (*siteRecord, bool) {
-	row := s.db.QueryRow(
-		`SELECT id, server_id, domain, system_user, docroot, app_type, php_version, status, created_at
-		 FROM sites WHERE id = ? AND server_id = ?`, siteID, serverID)
-	var rec siteRecord
-	var createdAt string
-	if err := row.Scan(&rec.ID, &rec.ServerID, &rec.Domain, &rec.SystemUser, &rec.Docroot,
-		&rec.AppType, &rec.PHPVersion, &rec.Status, &createdAt); err != nil {
+	row := s.db.QueryRow(`SELECT `+siteColumns+` FROM sites WHERE id = ? AND server_id = ?`, siteID, serverID)
+	rec, err := scanSite(row)
+	if err != nil {
 		return nil, false
 	}
-	rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
-	return &rec, true
+	return rec, true
+}
+
+// updateSiteSSL persists the outcome of an ssl.issue_letsencrypt,
+// ssl.install_custom, ssl.status, or ssl.renew dispatch. Scoped by
+// serverID the same way every other per-site write is, so an SSL update
+// can never be misattributed to a site belonging to a different server.
+// issuer/expiresAt are the empty string when the agent reports no
+// certificate is currently installed.
+func (s *store) updateSiteSSL(serverID, siteID, issuer, expiresAt string) error {
+	res, err := s.db.Exec(
+		`UPDATE sites SET ssl_issuer = ?, ssl_expires_at = ?, ssl_checked_at = ? WHERE id = ? AND server_id = ?`,
+		issuer, expiresAt, time.Now().UTC().Format(time.RFC3339Nano), siteID, serverID,
+	)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("site %s not found on server %s", siteID, serverID)
+	}
+	return nil
+}
+
+// listSitesWithIssuer returns every site across every server whose most
+// recently recorded certificate came from the given issuer. Used only by
+// the SSL renewal scheduler (ssl_renewal.go), which is why — unlike every
+// user-facing site lookup — it deliberately isn't scoped to one server.
+func (s *store) listSitesWithIssuer(issuer string) []*siteRecord {
+	rows, err := s.db.Query(`SELECT `+siteColumns+` FROM sites WHERE ssl_issuer = ? ORDER BY server_id, created_at`, issuer)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var out []*siteRecord
+	for rows.Next() {
+		rec, err := scanSite(rows)
+		if err != nil {
+			continue
+		}
+		out = append(out, rec)
+	}
+	return out
 }
 
 type backupRecord struct {
