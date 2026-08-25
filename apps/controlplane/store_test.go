@@ -297,3 +297,61 @@ func TestBackupCreateListGetRoundTrip(t *testing.T) {
 		t.Fatal("expected getBackup to refuse a backup ID under the wrong server")
 	}
 }
+
+func TestDatabaseCreateListGetDeleteRoundTrip(t *testing.T) {
+	st := newTestStore(t)
+	serverID, _, _ := st.createServer("web-11", "", nil, time.Hour, "admin@example.com")
+
+	db, err := st.createDatabase(serverID, "wp_example", "wp_example")
+	if err != nil {
+		t.Fatalf("createDatabase: %v", err)
+	}
+	if db.ID == "" || db.Status != "active" {
+		t.Fatalf("unexpected database record: %+v", db)
+	}
+
+	list := st.listDatabases(serverID)
+	if len(list) != 1 || list[0].Name != "wp_example" {
+		t.Fatalf("listDatabases = %+v, want one entry matching the created database", list)
+	}
+
+	got, ok := st.getDatabase(serverID, db.ID)
+	if !ok {
+		t.Fatal("expected getDatabase to find the created database")
+	}
+	if got.OwnerUser != "wp_example" {
+		t.Fatalf("getDatabase = %+v, fields don't round-trip", got)
+	}
+
+	otherServer, _, _ := st.createServer("web-12", "", nil, time.Hour, "admin@example.com")
+	if _, ok := st.getDatabase(otherServer, db.ID); ok {
+		t.Fatal("expected getDatabase to refuse a database ID under the wrong server")
+	}
+
+	if err := st.deleteDatabase(serverID, db.ID); err != nil {
+		t.Fatalf("deleteDatabase: %v", err)
+	}
+	if _, ok := st.getDatabase(serverID, db.ID); ok {
+		t.Fatal("expected getDatabase to find nothing after deleteDatabase")
+	}
+	if list := st.listDatabases(serverID); len(list) != 0 {
+		t.Fatalf("listDatabases after delete = %+v, want empty", list)
+	}
+}
+
+func TestGenPasswordIsRandomAndLongEnough(t *testing.T) {
+	p1, err := genPassword(16)
+	if err != nil {
+		t.Fatalf("genPassword: %v", err)
+	}
+	p2, err := genPassword(16)
+	if err != nil {
+		t.Fatalf("genPassword: %v", err)
+	}
+	if len(p1) < 16 {
+		t.Fatalf("genPassword(16) produced a %d-character string, want at least 16 (db.create's minimum)", len(p1))
+	}
+	if p1 == p2 {
+		t.Fatal("expected two independently generated passwords to differ")
+	}
+}

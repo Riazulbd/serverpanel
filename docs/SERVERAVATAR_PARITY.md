@@ -114,18 +114,36 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Documentation page**: Database Management → "Understanding Database Management"
 - **Short description**: Create a MySQL/MariaDB database with a least-privilege owner user.
 - **Our implementation**: `db.create`/`db.delete`/`db.list` — identifier allow-list regex, `CREATE USER`/`GRANT` scoped to exactly one database (never global), Unix-socket root auth (no stored MySQL root password on disk for this path).
-- **Frontend**: not yet surfaced as its own dashboard panel (capability exists and is dispatchable via generic task dispatch; no dedicated "Databases" tab yet).
+- **Frontend**: the server-detail "Databases" panel dispatches this (see DB-005) via its own dedicated endpoints, not generic task dispatch.
 - **Backend service**: `gateway.dispatch` → `packages/capabilities.handleDBCreate/Delete/List`.
-- **API endpoint(s)**: `POST /api/v1/servers/{id}/tasks`.
+- **API endpoint(s)**: `POST /api/v1/servers/{id}/tasks` (generic dispatch still works too); see DB-005 for the dedicated endpoints the dashboard actually uses.
 - **Agent command**: `db.create`, `db.delete`, `db.list`.
-- **DB tables**: none on the control-plane side yet (no `databases` table — see Known differences).
+- **DB tables**: `databases` on the control-plane side (see DB-005).
 - **Required permission**: authenticated session.
 - **Security considerations**: identifier allow-list (`^[a-z][a-z0-9_]{0,30}$`) prevents SQL-identifier injection where placeholders can't be used; grants are always single-database-scoped.
 - **Test coverage**: manually verified in a prior session against a real MariaDB; not covered by `go test` (requires a running MariaDB — this environment has none).
 - **Current status**: `PARTIAL`
 - **Completion date**: n/a
-- **Known differences**: MongoDB support, a dedicated dashboard UI, and control-plane persistence of database records (so they show up per-site the way backups now do) don't exist yet.
-- **Reason**: capability-layer work landed before the control-plane persistence/UI layer that backups just got (see BAK-001) — same pattern, not yet applied here. Good candidate for the next iteration.
+- **Known differences**: MongoDB support (DB-002), a DB admin UI like phpMyAdmin (DB-003), and process/query monitoring (DB-004) don't exist yet. Control-plane persistence and a dedicated dashboard UI now exist — see DB-005.
+- **Reason**: this pass (see DB-005) closed the persistence/UI gap the same way BAK-001 did for backups; the remaining gaps (MongoDB, admin UI, monitoring) are separate, larger pieces of work.
+
+### DB-005 — Control-plane persistence + dashboard UI for databases
+- **Category**: Database Management
+- **Documentation page**: Database Management → "Understanding Database Management"
+- **Short description**: Track created databases as durable control-plane records and manage them from a dedicated dashboard panel, the same pattern BAK-001 established for backups.
+- **Our implementation**: `apiServer.handleCreateDatabase/handleListDatabases/handleDeleteDatabase` dispatch `db.create`/`db.delete` and persist/remove a `databases` row only after the agent confirms success. The owner password is generated server-side with `crypto/rand` (32 hex characters), sent to the agent to set, returned to the caller exactly once in the create response, and never stored or logged.
+- **Frontend**: server-detail "Databases" panel — "New database" modal (name + optional owner user, one-time password display), databases table with delete.
+- **Backend service**: `apiServer.handleCreateDatabase` (`apps/controlplane/databases.go`).
+- **API endpoint(s)**: `GET/POST /api/v1/servers/{id}/databases`, `DELETE /api/v1/servers/{id}/databases/{databaseId}`.
+- **Agent command**: `db.create`, `db.delete`.
+- **DB tables**: `databases` (`server_id`, `name`, `owner_user`, `status`, `created_at`).
+- **Required permission**: authenticated session.
+- **Security considerations**: owner password is never persisted by the control plane and never appears in the audit log (only `name`/`owner_user` are logged); delete requires the database to already be a recorded control-plane resource scoped to that server (no cross-server addressing); dispatch-then-persist/dispatch-then-delete ordering means a failed agent operation never leaves an orphaned or falsely-removed record.
+- **Test coverage**: `apps/controlplane/store_test.go` (`TestDatabaseCreateListGetDeleteRoundTrip`, `TestGenPasswordIsRandomAndLongEnough`); `apps/controlplane/http_test.go` (`TestDatabaseEndpoints` — validation-before-dispatch, no-agent-connected dispatch failure, no orphan record on failure, 404 on delete of an unrecorded database). The `db.create`/`db.delete` agent-side round trip itself is DB-001's existing MariaDB-dependent gap, not re-tested here.
+- **Current status**: `COMPLETE` (persistence/API/UI layer); overall still `PARTIAL` pending DB-001's real-MariaDB end-to-end verification in this environment.
+- **Completion date**: 2026-08-25.
+- **Known differences**: one owner user per database (no "multiple database users" yet); no MongoDB persistence (DB-002 not started).
+- **Reason**: matches this project's minimal-viable-increment pattern (see BAK-001) — persistence/UI first, additional user management is a small additive follow-up.
 
 ### BAK-001 — On-demand backup (files/db/full)
 - **Category**: Backups
@@ -261,7 +279,6 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | DB-002 | MongoDB support | `NOT_STARTED` | |
 | DB-003 | phpMyAdmin / DB admin UI integration | `NOT_STARTED` | |
 | DB-004 | Database process/query monitoring | `NOT_STARTED` | |
-| DB-005 | Control-plane persistence + dashboard UI for databases (mirroring what BAK-001 just got) | `NOT_STARTED` | See DB-001's "Known differences" |
 
 ### WordPress Toolkit (WP-*)
 | ID | Feature | Status |
@@ -295,16 +312,16 @@ capability surface (per task-brief §3/§101), not just what's already built.
 
 | Status | Count (detailed entries) | Count (summary-table rows) |
 |---|---|---|
-| `COMPLETE` | 3 (SRV-001, BAK-002, ACC-001) | 1 (PROV-006) |
-| `PARTIAL` | 3 (SRV-002, APP-001, APP-002, DB-001, BAK-001 — 5 total, see note) | 6 |
-| `NOT_STARTED` | 0 | ~55 |
+| `COMPLETE` | 4 (SRV-001, BAK-002, ACC-001, DB-005 — persistence/API/UI layer) | 1 (PROV-006) |
+| `PARTIAL` | 4 (SRV-002, APP-001, APP-002, DB-001, BAK-001, DB-005 — 6 total, see note) | 6 |
+| `NOT_STARTED` | 0 | ~54 |
 | `BLOCKED_EXTERNAL` | 0 (sub-scoped within BAK-001/BAK-002's db/full-scope MariaDB verification) | 0 |
 | `INTENTIONALLY_NOT_APPLICABLE` | 0 | 1 |
 
-*Note: BAK-001 and BAK-002 are each simultaneously `COMPLETE` for their files-scope path
-and effectively `PARTIAL`/`BLOCKED_EXTERNAL` for their db/full-scope path pending a real
-MariaDB environment to verify against — see their detail blocks above rather than a
-single flattened status.*
+*Note: BAK-001, BAK-002, and DB-005 are each simultaneously `COMPLETE` for the layer this
+project fully controls (files-scope backup/restore; database persistence/API/UI) and
+effectively `PARTIAL`/`BLOCKED_EXTERNAL` where they depend on a real MariaDB environment
+to verify against — see their detail blocks above rather than a single flattened status.*
 
 This is an honest, small-fraction-covered snapshot, not a claim of broad parity. The
 overwhelming majority of ServerAvatar's documented capability surface remains
@@ -359,3 +376,9 @@ establish the tracking process and close the single highest-priority gap
   BAK-001/BAK-002 reflecting this session's backup-restore implementation. ~60
   capabilities enumerated overall (detailed + summary), the large majority honestly
   `NOT_STARTED`.
+- **2026-08-25**: closed DB-005 (control-plane persistence + dashboard UI for
+  databases), the gap DB-001's "Known differences" had explicitly flagged as the next
+  candidate. Added the `databases` table, `handleCreateDatabase`/`handleListDatabases`/
+  `handleDeleteDatabase`, a generated-once owner password, and a "Databases" panel on
+  the server-detail dashboard page, mirroring the pattern BAK-001 established for
+  backups. DB-001 updated to reflect that its persistence/UI gap is now closed.

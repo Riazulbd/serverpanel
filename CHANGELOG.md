@@ -2,6 +2,36 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-25 — Database persistence and dashboard UI (DB-005)
+
+- **Closed DB-005**, the gap the previous session's parity entry for DB-001 explicitly
+  flagged as the next candidate: databases created via the pre-existing `db.create`
+  agent capability are now durable control-plane records with a dedicated dashboard
+  panel, the same dispatch-then-persist-on-success pattern the backups feature
+  established.
+- Added a `databases` table (`server_id`, `name`, `owner_user`, `status`,
+  `created_at`) and matching `store.go` methods (`createDatabase`/`listDatabases`/
+  `getDatabase`/`deleteDatabase`, each scoped by server ID for the same
+  cross-tenant-addressing reason `getSite`/`getBackup` are), plus `genPassword` — a
+  `crypto/rand`-backed one-time owner-password generator.
+- Added three endpoints (`apps/controlplane/databases.go`): `GET`/
+  `POST /api/v1/servers/{id}/databases`, `DELETE /api/v1/servers/{id}/databases/{databaseId}`.
+  Create dispatches `db.create` with a freshly generated 32-character owner password,
+  returns it to the caller exactly once, and never stores or logs it. Delete dispatches
+  `db.delete` and only removes the record after the agent confirms the drop succeeded.
+- Added a "Databases" panel to the server-detail dashboard page: a "New database"
+  modal (name + optional owner user, one-time password display) and a databases table
+  with delete.
+- Added 3 new control-plane tests (`TestDatabaseCreateListGetDeleteRoundTrip`,
+  `TestGenPasswordIsRandomAndLongEnough`, `TestDatabaseEndpoints` — covering the empty
+  list, missing-name-before-dispatch rejection, no-orphan-record-on-failed-dispatch,
+  and 404-on-delete-of-an-unrecorded-database cases). Full suite: 64 test functions
+  (30 `apps/controlplane` + 34 `packages/capabilities`), `go vet`/`gofmt` clean,
+  `-race` clean.
+- Updated `SYSTEM.md`, `API.md`, `TESTING.md`, and `SERVERAVATAR_PARITY.md` (DB-001's
+  "Known differences" narrowed now that persistence/UI exist; new DB-005 detail block;
+  progress-summary counts refreshed).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the
