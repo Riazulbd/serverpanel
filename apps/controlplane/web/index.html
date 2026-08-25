@@ -174,6 +174,12 @@
           <button onclick="openNewSiteModal()">+ New site</button>
         </div>
         <div id="sitesList" class="muted">No sites yet.</div>
+
+        <div class="section-title" style="display:flex;justify-content:space-between;align-items:center">
+          <span>Databases</span>
+          <button onclick="openNewDatabaseModal()">+ New database</button>
+        </div>
+        <div id="databasesList" class="muted">No databases yet.</div>
       </div>
     </div>
 
@@ -447,6 +453,88 @@ async function openServerDetail(id) {
     const sites = await api(API + '/servers/' + id + '/sites');
     renderSites(sites || []);
   } catch (e) {}
+  await refreshDatabases();
+}
+
+async function refreshDatabases() {
+  try {
+    const databases = await api(API + '/servers/' + state.selectedServerId + '/databases') || [];
+    renderDatabases(databases);
+  } catch (e) {}
+}
+
+function renderDatabases(databases) {
+  const el = document.getElementById('databasesList');
+  if (!databases.length) { el.textContent = 'No databases yet.'; return; }
+  el.innerHTML = '<table><thead><tr><th>Name</th><th>Owner user</th><th>Status</th><th>Created</th><th></th></tr></thead><tbody>' +
+    databases.map(d => `
+      <tr>
+        <td>${escapeHtml(d.Name)}</td>
+        <td class="muted">${escapeHtml(d.OwnerUser)}</td>
+        <td>${escapeHtml(d.Status)}</td>
+        <td class="muted">${new Date(d.CreatedAt).toLocaleString()}</td>
+        <td><button class="danger" onclick="deleteDatabase('${d.ID}')">Delete</button></td>
+      </tr>`).join('') +
+    '</tbody></table>';
+}
+
+function openNewDatabaseModal() {
+  const root = document.getElementById('modalRoot');
+  root.innerHTML = `
+    <div class="modal-backdrop" onclick="if(event.target===this) closeModalNoRefresh()">
+      <div class="modal">
+        <h2>New database</h2>
+        <div class="field">
+          <label>Database name</label>
+          <input id="newDatabaseName" placeholder="e.g. wp_example" maxlength="31">
+        </div>
+        <p class="muted" style="font-size:12px">Lowercase letters, digits, underscore; must start with a letter. A scoped owner user with the same name is created automatically, with grants limited to this database only.</p>
+        <button class="primary" style="width:100%" onclick="createDatabase()">Create database</button>
+        <div class="error" id="newDatabaseError"></div>
+        <p class="muted" id="newDatabaseStatus"></p>
+      </div>
+    </div>`;
+}
+
+async function createDatabase() {
+  const name = document.getElementById('newDatabaseName').value.trim();
+  const err = document.getElementById('newDatabaseError');
+  const status = document.getElementById('newDatabaseStatus');
+  err.textContent = '';
+  status.textContent = 'Creating database and scoped owner user...';
+  try {
+    const res = await api(API + '/servers/' + state.selectedServerId + '/databases', {
+      method: 'POST', body: JSON.stringify({name})
+    });
+    showDatabaseCredentials(res.credentials);
+    await refreshDatabases();
+  } catch (e) {
+    status.textContent = '';
+    err.textContent = e.message;
+  }
+}
+
+function showDatabaseCredentials(creds) {
+  const root = document.getElementById('modalRoot');
+  root.innerHTML = `
+    <div class="modal-backdrop">
+      <div class="modal">
+        <h2>Database created</h2>
+        <p class="muted">${escapeHtml(creds.note)}</p>
+        <div class="field"><label>Database</label><pre class="code">${escapeHtml(creds.database)}</pre></div>
+        <div class="field"><label>Username</label><pre class="code">${escapeHtml(creds.username)}</pre></div>
+        <div class="field"><label>Password</label><pre class="code">${escapeHtml(creds.password)}</pre></div>
+        <button class="primary" style="width:100%" onclick="closeModalNoRefresh()">Done, I've saved it</button>
+      </div>
+    </div>`;
+}
+
+async function deleteDatabase(dbId) {
+  if (!confirm('Delete this database and its owner user? This cannot be undone.')) return;
+  try {
+    await api(API + '/servers/' + state.selectedServerId + '/databases/' + dbId, {method: 'DELETE'});
+    await refreshDatabases();
+  } catch (e) { alert(e.message); }
 }
 
 function renderSites(sites) {

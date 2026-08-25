@@ -114,6 +114,19 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | Application logs / advanced log viewer | 🚧 `logs.tail` (redacted) exists; no
   filtering/search UI yet |
 
+### Database management
+| Feature | Status |
+|---|---|
+| MySQL/MariaDB database + scoped owner-user create/delete | ✅ `db.create`/`db.delete`,
+  identifier allow-list, grants always scoped to exactly one database |
+| Control-plane persistence, dashboard UI (list/create/delete) | ✅ `databases` table,
+  "Databases" panel per server, one-time credentials modal on create |
+| MongoDB support | ⬜ Phase 2 |
+| phpMyAdmin / DB-admin UI integration | ⬜ not implemented |
+| Database process/query monitoring | ⬜ not implemented |
+| Remote-host/IP access rules per database user | ⬜ not implemented (owner users are
+  `@'localhost'`-scoped only today) |
+
 ### Git deployment
 All ⬜ — explicitly scoped to Phase 2 (`product-plan.md` §9). No Git deployment,
 webhook push-to-deploy, deploy keys, or rollback exist in this codebase yet.

@@ -2,6 +2,45 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-25 — Database control-plane persistence and dashboard UI
+
+- **Closed the DB-005 gap flagged in the previous parity pass**: databases created via
+  the `db.create` capability are now durably recorded on the control plane and
+  surfaced in the dashboard, the same dispatch-then-persist-on-success pattern
+  `site.create`/`backup.run` already use — a raw task success alone was never enough
+  to know a database now exists.
+- New `databases` table (`apps/controlplane/db.go`) and `store` methods
+  (`createDatabase`/`listDatabases`/`getDatabase`/`deleteDatabase`, each scoped by
+  server ID like `getSite`/`getBackup`). Deliberately does **not** store the owner
+  password — it is generated fresh per creation, dispatched to the agent, and
+  returned to the caller exactly once in the API response; the database engine
+  itself remains the only durable store of that credential.
+- Three new endpoints (`apps/controlplane/databases.go`):
+  `GET`/`POST /api/v1/servers/{id}/databases`,
+  `DELETE /api/v1/servers/{id}/databases/{dbId}`. Database/owner names dispatched to
+  the agent on delete are read server-side from the stored record, never accepted as
+  free-form client input — the same trust boundary `handleRestoreBackup` uses.
+  Identifier validation happens before any agent dispatch is attempted (a 400, not a
+  gateway error, for a malformed name).
+- New "Databases" panel on the server-detail dashboard view: a table with a delete
+  action, a create-database modal, and a one-time credentials modal shown immediately
+  after creation (name/username/password, with an explicit "shown only once" notice).
+- **Fixed a latent ordering bug** in `packages/capabilities.handleDBDelete`: an invalid
+  `owner_user` was previously only rejected *after* the database had already been
+  dropped, unlike `handleDBCreate`'s validate-everything-first ordering. Moved the
+  `owner_user` validation before any SQL executes, so a rejected delete request never
+  partially applies.
+- Added 6 new capability-layer identifier-validation tests (`db_test.go`, no live
+  MariaDB required — matching the existing pattern for this capability), 4 new
+  control-plane store tests (database CRUD round trip, cross-server scoping,
+  double-delete rejection), and an HTTP-layer test covering identifier validation,
+  the not-found path, cross-server addressing, and the same
+  validation-before-dispatch ordering the backup endpoints already verify. Full
+  suite: 68 test functions, `go vet`/`gofmt` clean.
+- Updated `docs/SERVERAVATAR_PARITY.md` (DB-001 moved to `PARTIAL` → note the
+  control-plane-persistence gap it flagged is now closed; new detailed DB-005 entry)
+  and `docs/SYSTEM.md`.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the
