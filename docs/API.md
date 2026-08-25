@@ -46,6 +46,10 @@ protected route; there is no route that skips it by omission.
 | `GET` | `/api/v1/servers/{id}/sites/{siteId}/backups` | List backups for a site, newest first |
 | `POST` | `/api/v1/servers/{id}/sites/{siteId}/backups` | Dispatch `backup.run` and persist the resulting backup record |
 | `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a previously recorded backup |
+| `GET` | `/api/v1/servers/{id}/sites/{siteId}/cron` | Dispatch `cron.list` for the site's system user |
+| `POST` | `/api/v1/servers/{id}/sites/{siteId}/cron` | Dispatch `cron.create` for the site's system user |
+| `POST` | `/api/v1/servers/{id}/sites/{siteId}/cron/{cronId}/enabled` | Dispatch `cron.set_enabled` |
+| `DELETE` | `/api/v1/servers/{id}/sites/{siteId}/cron/{cronId}` | Dispatch `cron.delete` |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -136,6 +140,22 @@ pre-restore safety backups taken automatically before anything was overwritten,
 isn't connected; `422` if `backup.restore` itself failed on the agent (the agent-side
 error message explains why, and any checkpoint already taken is named in it so it's
 never a silent loss).
+
+### Cron endpoints (`/api/v1/servers/{id}/sites/{siteId}/cron[/...]`)
+Every request resolves `user` for the underlying `cron.*` capability from the site's
+own recorded `system_user` (never a client-supplied username), so a caller can never
+target another site's crontab by parameter tampering. `404` if the site doesn't exist
+on that server, for all four routes.
+
+- `GET .../cron` → dispatches `cron.list`, returns the agent's JSON array of
+  `{id, user, label, schedule, command, enabled}` verbatim (no local persistence — the
+  server's crontab is the source of truth, the same live-query pattern `db.list` uses).
+- `POST .../cron` `{"schedule": "*/5 * * * *", "command": "...", "label": ""}` →
+  dispatches `cron.create`. `400` if `schedule` or `command` is missing; `422` if the
+  agent rejects the schedule/command/user. → `201` with the created entry JSON.
+- `POST .../cron/{cronId}/enabled` `{"enabled": true}` → dispatches `cron.set_enabled`.
+  → `200` with the updated entry JSON.
+- `DELETE .../cron/{cronId}` → dispatches `cron.delete`. → `200 {"status": "deleted"}`.
 
 ### `POST /agents/register`
 ```json

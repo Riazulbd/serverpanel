@@ -80,7 +80,10 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | SSH/SFTP management, SSH-key mgmt, port mgmt, root-login controls | ⬜ Phase 2 |
 | Automatic security updates | ⬜ Phase 2 (`unattended-upgrades` integration) |
 | Service controls | ✅ `service.control`, allow-listed units/actions only |
-| Cron-job management | ⬜ Phase 2 |
+| Cron-job management | 🚧 `cron.list`/`cron.create`/`cron.set_enabled`/`cron.delete`,
+  scoped to one isolated site system user, marker-based so unmanaged crontab
+  content is never touched; not yet verified against a real `crontab` binary
+  (unavailable in the dev/CI sandbox — see `TESTING.md`) |
 | Process/worker management | ⬜ Phase 2 |
 | Disk-usage analysis, safe cleanup | ⬜ not started |
 | Server diagnostics | 🚧 `diagnostics.basic` (read-only service-state check); no

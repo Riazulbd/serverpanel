@@ -2,6 +2,39 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-25 — Cron job management (SRV-005)
+
+- **Implemented cron job management** (`packages/capabilities/cron.go`): `cron.list`,
+  `cron.create`, `cron.set_enabled`, `cron.delete`, scoped to one isolated `site_*`
+  system user at a time — never root, never an arbitrary username. Jobs are written
+  into that user's own `crontab` as a `# serverpanel-cron id=... enabled=... label=...`
+  marker line immediately followed by the job line (commented out, not removed, to
+  disable); every read/write touches only its own marker+job pair, so any content
+  already in that crontab (MAILTO=, other jobs/comments) survives byte-for-byte.
+  Schedule/command/label are validated against safe charsets, length limits, and a
+  newline/NUL check that closes off crontab line-injection.
+- Wired the four capabilities into the control plane
+  (`apps/controlplane/cron.go`): `GET`/`POST /api/v1/servers/{id}/sites/{siteId}/cron`,
+  `POST .../cron/{cronId}/enabled`, `DELETE .../cron/{cronId}`. The target system user
+  is always resolved from the site's own stored record, never accepted from the
+  client, so a cron request can't be pointed at another site's crontab by parameter
+  tampering. No new database table — the crontab itself stays authoritative, the same
+  live-query pattern `db.list` already uses.
+- Added a "Cron jobs" panel to the site-detail dashboard view: job list (label,
+  schedule, command, enabled state), a create modal with common-schedule presets plus
+  a custom-expression field, and per-row enable/disable/delete controls.
+- Added 9 new capability-layer unit tests (user/schedule/command validation including
+  newline-injection rejection, marker parse/render round-trips for enabled and
+  disabled jobs, unrelated-crontab-content preservation across rewrites, independent
+  multi-entry management) and 2 new HTTP integration tests (not-found boundaries,
+  validation-before-dispatch). The `crontab` binary itself isn't available in this
+  sandbox, so the real `crontab -u <user> -l`/`-` round trip against a live cron
+  daemon is `BLOCKED_EXTERNAL` — everything upstream of that one exec call is
+  unit-tested.
+- Updated `docs/SERVERAVATAR_PARITY.md` (SRV-005 promoted from `NOT_STARTED` to a full
+  `PARTIAL` entry), `docs/SYSTEM.md`, `docs/API.md`, and `docs/TESTING.md`
+  (72 total test functions, up from 61).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

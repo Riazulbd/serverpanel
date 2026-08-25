@@ -189,6 +189,13 @@
         </div>
         <div id="backupResult" class="task-result hidden"></div>
         <div id="backupsList" class="muted">No backups yet.</div>
+
+        <div class="section-title" style="display:flex;justify-content:space-between;align-items:center">
+          <span>Cron jobs</span>
+          <button onclick="openNewCronModal()">+ New cron job</button>
+        </div>
+        <div id="cronResult" class="task-result hidden"></div>
+        <div id="cronList" class="muted">No cron jobs yet.</div>
       </div>
     </div>
 
@@ -475,7 +482,9 @@ async function openSiteDetail(siteId) {
     document.getElementById('siteDetailMeta').textContent =
       site.AppType + (site.PHPVersion ? (' · PHP ' + site.PHPVersion) : '') + ' · ' + site.Status;
   }
+  document.getElementById('cronResult').classList.add('hidden');
   await refreshBackups();
+  await refreshCron();
 }
 
 async function refreshBackups() {
@@ -483,6 +492,125 @@ async function refreshBackups() {
     const backups = await api(API + '/servers/' + state.selectedServerId + '/sites/' + state.selectedSiteId + '/backups') || [];
     renderBackups(backups);
   } catch (e) {}
+}
+
+const CRON_PRESETS = {
+  '*/5 * * * *': 'Every 5 minutes',
+  '0 * * * *': 'Every hour',
+  '0 0 * * *': 'Every day at midnight',
+  '0 0 * * 0': 'Every week (Sunday)',
+  '0 0 1 * *': 'Every month',
+};
+
+async function refreshCron() {
+  try {
+    const jobs = await api(API + '/servers/' + state.selectedServerId + '/sites/' + state.selectedSiteId + '/cron') || [];
+    renderCron(jobs);
+  } catch (e) {}
+}
+
+function renderCron(jobs) {
+  const el = document.getElementById('cronList');
+  if (!jobs.length) { el.textContent = 'No cron jobs yet.'; return; }
+  el.innerHTML = '<table><thead><tr><th>Label</th><th>Schedule</th><th>Command</th><th>Status</th><th></th></tr></thead><tbody>' +
+    jobs.map(j => `
+      <tr>
+        <td>${escapeHtml(j.label || '—')}</td>
+        <td class="muted">${escapeHtml(j.schedule)} <span class="muted">${escapeHtml(CRON_PRESETS[j.schedule] || '')}</span></td>
+        <td class="muted" title="${escapeHtml(j.command)}">${escapeHtml(j.command.length > 40 ? j.command.slice(0, 40) + '…' : j.command)}</td>
+        <td>${j.enabled ? 'Enabled' : 'Disabled'}</td>
+        <td>
+          <button onclick="toggleCron('${j.id}', ${!j.enabled})">${j.enabled ? 'Disable' : 'Enable'}</button>
+          <button class="danger" onclick="deleteCron('${j.id}')">Delete</button>
+        </td>
+      </tr>`).join('') +
+    '</tbody></table>';
+}
+
+function openNewCronModal() {
+  const root = document.getElementById('modalRoot');
+  const presetOptions = Object.entries(CRON_PRESETS).map(([v, l]) => `<option value="${v}">${l}</option>`).join('');
+  root.innerHTML = `
+    <div class="modal-backdrop" onclick="if(event.target===this) closeModal()">
+      <div class="modal">
+        <h2>New cron job</h2>
+        <div class="field">
+          <label>Schedule</label>
+          <select id="newCronPreset" onchange="document.getElementById('newCronSchedule').value = this.value === 'custom' ? '' : this.value">
+            ${presetOptions}
+            <option value="custom">Custom expression&hellip;</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Cron expression (minute hour day month weekday)</label>
+          <input id="newCronSchedule" value="*/5 * * * *" placeholder="*/5 * * * *">
+        </div>
+        <div class="field">
+          <label>Command</label>
+          <input id="newCronCommand" placeholder="/usr/bin/php /home/sites/.../artisan schedule:run">
+        </div>
+        <div class="field">
+          <label>Label (optional)</label>
+          <input id="newCronLabel" placeholder="e.g. Laravel scheduler">
+        </div>
+        <button class="primary" style="width:100%" onclick="createCron()">Create cron job</button>
+        <div class="error" id="newCronError"></div>
+        <p class="muted" id="newCronStatus"></p>
+      </div>
+    </div>`;
+}
+
+async function createCron() {
+  const schedule = document.getElementById('newCronSchedule').value.trim();
+  const command = document.getElementById('newCronCommand').value.trim();
+  const label = document.getElementById('newCronLabel').value.trim();
+  const err = document.getElementById('newCronError');
+  const status = document.getElementById('newCronStatus');
+  err.textContent = '';
+  status.textContent = 'Creating cron job...';
+  try {
+    await api(API + '/servers/' + state.selectedServerId + '/sites/' + state.selectedSiteId + '/cron', {
+      method: 'POST', body: JSON.stringify({schedule, command, label})
+    });
+    closeModalNoRefresh();
+    await refreshCron();
+  } catch (e) {
+    status.textContent = '';
+    err.textContent = e.message;
+  }
+}
+
+async function toggleCron(cronId, enabled) {
+  const box = document.getElementById('cronResult');
+  box.className = 'task-result running';
+  box.textContent = (enabled ? 'Enabling' : 'Disabling') + ' cron job...';
+  box.classList.remove('hidden');
+  try {
+    await api(API + '/servers/' + state.selectedServerId + '/sites/' + state.selectedSiteId + '/cron/' + cronId + '/enabled', {
+      method: 'POST', body: JSON.stringify({enabled})
+    });
+    box.classList.add('hidden');
+    await refreshCron();
+  } catch (e) {
+    box.className = 'task-result fail';
+    box.textContent = 'Update failed: ' + e.message;
+  }
+}
+
+async function deleteCron(cronId) {
+  if (!confirm('Delete this cron job? This cannot be undone.')) return;
+  const box = document.getElementById('cronResult');
+  box.className = 'task-result running';
+  box.textContent = 'Deleting cron job...';
+  box.classList.remove('hidden');
+  try {
+    await api(API + '/servers/' + state.selectedServerId + '/sites/' + state.selectedSiteId + '/cron/' + cronId, {method: 'DELETE'});
+    box.classList.add('hidden');
+    await refreshCron();
+  } catch (e) {
+    box.className = 'task-result fail';
+    box.textContent = 'Delete failed: ' + e.message;
+  }
 }
 
 function renderBackups(backups) {
