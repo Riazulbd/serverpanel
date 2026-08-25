@@ -150,4 +150,18 @@ CREATE TABLE IF NOT EXISTS backups (
 	status     TEXT NOT NULL,
 	created_at TEXT NOT NULL
 );
+
+-- Deliberately no password/credential column: db.create's owner password is
+-- generated per request, returned once in the API response, and never
+-- persisted anywhere in the control plane (see databases.go
+-- handleCreateDatabase). This table only ever records that a database and
+-- scoped owner user exist, not how to authenticate as that user.
+CREATE TABLE IF NOT EXISTS databases (
+	id         TEXT PRIMARY KEY,
+	server_id  TEXT NOT NULL REFERENCES servers(id),
+	name       TEXT NOT NULL,
+	owner_user TEXT NOT NULL,
+	status     TEXT NOT NULL,
+	created_at TEXT NOT NULL
+);
 `

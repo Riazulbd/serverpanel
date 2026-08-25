@@ -114,6 +114,20 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | Application logs / advanced log viewer | 🚧 `logs.tail` (redacted) exists; no
   filtering/search UI yet |
 
+### Database management
+| Feature | Status |
+|---|---|
+| MySQL/MariaDB create/delete/list with a least-privilege scoped owner user | ✅
+  `db.create`/`db.delete`/`db.list`; identifier allow-list, grants always scoped to
+  exactly one database, never global |
+| Control-plane persistence + dashboard UI | ✅ server-detail "Databases" panel;
+  `databases` row persisted only after the agent confirms `db.create`/`db.delete`
+  succeeded, mirroring how sites/backups already work; owner password is generated
+  per request, returned once in the create response, and never stored |
+| MongoDB support | ⬜ not implemented |
+| phpMyAdmin / DB admin UI integration | ⬜ not implemented |
+| Database process/query monitoring | ⬜ not implemented |
+
 ### Git deployment
 All ⬜ — explicitly scoped to Phase 2 (`product-plan.md` §9). No Git deployment,
 webhook push-to-deploy, deploy keys, or rollback exist in this codebase yet.
@@ -253,6 +267,8 @@ EXISTS`, applied on every `openDB` call — idempotent, no separate migration to
 | `audit_log` | append-only: seq, timestamp, server, actor, action, detail |
 | `sites` | id, server, domain, system user, docroot, app type, PHP version, status |
 | `backups` | id, server, site, scope, path, size, sha256, status, created_at |
+| `databases` | id, server, name, owner user, status, created_at — deliberately no
+  password/credential column; the owner password is never persisted (see §9) |
 
 No ORM — every query is a small, explicit SQL statement in `store.go`. All secrets
 (session tokens, bootstrap tokens) are stored only as SHA-256 hashes; passwords use
@@ -262,8 +278,9 @@ bcrypt (cost 12); nothing is stored in plaintext.
 
 Full list with request/response shapes in `API.md`. Summary: `/api/v1/auth/*`
 (signup/login/logout/TOTP enroll+verify/MFA challenge/me), `/api/v1/servers*` (CRUD,
-revoke, task dispatch, sites, audit), `/agents/register` (the one unauthenticated
-agent-facing endpoint, secured by the bootstrap token itself), `/healthz`.
+revoke, task dispatch, sites, backups, databases, audit), `/agents/register` (the one
+unauthenticated agent-facing endpoint, secured by the bootstrap token itself),
+`/healthz`.
 
 ## 10. Background jobs
 

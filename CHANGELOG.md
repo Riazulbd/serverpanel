@@ -2,6 +2,51 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-25 — Database control-plane persistence and dashboard UI (DB-005)
+
+- **Closed the largest gap left in the "databases" priority tier** flagged by
+  `docs/SERVERAVATAR_PARITY.md` (DB-005): `db.create`/`db.delete`/`db.list` previously
+  existed only as an agent-side capability, dispatchable through the generic task-
+  dispatch endpoint with no durable record and no dedicated UI — the same gap backups
+  had before the 2026-08-17 pass. Applied the identical dispatch-then-persist-on-
+  success pattern.
+- Added a `databases` table (`apps/controlplane/db.go`) — id, server, name, owner
+  user, status, created_at — **deliberately with no password/credential column**: the
+  owner password is a 24-byte random value generated per request in
+  `handleCreateDatabase`, sent to the agent for the `CREATE USER` statement, and
+  returned exactly once in the API response. Nothing durable in the control plane can
+  leak it later, matching the "never store plaintext passwords" requirement even for a
+  password this project itself generates.
+- New file `apps/controlplane/databases.go`: `handleCreateDatabase` (validates
+  `name`/`owner_user` against the same identifier allow-list `db.create` itself
+  enforces — `^[a-z][a-z0-9_]{0,30}$` — before ever dispatching to the agent, so a
+  malformed name gets a clean `400` instead of an opaque agent-side failure),
+  `handleListDatabases`, `handleDeleteDatabase` (reads the database's own recorded
+  `name`/`owner_user` from the store and passes them to `db.delete` verbatim — a caller
+  can only ever delete a database that was actually created and recorded through this
+  API, never an arbitrary name).
+- New endpoints: `GET`/`POST /api/v1/servers/{id}/databases`,
+  `DELETE /api/v1/servers/{id}/databases/{dbId}`.
+- New "Databases" panel on the server-detail dashboard view: create-database modal
+  (name + optional owner user), a databases table, delete with a destructive-action
+  confirmation dialog. The one-time owner password is shown directly in the create
+  response — the UI displays it once and never re-fetches or persists it client-side
+  either.
+- Added `packages/capabilities/db_test.go` (5 new tests covering `handleDBCreate`/
+  `handleDBDelete` input validation — invalid identifiers, short password — the part of
+  the capability layer that runs before any MariaDB connection is attempted; the real
+  `CREATE DATABASE`/`GRANT`/`DROP` round trip still has no `go test` coverage in this
+  MariaDB-less sandbox, same as before), 1 new `store_test.go` test (create/list/get/
+  delete round trip plus cross-server scoping for both `getDatabase` and
+  `deleteDatabase`), and 2 new `http_test.go` tests (validation-before-dispatch
+  ordering, and that a failed dispatch never persists a record). Full suite: 69 test
+  functions, `go vet`/`gofmt` clean.
+- Updated `SYSTEM.md` (new "Database management" feature table, `databases` schema row,
+  §9 endpoint summary), `API.md` (three new endpoint sections), and
+  `SERVERAVATAR_PARITY.md` (DB-001 promoted `PARTIAL` → `COMPLETE` for its persistence/
+  UI/validation surface; DB-005 marked `COMPLETE` and folded into DB-001's detail block;
+  progress-summary counts updated).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the
