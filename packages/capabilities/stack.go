@@ -140,6 +140,45 @@ func phase1LEMPSteps() []installStep {
 			},
 		},
 		{
+			Name: "certbot deploy-hook (reload nginx after renewal)",
+			// certbot's --nginx plugin already reloads nginx itself right
+			// after a manual `ssl.issue_letsencrypt` run, but the periodic
+			// `certbot renew` invoked by the timer below runs unattended —
+			// this hook is belt-and-suspenders so a renewed cert is always
+			// picked up by nginx even if the installer's own reload path
+			// ever changes upstream. Idempotent: only rewritten if the
+			// on-disk content differs.
+			Check: func(ctx context.Context) bool {
+				data, err := os.ReadFile(certbotDeployHookPath)
+				return err == nil && string(data) == certbotDeployHookScript()
+			},
+			Run: func(ctx context.Context) error {
+				if err := os.MkdirAll(certbotRenewalHooksDir, 0755); err != nil {
+					return err
+				}
+				return os.WriteFile(certbotDeployHookPath, []byte(certbotDeployHookScript()), 0755)
+			},
+		},
+		{
+			Name: "certbot.timer (automatic renewal, twice-daily per certbot's default schedule)",
+			// Without this, every issued certificate silently expires after
+			// 90 days — SSL auto-renewal was a documented gap (see
+			// docs/SYSTEM.md "Known limitations"). The certbot .deb often
+			// enables this timer on its own via systemd-preset, but that's
+			// distro/environment-dependent and was never actually verified
+			// here, so stack.install now asserts the end state explicitly
+			// instead of assuming the package default holds.
+			Check: func(ctx context.Context) bool {
+				enabled, _ := run(ctx, "systemctl", "is-enabled", "certbot.timer")
+				active, _ := run(ctx, "systemctl", "is-active", "certbot.timer")
+				return strings.TrimSpace(enabled) == "enabled" && strings.TrimSpace(active) == "active"
+			},
+			Run: func(ctx context.Context) error {
+				_, err := run(ctx, "systemctl", "enable", "--now", "certbot.timer")
+				return err
+			},
+		},
+		{
 			Name:  "ufw",
 			Check: func(ctx context.Context) bool { return isPackageInstalled(ctx, "ufw") },
 			Run:   func(ctx context.Context) error { _, err := aptInstall(ctx, "ufw"); return err },
@@ -185,6 +224,24 @@ func phase1LEMPSteps() []installStep {
 			Run:   func(ctx context.Context) error { _, err := aptInstall(ctx, "fail2ban"); return err },
 		},
 	}
+}
+
+const (
+	certbotRenewalHooksDir = "/etc/letsencrypt/renewal-hooks/deploy"
+	certbotDeployHookPath  = certbotRenewalHooksDir + "/serverpanel-reload-nginx.sh"
+)
+
+// certbotDeployHookScript is the fixed (no caller/template input) shell
+// script installed for certbot to run after any successful renewal. Kept as
+// a pure function, rather than inlined at the write site, so its exact
+// content is covered by a unit test independent of the filesystem.
+func certbotDeployHookScript() string {
+	return "#!/bin/sh\n" +
+		"# Managed by ServerPanel (stack.install). Do not edit — regenerated on\n" +
+		"# every stack.install run. Reloads nginx after certbot renews a\n" +
+		"# certificate so the new cert is served without a manual step.\n" +
+		"set -e\n" +
+		"systemctl reload nginx\n"
 }
 
 // currentSSHPort reads the configured SSH port out of sshd_config,

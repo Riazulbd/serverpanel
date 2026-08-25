@@ -58,12 +58,13 @@ const (
 // on via service.control. An arbitrary unit name in a task's params is
 // rejected, not passed through to systemctl.
 var managedUnits = map[string]bool{
-	"nginx":        true,
-	"php8.3-fpm":   true,
-	"mariadb":      true,
-	"redis-server": true,
-	"cron":         true,
-	"fail2ban":     true,
+	"nginx":         true,
+	"php8.3-fpm":    true,
+	"mariadb":       true,
+	"redis-server":  true,
+	"cron":          true,
+	"fail2ban":      true,
+	"certbot.timer": true,
 }
 
 // serviceActions is the allow-list of actions service.control accepts.

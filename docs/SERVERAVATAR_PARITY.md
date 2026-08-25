@@ -163,6 +163,24 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Known differences**: same-server restore only — there is no capability to restore a backup onto a *different* server (that needs a transfer step first).
 - **Reason**: cross-server restore is coupled to cross-server migration/cloning, both explicitly Phase 2 (`product-plan.md` §9); tracked as a follow-up, not silently dropped.
 
+### APP-016 — Let's Encrypt SSL issuance + automatic renewal
+- **Category**: Application Management → SSL
+- **Documentation page**: Application Management → SSL/TLS
+- **Short description**: Issue a Let's Encrypt certificate for a domain and keep it renewed automatically without further action.
+- **Our implementation**: `ssl.issue_letsencrypt` (certbot's `--nginx` plugin, fixed argv) issues and installs the cert; `stack.install` now also enables and starts `certbot.timer` (systemd, certbot's own twice-daily renewal schedule) as an explicit, verified idempotent step — rather than assuming the Debian package's default preset holds — and installs a fixed (no template/caller input) deploy-hook script (`/etc/letsencrypt/renewal-hooks/deploy/serverpanel-reload-nginx.sh`) that reloads nginx after every unattended renewal.
+- **Frontend**: no dedicated SSL panel yet; issuance is dispatched as a generic task (same gap as DB-001/site management pre-UI).
+- **Backend service**: `gateway.dispatch` → `packages/capabilities.handleSSLIssueLetsEncrypt`, `phase1LEMPSteps` (`packages/capabilities/stack.go`).
+- **API endpoint(s)**: `POST /api/v1/servers/{id}/tasks` (`capability: ssl.issue_letsencrypt` or `stack.install`).
+- **Agent command**: `ssl.issue_letsencrypt`; renewal itself runs unattended via `certbot.timer` → `certbot renew`, not a dispatched agent command.
+- **DB tables**: none (no certificate-expiry tracking/alerting on the control-plane side yet — see Known differences).
+- **Required permission**: authenticated session (issuance); the renewal timer runs as a systemd unit on the server, outside the control plane's request path entirely, by design (renewal must keep working even if the agent is briefly disconnected from the control plane).
+- **Security considerations**: the deploy-hook script content is a Go constant with zero caller/template input (`certbotDeployHookScript()`), never built from task params, and is only ever placed in certbot's own trusted hook directory; enabling the timer uses a fixed argv (`systemctl enable --now certbot.timer`), never a caller-supplied unit name.
+- **Test coverage**: `packages/capabilities/stack_test.go` (`TestCertbotDeployHookScriptIsFixedAndSafe`, `TestCertbotDeployHookPathIsUnderRenewalHooksDeployDir`, `TestCertbotTimerIsAManagedUnit`) covers the hook script's fixed content/determinism and its inclusion in `managedUnits` (so it's visible via `diagnostics.basic` and controllable via `service.control`). The `systemctl enable --now certbot.timer` step itself, like the rest of `stack.install`, requires a real systemd host and is not exercised by `go test` in this environment — `BLOCKED_EXTERNAL`, same category as the rest of `stack.install`'s package-install steps (see SRV-002).
+- **Current status**: `PARTIAL`
+- **Completion date**: n/a (renewal-timer wiring: 2026-08-25; full end-to-end verification on a real host remains `BLOCKED_EXTERNAL`)
+- **Known differences**: no certificate-expiry tracking or "SSL expiring soon" alert on the control-plane side yet (renewal is expected to keep the cert current, but there's no independent verification/alerting if it silently fails); no multi-domain/SAN certificate support; no dashboard UI for issuance.
+- **Reason**: expiry alerting depends on the notification-channel architecture (§ALERT-*), which is Phase 2/3 scope; this pass closed the "will the cert actually renew at all" gap first since an unrenewed cert is the higher-severity failure mode.
+
 ### ACC-001 — Authentication, 2FA, session management
 - **Category**: Account Management
 - **Documentation page**: Account Management → "Update Account Info"
@@ -253,7 +271,6 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | APP-013 | Log Monitoring Suite (traffic analytics) | `NOT_STARTED` | |
 | APP-014 | Application-level WAF / AI-bot blocker | `NOT_STARTED` | |
 | APP-015 | Custom SSL upload | `PARTIAL` | `ssl.install_custom` capability exists agent-side; no dedicated dashboard UI |
-| APP-016 | Let's Encrypt SSL + auto-renewal | `PARTIAL` | `ssl.issue_letsencrypt` implemented; certbot's own renewal timer not yet wired up by `stack.install` |
 
 ### Database management — not yet started (DB-*)
 | ID | Feature | Status | Notes |

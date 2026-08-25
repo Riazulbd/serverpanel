@@ -2,6 +2,30 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-25 — SSL auto-renewal wiring
+
+- **Wired up Let's Encrypt automatic renewal** (`packages/capabilities/stack.go`),
+  closing a documented gap: certificates issued via `ssl.issue_letsencrypt` previously
+  had no verified renewal path and would silently expire after 90 days.
+  `stack.install` now includes two new idempotent steps: (1) writes a fixed,
+  zero-caller-input deploy-hook script
+  (`/etc/letsencrypt/renewal-hooks/deploy/serverpanel-reload-nginx.sh`, mode 0755) that
+  reloads nginx after every certbot renewal, and (2) explicitly enables and starts
+  `certbot.timer` (`systemctl enable --now certbot.timer`) rather than assuming the
+  Debian package's default preset already did so.
+- Added `certbot.timer` to the `service.control`/`diagnostics.basic` allow-list
+  (`managedUnits`), so its enabled/active state is visible from the dashboard and it
+  can be manually restarted like any other managed unit.
+- Added `packages/capabilities/stack_test.go`: the deploy-hook script's content is a
+  pure function covered by a determinism/safety test (fixed shebang, exactly one
+  `systemctl` call, no template/caller input reachable from task params), plus a test
+  asserting `certbot.timer` is present in `managedUnits`. The actual
+  `systemctl enable --now certbot.timer` call requires a real systemd host and remains
+  `BLOCKED_EXTERNAL` for end-to-end verification in this sandbox (documented in
+  `TESTING.md` §3, not silently skipped).
+- Updated `docs/SYSTEM.md`, `docs/SERVERAVATAR_PARITY.md` (APP-016 promoted from a
+  summary-table row to a full detail block), and `docs/TESTING.md` to match.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

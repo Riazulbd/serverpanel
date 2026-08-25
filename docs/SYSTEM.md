@@ -103,8 +103,9 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | Maintenance mode | ⬜ not implemented |
 | Basic auth on a site | ⬜ not implemented |
 | Custom + Let's Encrypt SSL | ✅ `ssl.issue_letsencrypt` (certbot), `ssl.install_custom` |
-| Automatic SSL renewal | ⬜ not implemented (certbot's own renewal timer is not
-  wired up by `stack.install` yet) |
+| Automatic SSL renewal | 🚧 `stack.install` now enables/verifies `certbot.timer`
+  and installs a nginx-reload deploy-hook (see `SERVERAVATAR_PARITY.md` APP-016); no
+  control-plane-side expiry tracking/alerting if a renewal silently fails |
 | WordPress auto-login/auto-update | ⬜ not implemented |
 | Application enable/disable | ✅ `site.set_status` |
 | Secure file manager | ✅ `file.list/read/write/delete`, scoped + symlink-safe |
@@ -164,9 +165,10 @@ Phase boundaries and full milestone/estimate tables are in `product-plan.md` §6
 is the condensed status:
 
 - **Phase 1 — secure working foundation:** ~90% of the *capability* surface exists and
-  is tested per-capability (see the tables above); the biggest real gaps are backup
-  **restore**, an automated test suite (now added, see `TESTING.md`), SSL auto-renewal,
-  and agent cert auto-rotation. Not "GA-ready" yet, but the architecture and security
+  is tested per-capability (see the tables above); backup **restore** and SSL
+  auto-renewal wiring are now closed (see `TESTING.md`, `SERVERAVATAR_PARITY.md`
+  APP-016); the biggest remaining gaps are agent cert auto-rotation and a background
+  job queue. Not "GA-ready" yet, but the architecture and security
   primitives it depends on (mTLS, allow-listed capabilities, per-app isolation, audit
   log) are real and proven, not stubs.
 - **Phase 2 — professional server management:** not started. Git deployment,
@@ -392,9 +394,11 @@ all ⬜, scoped to Phase 2 per `product-plan.md` §9.
 - Single-user model: no organizations/teams/RBAC yet.
 - The in-process CA, while functionally correct, is not yet isolated as its own
   tightly-scoped trust boundary (see `SECURITY.md` §2).
-- `systemctl start/stop/restart` and Let's Encrypt issuance have not been verified in
-  *this* environment (no systemd as PID 1, no public DNS) — see `TESTING.md` §What
-  hasn't been verified.
+- `systemctl start/stop/restart`, Let's Encrypt issuance, and the new
+  `certbot.timer` auto-renewal step have not been verified against a real systemd/DNS
+  host in *this* environment (no systemd as PID 1, no public DNS) — see `TESTING.md`
+  §What hasn't been verified. No control-plane-side alerting if a renewal ever fails
+  silently on the host (see `SERVERAVATAR_PARITY.md` APP-016).
 - Dashboard mobile responsiveness (320–768px) has not been verified with real browser
   automation in this session — see `TESTING.md` §Known gaps.
 - No CI pipeline / automated vulnerability scanning configured yet.

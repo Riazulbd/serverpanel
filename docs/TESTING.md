@@ -55,8 +55,11 @@ next testing investment worth making, tracked below.
 - `systemctl start/stop/restart` of installed services — this session's sandbox has no
   systemd as PID 1. The code path is a standard `systemctl <action> <unit>` argv
   invocation and should work unmodified on a real VPS, but hasn't been confirmed there.
-- Let's Encrypt issuance — no public DNS points at any environment this project has
-  been built/tested in.
+- Let's Encrypt issuance, and `stack.install`'s `certbot.timer` enable/verify step —
+  no public DNS points at any environment this project has been built/tested in, and no
+  systemd as PID 1 in this sandbox to enable a real timer against. The deploy-hook
+  script's own content/path are covered by `packages/capabilities/stack_test.go`; the
+  `systemctl enable --now certbot.timer` call itself is unverified here.
 - Agent behavior across a real network disconnect/reconnect cycle, a real VPS reboot,
   or a real control-plane restart while agents are live.
 - Dashboard mobile responsiveness at 320/375/390/414/768px — no browser-automation
