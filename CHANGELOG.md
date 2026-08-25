@@ -2,6 +2,67 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-25 — Cron job management (SRV-005)
+
+- **Implemented cron job management end-to-end**: `cron.list`/`cron.create`/
+  `cron.update`/`cron.delete`/`cron.set_enabled` (`packages/capabilities/cron.go`) edit
+  a site's real system user's crontab via `crontab -u <user> -l` / `crontab -u <user> -`
+  — no separate scheduler daemon, no new database table; the crontab itself is the
+  single source of truth, listed live from the agent on every request. Every entry this
+  control plane writes carries a machine-readable marker comment
+  (`# serverpanel-cron id=... enabled=... label=...`) on the line above it; disabling an
+  entry comments out just its schedule/command line (cron never runs it) rather than
+  deleting it, so re-enabling is lossless, and any other content already present in that
+  crontab — added by hand or by anything else — round-trips byte-for-byte, never
+  touched. Common frequencies (every minute/hourly/daily/weekly/monthly) are offered as
+  presets that resolve to a standard 5-field expression; a custom expression goes
+  through the identical field-by-field range validator.
+- Closed the two adversarial gaps called out for this feature: (1) **ownership** — the
+  crontab "owner" ever sent to the agent is always the resolved site's own
+  `system_user`, read server-side from the stored site row for the exact server+site the
+  URL names; a client-supplied `system_user` is never accepted or forwarded, so a caller
+  can only ever touch a crontab for a site their own request already resolved to. (2)
+  **crontab-line injection** — the `command`/`label` fields reject embedded
+  newlines/carriage-returns/NUL bytes and an unescaped `%`, the specific ways a
+  caller-supplied string could otherwise break out of its single crontab line and
+  smuggle in an entirely separate, arbitrarily-scheduled entry (or forge a marker line)
+  — deliberately *not* a shell-metacharacter blocklist, since a cron command is handed
+  to the user's shell by cron itself and `;`/`|`/`&&`/backticks are ordinary, expected
+  cron usage.
+- Wired the capability into the agent's existing allow-list (`packages/capabilities.
+  Default()` — the agent binary picks it up automatically, no separate agent-side
+  change needed) and into the control plane: six new endpoints under
+  `/api/v1/servers/{id}/sites/{siteId}/cron[...]` (`apps/controlplane/cron.go`), each
+  enforcing the existing session/auth model and writing an audit-log entry
+  (`cron.created`/`cron.updated`/`cron.deleted`/`cron.enabled`/`cron.disabled`), and a
+  new "Cron Jobs" panel in the site-detail dashboard view (job table, add/edit modal
+  with schedule presets + a custom-expression field, per-row enable/disable/delete).
+- Added 15 new capability-layer tests (`packages/capabilities/cron_test.go`) — schedule
+  validation (valid presets/expressions and 13 invalid-garbage cases), command/label
+  validation including 5 explicit crontab-injection attempts (newline, CRLF, forged
+  marker line, NUL byte, unescaped `%`) all rejected and an escaped `%` accepted,
+  parse/render round-trip fidelity (foreign crontab lines preserved verbatim and
+  interleaved between managed entries, a command's internal whitespace preserved
+  exactly), a full create→disable→re-enable→update→delete round trip, not-found
+  handling, and a real-`crontab`-binary end-to-end test that self-skips in this
+  development environment (no `cron` package installed here, matching the existing
+  MariaDB/wp-cli gaps) — and 6 new control-plane HTTP tests
+  (`apps/controlplane/cron_test.go`): unauthenticated requests rejected on every new
+  route, nonexistent server/site 404s, invalid/missing fields rejected with 400 before
+  any agent dispatch, a well-formed request against a disconnected agent failing as a
+  502 (proving validation order), and a regression test proving a client-supplied
+  `system_user` field is never forwarded. Full suite: 82 test functions (1
+  environment-gated skip), `go vet`/`gofmt` clean.
+- Updated `SYSTEM.md` (§2 Server management table, §3 phase status, §12 capability
+  list), `API.md` (new endpoint table rows + detail sections, `cron.*` capability
+  reference), and `SERVERAVATAR_PARITY.md` (SRV-005 promoted from the `NOT_STARTED`
+  summary table to a full `COMPLETE` detail block, including the known-differences this
+  pass deliberately left for later: no per-org/per-user resource ownership yet — see
+  ORG-001 — so cron's "session without access" boundary is today's single-user auth
+  model, same as every other endpoint; cron entries aren't persisted locally, so the job
+  list is unavailable while an agent is offline; no per-job execution history/output
+  log; day-of-week accepts numeric values only, not three-letter names).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

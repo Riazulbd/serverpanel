@@ -80,7 +80,9 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | SSH/SFTP management, SSH-key mgmt, port mgmt, root-login controls | ⬜ Phase 2 |
 | Automatic security updates | ⬜ Phase 2 (`unattended-upgrades` integration) |
 | Service controls | ✅ `service.control`, allow-listed units/actions only |
-| Cron-job management | ⬜ Phase 2 |
+| Cron-job management | ✅ `cron.list/create/update/delete/set_enabled`, edits the site's real
+  crontab (marker-tagged entries, foreign lines preserved); no per-job output/history
+  log yet — see `SERVERAVATAR_PARITY.md` SRV-005 |
 | Process/worker management | ⬜ Phase 2 |
 | Disk-usage analysis, safe cleanup | ⬜ not started |
 | Server diagnostics | 🚧 `diagnostics.basic` (read-only service-state check); no
@@ -169,9 +171,11 @@ is the condensed status:
   and agent cert auto-rotation. Not "GA-ready" yet, but the architecture and security
   primitives it depends on (mTLS, allow-listed capabilities, per-app isolation, audit
   log) are real and proven, not stubs.
-- **Phase 2 — professional server management:** not started. Git deployment,
-  cron/process management, SSH/firewall management UI, remote backups, cross-server
-  migration all remain ⬜.
+- **Phase 2 — professional server management:** mostly not started. Cron job
+  management landed out of order (`SERVERAVATAR_PARITY.md` SRV-005) since it was
+  fully self-contained and didn't touch the mTLS/agent-registration trust core; Git
+  deployment, process management, SSH/firewall management UI, remote backups,
+  cross-server migration all remain ⬜.
 - **Phase 3 — commercial platform:** not started.
 
 ## 4. System architecture
@@ -297,8 +301,9 @@ Current capability list: `system.ping`, `service.control`, `diagnostics.basic`,
 `stack.install`, `site.create`, `site.set_php_version`, `site.set_status`,
 `app.wordpress_install`, `ssl.issue_letsencrypt`, `ssl.install_custom`, `db.create`,
 `db.delete`, `db.list`, `file.list`, `file.read`, `file.write`, `file.delete`,
-`backup.run`, `backup.restore`, `logs.tail`. Notably absent (by design, until reviewed
-and added): `git.deploy`, `cron.upsert`, `ssh.*`, `firewall.*`, `agent.self_update`.
+`backup.run`, `backup.restore`, `logs.tail`, `cron.list`, `cron.create`,
+`cron.update`, `cron.delete`, `cron.set_enabled`. Notably absent (by design, until
+reviewed and added): `git.deploy`, `ssh.*`, `firewall.*`, `agent.self_update`.
 
 ## 13. Installation and deployment
 

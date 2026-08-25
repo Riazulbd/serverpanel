@@ -46,6 +46,12 @@ protected route; there is no route that skips it by omission.
 | `GET` | `/api/v1/servers/{id}/sites/{siteId}/backups` | List backups for a site, newest first |
 | `POST` | `/api/v1/servers/{id}/sites/{siteId}/backups` | Dispatch `backup.run` and persist the resulting backup record |
 | `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a previously recorded backup |
+| `GET` | `/api/v1/servers/{id}/sites/{siteId}/cron` | Dispatch `cron.list`: live cron entries for the site's system user |
+| `POST` | `/api/v1/servers/{id}/sites/{siteId}/cron` | Dispatch `cron.create`: add a cron entry |
+| `PUT` | `/api/v1/servers/{id}/sites/{siteId}/cron/{cronId}` | Dispatch `cron.update`: change an entry's schedule/command/label |
+| `DELETE` | `/api/v1/servers/{id}/sites/{siteId}/cron/{cronId}` | Dispatch `cron.delete`: remove an entry |
+| `POST` | `/api/v1/servers/{id}/sites/{siteId}/cron/{cronId}/enable` | Dispatch `cron.set_enabled` (`true`) |
+| `POST` | `/api/v1/servers/{id}/sites/{siteId}/cron/{cronId}/disable` | Dispatch `cron.set_enabled` (`false`) |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -137,6 +143,51 @@ isn't connected; `422` if `backup.restore` itself failed on the agent (the agent
 error message explains why, and any checkpoint already taken is named in it so it's
 never a silent loss).
 
+### `GET /api/v1/servers/{id}/sites/{siteId}/cron`
+Dispatches `cron.list` (30s timeout) and returns whatever the site's system user's
+real crontab currently holds — there is no local cache, so this call requires the
+server's agent to be connected. → `200` with an array of cron-entry JSON objects
+(`id`, `label`, `schedule`, `command`, `enabled`). `404` if the site doesn't exist on
+that server; `502` if the agent isn't connected; `422` if `cron.list` itself failed.
+
+### `POST /api/v1/servers/{id}/sites/{siteId}/cron`
+```json
+{"schedule_preset": "daily", "command": "/usr/bin/php /home/sites/site_x/artisan schedule:run", "label": "Laravel scheduler", "enabled": true}
+```
+Either `schedule_preset` (one of `every_minute`, `hourly`, `daily`, `weekly`,
+`monthly`) or a raw `schedule` (standard 5-field cron expression) is required — if
+both are omitted, or `schedule_preset` names an unknown preset, or `command` is
+missing, this is rejected with `400` before anything is dispatched. `label` and
+`enabled` are optional (`enabled` defaults to `true`). The system user the entry is
+created for is always the resolved site's own `system_user` — never a client-supplied
+value, so a caller cannot target another site's or another user's crontab. Dispatches
+`cron.create` (30s timeout); the agent independently re-validates the resolved
+schedule and the command/label text (crontab-line-injection guards — see
+`SYSTEM.md`/`SERVERAVATAR_PARITY.md` SRV-005), so a request that gets past this
+endpoint's presence checks can still be rejected agent-side (`422`) by that deeper
+validation. → `201` with the created cron-entry JSON (including the agent-generated
+`id`). `404` if the site doesn't exist on that server; `502` if the agent isn't
+connected.
+
+### `PUT /api/v1/servers/{id}/sites/{siteId}/cron/{cronId}`
+Same body shape as create (`schedule_preset`/`schedule`, `command`, `label`); replaces
+those fields on the named entry without changing its enabled state (use the
+enable/disable endpoints for that). → `200` with the updated cron-entry JSON. `400` for
+missing/invalid schedule or command; `404` if the site doesn't exist on that server;
+`422` if the agent reports the entry `id` doesn't exist in that user's crontab.
+
+### `DELETE /api/v1/servers/{id}/sites/{siteId}/cron/{cronId}`
+No request body. → `200 {"status": "deleted"}`. `404` if the site doesn't exist on
+that server; `422` if the agent reports the entry `id` doesn't exist.
+
+### `POST /api/v1/servers/{id}/sites/{siteId}/cron/{cronId}/enable` / `.../disable`
+No request body — the target state is fixed by which of the two routes is called, not
+read from the body. Disabling comments out the entry's schedule/command line in the
+real crontab (cron never runs it) while preserving the exact command, rather than
+deleting it — re-enabling restores it byte-for-byte. → `200` with the updated
+cron-entry JSON. `404` if the site doesn't exist on that server; `422` if the agent
+reports the entry `id` doesn't exist.
+
 ### `POST /agents/register`
 ```json
 {"token": "<bootstrap token>", "csr_pem": "<PEM-encoded CSR>"}
@@ -178,7 +229,32 @@ The full allow-listed capability names `packages/capabilities.Default()` registe
 `diagnostics.basic`, `stack.install`, `site.create`, `site.set_php_version`,
 `site.set_status`, `app.wordpress_install`, `ssl.issue_letsencrypt`,
 `ssl.install_custom`, `db.create`, `db.delete`, `db.list`, `file.list`, `file.read`,
-`file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`.
+`file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`, `cron.list`,
+`cron.create`, `cron.update`, `cron.delete`, `cron.set_enabled`.
+
+### `cron.list` / `cron.create` / `cron.update` / `cron.delete` / `cron.set_enabled`
+All five take `system_user` (the site's own isolated system user — supplied by the
+control plane from its stored site record, never accepted from an unauthenticated
+client). `cron.list` takes nothing else and returns a JSON array of entries.
+`cron.create` additionally takes `schedule` (a standard 5-field cron expression,
+already resolved from any preset by the control plane), `command`, and optionally
+`label`/`enabled` (default `true`); returns the created entry, including its
+agent-generated `id`. `cron.update` takes `id`, `schedule`, `command`, `label` and
+replaces those fields on the matching entry (its `enabled` state is untouched — that's
+`cron.set_enabled`'s job). `cron.delete` takes `id`. `cron.set_enabled` takes `id` and
+a boolean `enabled`. Every one of these reads the target user's crontab
+(`crontab -u <user> -l`), applies the change to a parsed in-memory document that
+preserves any other content in that crontab byte-for-byte, then writes the whole
+document back (`crontab -u <user> -`) — never a blind append or in-place string edit.
+`schedule` is validated field-by-field (5 fields, each within its numeric range);
+`command`/`label` reject embedded newlines/carriage-returns/NUL bytes and an
+unescaped `%` — the specific ways a caller-supplied string could otherwise break out
+of its single crontab line into a forged, arbitrarily-scheduled entry (this is *not* a
+shell-metacharacter blocklist: a cron command is handed to the user's shell by cron
+itself, so `;`/`|`/`&&`/backticks are ordinary, expected cron usage). An entry that's
+disabled keeps its exact schedule/command as a commented-out line rather than being
+deleted, so re-enabling it is lossless. See `SERVERAVATAR_PARITY.md` SRV-005 for the
+full design rationale and test coverage.
 
 ### `backup.restore`
 ```json
