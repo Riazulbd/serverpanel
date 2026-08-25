@@ -51,7 +51,7 @@ func main() {
 
 	backoff := time.Second
 	for {
-		err := runConnection(ctx, id, reg)
+		err := runConnection(ctx, id, reg, *dataDir)
 		if ctx.Err() != nil {
 			log.Println("shutting down")
 			return

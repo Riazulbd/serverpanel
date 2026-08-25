@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -29,11 +30,12 @@ type gateway struct {
 }
 
 type agentSession struct {
-	serverID string
-	conn     net.Conn
-	enc      *json.Encoder
-	mu       sync.Mutex // guards writes to enc
-	pending  map[string]chan proto.TaskEvent
+	serverID   string
+	certSerial string
+	conn       net.Conn
+	enc        *json.Encoder
+	mu         sync.Mutex // guards writes to enc
+	pending    map[string]chan proto.TaskEvent
 }
 
 func newGateway(ca *agentCA, st *store) *gateway {
@@ -41,13 +43,26 @@ func newGateway(ca *agentCA, st *store) *gateway {
 }
 
 func (g *gateway) listenAndServe(addr string) error {
-	certPEM, keyPEM, err := g.ca.signServerCert([]string{"localhost", "127.0.0.1", "serverpanel-gateway"})
+	ln, err := g.newTLSListener(addr)
 	if err != nil {
 		return err
 	}
+	log.Printf("agent gateway (mTLS) listening on %s", ln.Addr())
+	return g.serve(ln)
+}
+
+// newTLSListener builds the mTLS listener config (server cert, required
+// client-cert verification against our CA) and binds it. Split out from
+// listenAndServe so tests can bind an ephemeral port (":0") and learn the
+// actual address before serving.
+func (g *gateway) newTLSListener(addr string) (net.Listener, error) {
+	certPEM, keyPEM, err := g.ca.signServerCert([]string{"localhost", "127.0.0.1", "serverpanel-gateway"})
+	if err != nil {
+		return nil, err
+	}
 	cert, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	cfg := &tls.Config{
@@ -57,15 +72,19 @@ func (g *gateway) listenAndServe(addr string) error {
 		MinVersion:   tls.VersionTLS13,
 	}
 
-	ln, err := tls.Listen("tcp", addr, cfg)
-	if err != nil {
-		return err
-	}
-	log.Printf("agent gateway (mTLS) listening on %s", addr)
+	return tls.Listen("tcp", addr, cfg)
+}
 
+func (g *gateway) serve(ln net.Listener) error {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				// The listener was deliberately closed (e.g. test teardown
+				// via ln.Close()) — stop instead of busy-looping on the same
+				// error forever.
+				return err
+			}
 			log.Printf("gateway accept error: %v", err)
 			continue
 		}
@@ -106,10 +125,11 @@ func (g *gateway) handleConn(conn net.Conn) {
 	}
 
 	sess := &agentSession{
-		serverID: serverID,
-		conn:     conn,
-		enc:      json.NewEncoder(conn),
-		pending:  map[string]chan proto.TaskEvent{},
+		serverID:   serverID,
+		certSerial: serial,
+		conn:       conn,
+		enc:        json.NewEncoder(conn),
+		pending:    map[string]chan proto.TaskEvent{},
 	}
 
 	g.mu.Lock()
@@ -173,7 +193,46 @@ func (g *gateway) handleConn(conn net.Conn) {
 					}
 				}
 			}
+		case proto.MsgRenewCert:
+			if env.RenewCert != nil {
+				g.handleRenewCert(sess, serverID, env.RenewCert.CSRPEM)
+			}
 		}
+	}
+}
+
+// handleRenewCert signs a fresh 30-day certificate for an already-connected,
+// already-authenticated agent (identity comes from serverID, established by
+// the mTLS handshake at the top of handleConn, never from anything in the
+// request itself) and reports the result back over the same session. This
+// is what lets an agent's certificate roll over indefinitely without a
+// human ever re-running the installer — see docs/security-trust-model.md §2.
+func (g *gateway) handleRenewCert(sess *agentSession, serverID, csrPEM string) {
+	result := proto.RenewCertResult{}
+
+	if g.store.isRevoked(sess.certSerial) {
+		// Defense in depth: a session using a since-revoked certificate
+		// should already have been dropped by forceDisconnect, but never
+		// let a race hand out a fresh certificate to a revoked identity.
+		result.Error = "certificate has been revoked"
+	} else {
+		certPEM, serial, err := g.ca.signAgentCSR([]byte(csrPEM), serverID, 30*24*time.Hour)
+		if err != nil {
+			result.Error = err.Error()
+			g.store.log(serverID, "", "agent.cert_renewal_failed", err.Error())
+		} else {
+			result.OK = true
+			result.CertPEM = string(certPEM)
+			result.Serial = serial.String()
+			g.store.recordCertRenewal(serverID, serial.String())
+		}
+	}
+
+	sess.mu.Lock()
+	err := sess.enc.Encode(proto.Envelope{Type: proto.MsgRenewCertResult, RenewCertResult: &result})
+	sess.mu.Unlock()
+	if err != nil {
+		log.Printf("failed to send renew_cert_result to server_id=%s: %v", serverID, err)
 	}
 }
 

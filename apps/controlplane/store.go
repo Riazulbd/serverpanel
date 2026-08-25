@@ -168,8 +168,30 @@ func (s *store) revokeToken(serverID, actor string) {
 }
 
 func (s *store) markIssuedCert(serverID, serial string) {
+	s.recordCertHistory(serverID, serial)
 	s.db.Exec(`UPDATE servers SET cert_serial = ?, status = ? WHERE id = ?`, serial, string(statusOffline), serverID)
 	s.log(serverID, "", "agent.registered", fmt.Sprintf("cert_serial=%s", serial))
+}
+
+// recordCertRenewal updates the server's current cert_serial after an
+// in-band renewal requested over an already-open, already-authenticated
+// gateway session (see gateway.go handleRenewCert). Unlike markIssuedCert,
+// it never touches status: the agent renewing is by definition currently
+// connected, and a renewal must not appear as a fresh registration in the
+// audit log.
+func (s *store) recordCertRenewal(serverID, serial string) {
+	s.recordCertHistory(serverID, serial)
+	s.db.Exec(`UPDATE servers SET cert_serial = ? WHERE id = ?`, serial, serverID)
+	s.log(serverID, "", "agent.cert_renewed", fmt.Sprintf("new_cert_serial=%s", serial))
+}
+
+// recordCertHistory appends serial to the durable per-server history of
+// every certificate ever issued to it, consulted by revokeServer below.
+func (s *store) recordCertHistory(serverID, serial string) {
+	s.db.Exec(
+		`INSERT OR IGNORE INTO agent_cert_history (server_id, serial, issued_at) VALUES (?, ?, ?)`,
+		serverID, serial, time.Now().UTC().Format(time.RFC3339Nano),
+	)
 }
 
 func (s *store) isRevoked(serial string) bool {
@@ -178,28 +200,59 @@ func (s *store) isRevoked(serial string) bool {
 	return n > 0
 }
 
-// revokeServer revokes the server's issued certificate and marks it
-// disconnected. Re-connecting requires a brand new bootstrap token —
-// there is no path back to trust from a revoked certificate.
+// revokeServer revokes every certificate ever issued to this server
+// (initial registration plus any subsequent renewals — see
+// recordCertHistory) and marks it disconnected. Re-connecting requires a
+// brand new bootstrap token — there is no path back to trust from a
+// revoked certificate, old or new.
 func (s *store) revokeServer(serverID, actor string) error {
 	rec, ok := s.get(serverID)
 	if !ok {
 		return fmt.Errorf("server not found")
 	}
-	if rec.CertSerial != "" {
-		_, err := s.db.Exec(
+
+	serials, err := s.certHistory(serverID)
+	if err != nil {
+		return err
+	}
+	// Servers registered before agent_cert_history existed have no rows
+	// there; fall back to the single serial still recorded on servers.
+	if len(serials) == 0 && rec.CertSerial != "" {
+		serials = []string{rec.CertSerial}
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	for _, serial := range serials {
+		if _, err := s.db.Exec(
 			`INSERT OR REPLACE INTO revoked_certs (serial, server_id, revoked_at) VALUES (?, ?, ?)`,
-			rec.CertSerial, serverID, time.Now().UTC().Format(time.RFC3339Nano),
-		)
-		if err != nil {
+			serial, serverID, now,
+		); err != nil {
 			return err
 		}
 	}
+
 	if _, err := s.db.Exec(`UPDATE servers SET status = ? WHERE id = ?`, string(statusDisconnected), serverID); err != nil {
 		return err
 	}
-	s.log(serverID, actor, "agent.revoked", fmt.Sprintf("cert_serial=%s", rec.CertSerial))
+	s.log(serverID, actor, "agent.revoked", fmt.Sprintf("cert_serials=%v", serials))
 	return nil
+}
+
+func (s *store) certHistory(serverID string) ([]string, error) {
+	rows, err := s.db.Query(`SELECT serial FROM agent_cert_history WHERE server_id = ?`, serverID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var serials []string
+	for rows.Next() {
+		var serial string
+		if err := rows.Scan(&serial); err != nil {
+			return nil, err
+		}
+		serials = append(serials, serial)
+	}
+	return serials, rows.Err()
 }
 
 func (s *store) setConnected(serverID string, connected bool) {

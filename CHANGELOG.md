@@ -2,6 +2,43 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-25 — Agent certificate auto-renewal
+
+- **Implemented in-band agent certificate auto-renewal**, closing a real production
+  correctness gap: client certificates were issued with a fixed 30-day TTL and had no
+  renewal path at all — every deployed agent would have silently lost connectivity a
+  month after registration, recoverable only by a human re-running the installer with a
+  fresh bootstrap token. Now the agent checks its current certificate's remaining
+  lifetime every 6 hours and, once fewer than 10 days remain, requests a fresh one over
+  its already-open, already-mTLS-authenticated gateway session — no bootstrap token, no
+  human involvement, unless a renewal window is missed entirely (agent offline past its
+  cert's expiry), which still fails closed into the existing manual re-registration
+  flow.
+- New wire protocol messages `renew_cert`/`renew_cert_result` (`packages/proto`);
+  `gateway.handleRenewCert` signs the fresh certificate for the connection's
+  already-authenticated `server_id` (never trusting the CSR's own claims) and refuses a
+  session using an already-revoked certificate, as defense in depth beyond the existing
+  force-disconnect-on-revoke path. The agent verifies a renewed cert/key form a valid
+  pair before atomically replacing the on-disk identity, keeping the previous pair as
+  `.bak` rather than deleting it.
+- **Revocation now covers every certificate ever issued to a server, not just the
+  current one**: a new `agent_cert_history` table records each serial at issuance
+  (registration and every renewal), and `revokeServer` revokes all of them. Previously,
+  revoking a server shortly after a renewal would have left the superseded-but-not-yet-
+  expired earlier certificate still trusted for the rest of its natural lifetime.
+- Fixed a latent bug in `gateway.serve`'s accept loop, found while writing the first
+  test that ever closes a gateway listener: it never distinguished a deliberately closed
+  listener from a transient accept error, so it would have busy-looped logging forever
+  instead of returning.
+- Added a real-mTLS-connection test suite (`apps/controlplane/gateway_test.go`) that
+  dials the actual `tls.Listen`er with a real client certificate and drives the full
+  renewal round trip end to end, plus a revoked-session-refused case; two new
+  store-level tests (`TestRevokeServerRevokesEveryRenewedSerial`,
+  `TestRecordCertRenewalDoesNotResetStatus`). 65 tests total, all passing, `go vet` and
+  `gofmt` clean, no `-race` failures.
+- Updated `SECURITY.md` §2, `API.md` §3, `SYSTEM.md`, and
+  `SERVERAVATAR_PARITY.md` (SRV-001) to reflect the change.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

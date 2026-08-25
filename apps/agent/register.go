@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/json"
@@ -128,4 +129,36 @@ func register(apiAddr, token, dataDir string) (*identity, error) {
 	}
 
 	return &identity{ServerID: rr.ServerID, CertPEM: []byte(rr.CertPEM), KeyPEM: keyPEM, CAPEM: []byte(rr.CAPEM), GatewayAddr: rr.GatewayAddr}, nil
+}
+
+// persistRenewedCert atomically replaces the on-disk cert/key pair after a
+// successful in-band renewal (see connect.go certRenewalLoop). The previous
+// pair is preserved as .bak rather than deleted: the two renames below can't
+// be made a single atomic operation, so a crash in the narrow window between
+// them would otherwise leave a mismatched cert/key pair with no way back
+// short of re-registering with a brand new bootstrap token.
+func persistRenewedCert(dataDir string, certPEM, keyPEM []byte) error {
+	if _, err := tls.X509KeyPair(certPEM, keyPEM); err != nil {
+		return fmt.Errorf("renewed cert/key do not form a valid pair: %w", err)
+	}
+	certPath, keyPath, _, _ := identityPaths(dataDir)
+
+	os.Rename(keyPath, keyPath+".bak")
+	os.Rename(certPath, certPath+".bak")
+
+	if err := atomicWriteFile(keyPath, keyPEM, 0600); err != nil {
+		return err
+	}
+	if err := atomicWriteFile(certPath, certPEM, 0600); err != nil {
+		return err
+	}
+	return nil
+}
+
+func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, perm); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }

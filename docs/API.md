@@ -159,6 +159,8 @@ connection carries newline-delimited JSON `Envelope`s in both directions
 {"type": "heartbeat", "heartbeat": {"sent_at": "...", "uptime_secs": 0, "load_avg_1": 0, "mem_used_pct": 0, "disk_used_pct": 0}}
 {"type": "task", "task": {"id": "...", "capability": "...", "params": {}, "issued_at": "..."}}
 {"type": "task_event", "task_event": {"task_id": "...", "status": "queued|running|succeeded|failed|rejected", "message": "...", "detail": "...", "at": "..."}}
+{"type": "renew_cert", "renew_cert": {"csr_pem": "..."}}
+{"type": "renew_cert_result", "renew_cert_result": {"ok": true, "cert_pem": "...", "serial": "..."}}
 {"type": "ack"}
 ```
 
@@ -170,6 +172,16 @@ HTTP handler) until it sees a terminal event for the task ID it sent, or its con
 deadline expires. There is no message type for a free-form command — `capability` must
 be a name in `packages/capabilities`'s fixed registry, or the agent returns `rejected`
 without executing anything.
+
+Independently of task dispatch, the agent may at any time send `renew_cert` to request
+a fresh client certificate ahead of its current one's 30-day expiry (`connect.go`
+`certRenewalLoop`, checked every 6h, triggered with 10 days left). The gateway signs a
+new certificate for the connection's already-mTLS-authenticated `server_id` — the CSR's
+own requested Subject is ignored — and replies with `renew_cert_result`
+(`gateway.go` `handleRenewCert`). A revoked-but-still-connected session is refused
+(`ok: false`) even though its handshake already succeeded, as defense in depth beyond
+the normal force-disconnect-on-revoke path. See `SECURITY.md` §2 for the full rationale
+and `apps/controlplane/gateway_test.go` for the real-mTLS-connection test coverage.
 
 ## 4. Capability reference
 

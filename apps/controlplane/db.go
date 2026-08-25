@@ -100,6 +100,18 @@ CREATE TABLE IF NOT EXISTS revoked_certs (
 	revoked_at TEXT NOT NULL
 );
 
+-- Every certificate serial ever issued to a server (initial registration
+-- plus every subsequent renewal), so revokeServer can revoke all of them —
+-- not just the one currently in servers.cert_serial. Without this, revoking
+-- a server shortly after a renewal would leave the superseded-but-not-yet-
+-- expired previous certificate still trusted by the gateway.
+CREATE TABLE IF NOT EXISTS agent_cert_history (
+	server_id TEXT NOT NULL REFERENCES servers(id),
+	serial    TEXT NOT NULL,
+	issued_at TEXT NOT NULL,
+	PRIMARY KEY (server_id, serial)
+);
+
 CREATE TABLE IF NOT EXISTS audit_log (
 	seq       INTEGER PRIMARY KEY AUTOINCREMENT,
 	at        TEXT NOT NULL,

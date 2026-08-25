@@ -40,19 +40,19 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Documentation page**: Server Management → "Installation (Direct Method)"
 - **Short description**: Connect a VPS to the control plane via a one-time install command.
 - **Expected behavior** (per ServerAvatar's documented workflow): operator creates a server record, gets an install command, runs it on a clean VPS, server appears connected.
-- **Our implementation**: bootstrap-token → mTLS client-certificate exchange (`POST /agents/register`); agent connects outbound to the gateway, no inbound port required.
+- **Our implementation**: bootstrap-token → mTLS client-certificate exchange (`POST /agents/register`); agent connects outbound to the gateway, no inbound port required. The issued certificate (30-day TTL) auto-renews in-band over the live session before expiry (`renew_cert`/`renew_cert_result`, `apps/agent/connect.go` `certRenewalLoop`, `apps/controlplane/gateway.go` `handleRenewCert`) — no human intervention or new bootstrap token needed unless a renewal window is missed entirely.
 - **Frontend**: `web/index.html` "+ New server" modal, server list/detail views.
 - **Backend service**: `apiServer.handleCreateServer`, `agentCA`, `gateway`.
-- **API endpoint(s)**: `POST /api/v1/servers`, `POST /agents/register`.
-- **Agent command**: n/a (registration precedes capability dispatch).
-- **DB tables**: `servers`, `bootstrap_tokens`, `revoked_certs`.
+- **API endpoint(s)**: `POST /api/v1/servers`, `POST /agents/register`; renewal is agent-gateway wire protocol, not HTTP — see `API.md` §3.
+- **Agent command**: n/a (registration precedes capability dispatch); renewal uses the same protocol channel as tasks, not a capability.
+- **DB tables**: `servers`, `bootstrap_tokens`, `revoked_certs`, `agent_cert_history` (every serial ever issued to a server, so revocation catches renewed-but-superseded certificates too, not just the current one).
 - **Required permission**: authenticated session (single-user model today — see ORG-001).
-- **Security considerations**: single-use/short-lived hashed bootstrap tokens; certificate identity independently derived from the mTLS handshake, never trusted from agent-asserted data; revocation checked every handshake.
-- **Test coverage**: `apps/controlplane/http_test.go` (`TestServerCreateListRevokeFlow`, `TestRegisterEndpointRejectsBadToken`), `apps/controlplane/store_test.go`.
+- **Security considerations**: single-use/short-lived hashed bootstrap tokens; certificate identity independently derived from the mTLS handshake, never trusted from agent-asserted data; revocation checked every handshake and covers the full per-server cert history; a session using an already-revoked certificate is refused renewal even if still connected (defense in depth beyond force-disconnect-on-revoke); the agent verifies a renewed cert/key form a valid pair before atomically replacing the on-disk identity, keeping the previous pair as `.bak`.
+- **Test coverage**: `apps/controlplane/http_test.go` (`TestServerCreateListRevokeFlow`, `TestRegisterEndpointRejectsBadToken`), `apps/controlplane/store_test.go` (including `TestRevokeServerRevokesEveryRenewedSerial`, `TestRecordCertRenewalDoesNotResetStatus`), `apps/controlplane/gateway_test.go` (real mTLS connection driving the full renewal round trip, and a revoked-session-refused case).
 - **Current status**: `COMPLETE`
-- **Completion date**: 2026-08-14
-- **Known differences**: no agent certificate auto-renewal before 30-day expiry yet.
-- **Reason**: scoped out of the initial secure-foundation pass; tracked in `SYSTEM.md` §21.
+- **Completion date**: 2026-08-25
+- **Known differences**: none material.
+- **Reason**: n/a.
 
 ### SRV-002 — Hosting stack installation (LEMP)
 - **Category**: Server Management
@@ -354,6 +354,12 @@ establish the tracking process and close the single highest-priority gap
 
 ## Change history
 
+- **2026-08-25**: SRV-001 updated — agent certificate auto-renewal (in-band, before the
+  30-day expiry, over the already-authenticated gateway session) implemented and tested
+  with a real mTLS connection, closing the "known difference" the prior entry flagged.
+  Revocation now covers every certificate ever issued to a server (new
+  `agent_cert_history` table), not just the currently active one. No count change in §3
+  (SRV-001 was already `COMPLETE`; this closes a gap noted within it).
 - **2026-08-17**: initial version. Established the tracking process; recorded
   SRV-001/002, APP-001/002, DB-001, ACC-001 (pre-existing work) at accurate status, and
   BAK-001/BAK-002 reflecting this session's backup-restore implementation. ~60

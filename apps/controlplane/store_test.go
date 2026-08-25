@@ -152,6 +152,61 @@ func TestRevokeServerBlocksReuseOfCertSerial(t *testing.T) {
 	}
 }
 
+func TestRevokeServerRevokesEveryRenewedSerial(t *testing.T) {
+	st := newTestStore(t)
+	id, _, err := st.createServer("web-renew", "", nil, time.Hour, "admin@example.com")
+	if err != nil {
+		t.Fatalf("createServer: %v", err)
+	}
+	st.markIssuedCert(id, "100")
+	st.recordCertRenewal(id, "101")
+	st.recordCertRenewal(id, "102")
+
+	for _, serial := range []string{"100", "101", "102"} {
+		if st.isRevoked(serial) {
+			t.Fatalf("serial %s should not be revoked before revokeServer", serial)
+		}
+	}
+	if err := st.revokeServer(id, "admin@example.com"); err != nil {
+		t.Fatalf("revokeServer: %v", err)
+	}
+	for _, serial := range []string{"100", "101", "102"} {
+		if !st.isRevoked(serial) {
+			t.Fatalf("serial %s (issued=100, renewed to 101 then 102) should be revoked after revokeServer", serial)
+		}
+	}
+	rec, ok := st.get(id)
+	if !ok {
+		t.Fatal("server should still exist after revocation")
+	}
+	if rec.CertSerial != "102" {
+		t.Fatalf("cert_serial after two renewals = %q, want %q", rec.CertSerial, "102")
+	}
+}
+
+func TestRecordCertRenewalDoesNotResetStatus(t *testing.T) {
+	st := newTestStore(t)
+	id, _, err := st.createServer("web-renew-2", "", nil, time.Hour, "admin@example.com")
+	if err != nil {
+		t.Fatalf("createServer: %v", err)
+	}
+	st.markIssuedCert(id, "1")
+	st.setConnected(id, true)
+
+	st.recordCertRenewal(id, "2")
+
+	rec, ok := st.get(id)
+	if !ok {
+		t.Fatal("server should exist")
+	}
+	if rec.Status != statusConnected {
+		t.Fatalf("status after renewal = %q, want %q (renewal must not look like a fresh registration)", rec.Status, statusConnected)
+	}
+	if rec.CertSerial != "2" {
+		t.Fatalf("cert_serial = %q, want %q", rec.CertSerial, "2")
+	}
+}
+
 func TestRevokeServerRejectsUnknownServer(t *testing.T) {
 	st := newTestStore(t)
 	if err := st.revokeServer("srv_doesnotexist", "admin@example.com"); err == nil {
