@@ -2,6 +2,43 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-25 — Database management: control-plane persistence + dashboard UI
+
+- Closed the gap flagged as "good candidate for next iteration" in DB-001's parity
+  entry: databases created via `db.create` are now recorded in a durable `databases`
+  table (`server_id`, `site_id`, `name`, `owner_user`, `status`, `created_at`,
+  `UNIQUE(server_id, name)`) instead of only existing as an ephemeral task result,
+  mirroring the dispatch-then-persist-on-success pattern already used for sites and
+  backups.
+- New endpoints: `GET`/`POST /api/v1/servers/{id}/databases`,
+  `DELETE /api/v1/servers/{id}/databases/{databaseId}` (`apps/controlplane/databases.go`).
+  The owner password is generated server-side (24 random bytes, hex-encoded) — never
+  accepted from the client, never persisted, returned exactly once in the create
+  response (the same shown-once pattern the bootstrap-token install command already
+  uses) — and never written to the audit log, only the fact that a database/owner user
+  pair was created.
+- Fixed a real validation-ordering bug found while writing tests for this:
+  `handleDBDelete` (`packages/capabilities/db.go`) validated `owner_user` only *after*
+  already connecting to MariaDB and dropping the database, so a malformed
+  `owner_user` would leave the database deleted while only the user-cleanup step
+  failed. Moved the check up front, matching `handleDBCreate`'s validate-everything-first
+  pattern — no side effect now happens before all inputs are validated.
+- `db.create`'s capability-layer result changed from a human-readable string to JSON
+  (`{"name", "owner_user"}`), matching `site.create`/`backup.run`'s pattern so the
+  control plane can parse it instead of pattern-matching a message string.
+- Added a "Databases" panel to the server-detail dashboard view: a table (name, owner
+  user, status, created) with a "+ New database" modal that displays the generated
+  password once, and a delete button with a destructive-action confirmation dialog.
+- Added 9 new tests: capability-layer validation (`db.create`/`db.delete` identifier
+  and password-length checks — the `handleDBDelete` ordering fix above is covered by
+  `TestHandleDBDeleteRejectsInvalidOwnerUser`, which previously exercised a live
+  MariaDB dial and is now fast/hermetic), store-layer CRUD + per-server scoping +
+  duplicate-name rejection, and HTTP-layer validation/dispatch-ordering/409 tests.
+  Full suite: 71 test functions, `go vet`/`gofmt` clean.
+- Updated `API.md` (new endpoints + `db.create` capability reference),
+  `SERVERAVATAR_PARITY.md` (DB-001 moved from `PARTIAL` with a persistence gap to
+  `COMPLETE`), and `SYSTEM.md`.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

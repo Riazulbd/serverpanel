@@ -46,6 +46,9 @@ protected route; there is no route that skips it by omission.
 | `GET` | `/api/v1/servers/{id}/sites/{siteId}/backups` | List backups for a site, newest first |
 | `POST` | `/api/v1/servers/{id}/sites/{siteId}/backups` | Dispatch `backup.run` and persist the resulting backup record |
 | `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a previously recorded backup |
+| `GET` | `/api/v1/servers/{id}/databases` | List databases recorded for a server |
+| `POST` | `/api/v1/servers/{id}/databases` | Dispatch `db.create` and persist the resulting database record |
+| `DELETE` | `/api/v1/servers/{id}/databases/{databaseId}` | Dispatch `db.delete` and remove the database record |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -137,6 +140,36 @@ isn't connected; `422` if `backup.restore` itself failed on the agent (the agent
 error message explains why, and any checkpoint already taken is named in it so it's
 never a silent loss).
 
+### `POST /api/v1/servers/{id}/databases`
+```json
+{"name": "wp_example", "owner_user": "wp_example_user", "site_id": ""}
+```
+`name` and `owner_user` must each match `^[a-z][a-z0-9_]{0,30}$` (checked here for a
+fast `400`, and again — authoritatively — by the agent). `site_id` is optional; if
+given, it must name a site that exists on this server. The owner password is
+generated server-side (24 random bytes, hex-encoded) — it is never accepted from the
+client and never persisted; it is returned exactly once in the response, the same
+"shown once, never retrievable again" pattern `POST /api/v1/servers` uses for the
+bootstrap token. A second `POST` naming a database this control plane already has a
+record for on the same server → `409` (checked before dispatch, so it never silently
+hands back a second, different password for a database that already has one on
+record). Dispatches `db.create`, and only on the agent reporting success, persists a
+`databases` row. → `201 {"database": {...databaseRecord}, "owner_password": "..."}`.
+`404` if `site_id` doesn't exist on that server; `502` if the agent isn't connected;
+`422` if `db.create` itself failed on the agent.
+
+### `GET /api/v1/servers/{id}/databases`
+→ `200` with an array of `databaseRecord`, newest first.
+
+### `DELETE /api/v1/servers/{id}/databases/{databaseId}`
+No request body — the database's own recorded `name` and `owner_user` are read from
+the `databases` table and passed to `db.delete` verbatim; a caller can only ever
+delete a database that was actually created and recorded, never an arbitrary name.
+This is destructive (drops the live database and its owner user) — the dashboard
+requires an explicit confirmation before calling it. → `200 {"status": "deleted"}`.
+`404` if the database doesn't exist on that server; `502` if the agent isn't
+connected; `422` if `db.delete` itself failed on the agent.
+
 ### `POST /agents/register`
 ```json
 {"token": "<bootstrap token>", "csr_pem": "<PEM-encoded CSR>"}
@@ -179,6 +212,18 @@ The full allow-listed capability names `packages/capabilities.Default()` registe
 `site.set_status`, `app.wordpress_install`, `ssl.issue_letsencrypt`,
 `ssl.install_custom`, `db.create`, `db.delete`, `db.list`, `file.list`, `file.read`,
 `file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`.
+
+### `db.create`
+```json
+{"name": "wp_example", "owner_user": "wp_example_user", "owner_password": "<24+ random bytes, hex>"}
+```
+Creates a MariaDB/MySQL database and a least-privilege owner user granted access to
+only that database (never a global `GRANT ALL`). `name`/`owner_user` must each match
+`^[a-z][a-z0-9_]{0,30}$` (no placeholder syntax exists for SQL identifiers, so this
+allow-list is the injection defense — see `packages/capabilities/db.go`);
+`owner_password` must be at least 16 characters. Idempotent (`CREATE DATABASE/USER IF
+NOT EXISTS`). Returns `{"name", "owner_user"}` on success — deliberately never echoes
+the password back into a task result that ends up in the audit log.
 
 ### `backup.restore`
 ```json

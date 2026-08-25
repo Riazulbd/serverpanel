@@ -287,6 +287,108 @@ func TestCreateBackupRejectsInvalidScope(t *testing.T) {
 	}
 }
 
+func TestCreateDatabaseValidatesThenDispatches(t *testing.T) {
+	secureCookies = false
+	defer func() { secureCookies = true }()
+
+	a := newTestAPIServer(t)
+	h := a.routes()
+
+	doJSON(t, h, "POST", "/api/v1/auth/signup", map[string]string{
+		"Email": "dbops@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	rec := doJSON(t, h, "POST", "/api/v1/auth/login", map[string]string{
+		"Email": "dbops@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	cookie := sessionCookie(rec)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers", map[string]any{"Name": "web-11"}, cookie)
+	var created struct {
+		ServerID string `json:"server_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+
+	// Missing owner_user.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/databases",
+		map[string]any{"name": "wp_example"}, cookie)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("create database with no owner_user: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// Invalid identifier (uppercase not allowed).
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/databases",
+		map[string]any{"name": "Bad-Name", "owner_user": "owner"}, cookie)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("create database with invalid name: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// site_id that doesn't exist on this server.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/databases",
+		map[string]any{"name": "wp_example", "owner_user": "wp_owner", "site_id": "site_nonexistent"}, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("create database with unknown site_id: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// Well-formed request against a server with no connected agent must fail
+	// as a gateway/dispatch error, not a validation error — proving
+	// validation happens before dispatch, same as backups.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/databases",
+		map[string]any{"name": "wp_example", "owner_user": "wp_owner"}, cookie)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("create database with no agent connected: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// Listing must work (empty, since nothing actually got created without a
+	// connected agent) and must be scoped to the server.
+	rec = doJSON(t, h, "GET", "/api/v1/servers/"+created.ServerID+"/databases", nil, cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list databases: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var list []databaseRecord
+	json.Unmarshal(rec.Body.Bytes(), &list)
+	if len(list) != 0 {
+		t.Fatalf("expected no persisted databases (agent never connected), got %d", len(list))
+	}
+
+	// Deleting a database that was never recorded must 404.
+	rec = doJSON(t, h, "DELETE", "/api/v1/servers/"+created.ServerID+"/databases/db_nonexistent", nil, cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("delete nonexistent database: status = %d, want 404", rec.Code)
+	}
+}
+
+func TestCreateDatabaseRejectsDuplicateName(t *testing.T) {
+	secureCookies = false
+	defer func() { secureCookies = true }()
+
+	a := newTestAPIServer(t)
+	h := a.routes()
+
+	doJSON(t, h, "POST", "/api/v1/auth/signup", map[string]string{
+		"Email": "dbops2@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	rec := doJSON(t, h, "POST", "/api/v1/auth/login", map[string]string{
+		"Email": "dbops2@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	cookie := sessionCookie(rec)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers", map[string]any{"Name": "web-12"}, cookie)
+	var created struct {
+		ServerID string `json:"server_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+
+	if _, err := a.store.createDatabase(created.ServerID, "", "already_here", "owner1"); err != nil {
+		t.Fatalf("seed createDatabase: %v", err)
+	}
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/databases",
+		map[string]any{"name": "already_here", "owner_user": "owner2"}, cookie)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("create database with a name already recorded on this server: status = %d, want 409, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestRegisterEndpointRejectsBadToken(t *testing.T) {
 	a := newTestAPIServer(t)
 	h := a.routes()

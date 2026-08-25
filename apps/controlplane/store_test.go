@@ -297,3 +297,78 @@ func TestBackupCreateListGetRoundTrip(t *testing.T) {
 		t.Fatal("expected getBackup to refuse a backup ID under the wrong server")
 	}
 }
+
+func TestDatabaseCreateListGetDeleteRoundTrip(t *testing.T) {
+	st := newTestStore(t)
+	serverID, _, _ := st.createServer("web-9", "", nil, time.Hour, "admin@example.com")
+
+	rec, err := st.createDatabase(serverID, "", "wp_example", "wp_example_user")
+	if err != nil {
+		t.Fatalf("createDatabase: %v", err)
+	}
+	if rec.ID == "" || rec.Status != "active" {
+		t.Fatalf("unexpected database record: %+v", rec)
+	}
+
+	list := st.listDatabases(serverID)
+	if len(list) != 1 || list[0].Name != "wp_example" {
+		t.Fatalf("listDatabases = %+v, want one entry matching the created database", list)
+	}
+
+	got, ok := st.getDatabase(serverID, rec.ID)
+	if !ok || got.OwnerUser != "wp_example_user" {
+		t.Fatalf("getDatabase = %+v, fields don't round-trip", got)
+	}
+
+	byName, ok := st.getDatabaseByName(serverID, "wp_example")
+	if !ok || byName.ID != rec.ID {
+		t.Fatal("expected getDatabaseByName to find the created database")
+	}
+
+	otherServer, _, _ := st.createServer("web-10", "", nil, time.Hour, "admin@example.com")
+	if _, ok := st.getDatabase(otherServer, rec.ID); ok {
+		t.Fatal("expected getDatabase to refuse a database ID under the wrong server")
+	}
+	if _, ok := st.getDatabaseByName(otherServer, "wp_example"); ok {
+		t.Fatal("expected getDatabaseByName to be scoped per-server, not global")
+	}
+
+	if err := st.deleteDatabaseRecord(serverID, rec.ID); err != nil {
+		t.Fatalf("deleteDatabaseRecord: %v", err)
+	}
+	if len(st.listDatabases(serverID)) != 0 {
+		t.Fatal("expected database record to be gone after deleteDatabaseRecord")
+	}
+	if err := st.deleteDatabaseRecord(serverID, rec.ID); err == nil {
+		t.Fatal("expected deleting an already-deleted database record to fail")
+	}
+}
+
+func TestCreateDatabaseRejectsDuplicateNamePerServer(t *testing.T) {
+	st := newTestStore(t)
+	serverID, _, _ := st.createServer("web-11", "", nil, time.Hour, "admin@example.com")
+
+	if _, err := st.createDatabase(serverID, "", "shared_name", "owner_a"); err != nil {
+		t.Fatalf("createDatabase: %v", err)
+	}
+	if _, err := st.createDatabase(serverID, "", "shared_name", "owner_b"); err == nil {
+		t.Fatal("expected a second database with the same name on the same server to be rejected (UNIQUE(server_id, name))")
+	}
+}
+
+func TestGenerateSecretProducesDistinctHexValues(t *testing.T) {
+	a, err := generateSecret(24)
+	if err != nil {
+		t.Fatalf("generateSecret: %v", err)
+	}
+	b, err := generateSecret(24)
+	if err != nil {
+		t.Fatalf("generateSecret: %v", err)
+	}
+	if a == b {
+		t.Fatal("expected two independently generated secrets to differ")
+	}
+	if len(a) != 48 { // 24 bytes hex-encoded = 48 chars
+		t.Fatalf("len(secret) = %d, want 48", len(a))
+	}
+}

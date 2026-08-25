@@ -3,6 +3,7 @@ package capabilities
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"regexp"
 
@@ -15,6 +16,17 @@ import (
 // before backtick-quoting and interpolating, never to accept an arbitrary
 // string into a CREATE DATABASE/USER statement.
 var identifierRe = regexp.MustCompile(`^[a-z][a-z0-9_]{0,30}$`)
+
+// dbResult is what db.create returns as its TaskEvent detail (JSON) — the
+// control plane parses this to persist a databases record; see
+// apps/controlplane/databases.go handleCreateDatabase. It deliberately never
+// includes the owner password: db.create's params carry a control-plane
+// generated password in (never caller-visible after this call), and nothing
+// here echoes it back into a task result that ends up in the audit log.
+type dbResult struct {
+	Name      string `json:"name"`
+	OwnerUser string `json:"owner_user"`
+}
 
 func mariaDBConn() (*sql.DB, error) {
 	// Connects as root over the local Unix socket, matching MariaDB's
@@ -75,7 +87,8 @@ func handleDBCreate(ctx context.Context, params map[string]any, progress Progres
 		return "", fmt.Errorf("flush privileges: %w", err)
 	}
 
-	return fmt.Sprintf("database %q created, owned by user %q with grants scoped to that database only", name, owner), nil
+	out, _ := json.Marshal(dbResult{Name: name, OwnerUser: owner})
+	return string(out), nil
 }
 
 func handleDBDelete(ctx context.Context, params map[string]any, progress Progress) (string, error) {
@@ -83,6 +96,12 @@ func handleDBDelete(ctx context.Context, params map[string]any, progress Progres
 	owner, _ := params["owner_user"].(string)
 	if !identifierRe.MatchString(name) {
 		return "", fmt.Errorf("invalid database name %q", name)
+	}
+	// Validate owner_user up front too, before anything is dropped: a bad
+	// owner_user must never leave the database itself deleted while failing
+	// only on the user-cleanup step.
+	if owner != "" && !identifierRe.MatchString(owner) {
+		return "", fmt.Errorf("invalid owner_user %q", owner)
 	}
 
 	db, err := mariaDBConn()
@@ -95,9 +114,6 @@ func handleDBDelete(ctx context.Context, params map[string]any, progress Progres
 		return "", fmt.Errorf("drop database: %w", err)
 	}
 	if owner != "" {
-		if !identifierRe.MatchString(owner) {
-			return "", fmt.Errorf("invalid owner_user %q", owner)
-		}
 		db.ExecContext(ctx, fmt.Sprintf("DROP USER IF EXISTS `%s`@'localhost'", owner))
 	}
 	return fmt.Sprintf("database %q deleted", name), nil
