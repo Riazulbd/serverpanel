@@ -113,19 +113,19 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Category**: Database Management
 - **Documentation page**: Database Management → "Understanding Database Management"
 - **Short description**: Create a MySQL/MariaDB database with a least-privilege owner user.
-- **Our implementation**: `db.create`/`db.delete`/`db.list` — identifier allow-list regex, `CREATE USER`/`GRANT` scoped to exactly one database (never global), Unix-socket root auth (no stored MySQL root password on disk for this path).
-- **Frontend**: not yet surfaced as its own dashboard panel (capability exists and is dispatchable via generic task dispatch; no dedicated "Databases" tab yet).
-- **Backend service**: `gateway.dispatch` → `packages/capabilities.handleDBCreate/Delete/List`.
-- **API endpoint(s)**: `POST /api/v1/servers/{id}/tasks`.
-- **Agent command**: `db.create`, `db.delete`, `db.list`.
-- **DB tables**: none on the control-plane side yet (no `databases` table — see Known differences).
+- **Our implementation**: `db.create`/`db.delete`/`db.list` — identifier allow-list regex, `CREATE USER`/`GRANT` scoped to exactly one database (never global), Unix-socket root auth (no stored MySQL root password on disk for this path). `db.create`/`db.delete` now return structured JSON (`dbCreateResult`/`dbDeleteResult`) instead of a free-form message, matching `backup.run`/`backup.restore`'s pattern.
+- **Frontend**: server-detail "Databases" panel (mirrors "Sites"/"Backups") — "+ New database" modal (name + optional owner user), databases table, per-row "Delete" with confirmation. The generated owner password is shown exactly once in a "save these now" box after creation, never re-displayable.
+- **Backend service**: `apiServer.handleCreateDatabase/handleListDatabases/handleDeleteDatabase` (`apps/controlplane/databases.go`), dispatch-then-persist-on-success (same pattern as `handleCreateBackup`).
+- **API endpoint(s)**: `GET/POST /api/v1/servers/{id}/databases`, `DELETE /api/v1/servers/{id}/databases/{dbId}`.
+- **Agent command**: `db.create`, `db.delete`, `db.list` (`db.list` is not yet wired into the control-plane persistence layer — see Known differences).
+- **DB tables**: `databases` (`id`, `server_id`, `name`, `owner_user`, `status`, `created_at`) — deliberately no password column.
 - **Required permission**: authenticated session.
-- **Security considerations**: identifier allow-list (`^[a-z][a-z0-9_]{0,30}$`) prevents SQL-identifier injection where placeholders can't be used; grants are always single-database-scoped.
-- **Test coverage**: manually verified in a prior session against a real MariaDB; not covered by `go test` (requires a running MariaDB — this environment has none).
-- **Current status**: `PARTIAL`
-- **Completion date**: n/a
-- **Known differences**: MongoDB support, a dedicated dashboard UI, and control-plane persistence of database records (so they show up per-site the way backups now do) don't exist yet.
-- **Reason**: capability-layer work landed before the control-plane persistence/UI layer that backups just got (see BAK-001) — same pattern, not yet applied here. Good candidate for the next iteration.
+- **Security considerations**: identifier allow-list (`^[a-z][a-z0-9_]{0,30}$`, exported as `capabilities.ValidDBIdentifier`) is checked control-plane-side *and* independently re-checked agent-side, preventing SQL-identifier injection where placeholders can't be used; grants are always single-database-scoped; the owner password is generated server-side with `crypto/rand` (48 hex chars), returned to the caller exactly once in the create response, and never persisted or logged anywhere — same pattern as bootstrap tokens (see SRV-001).
+- **Test coverage**: `apps/controlplane/store_test.go` (`TestDatabaseCreateListGetDeleteRoundTrip` — create/list/get/delete round trip and cross-server-ID scoping, against a real SQLite file); `apps/controlplane/http_test.go` (`TestDatabaseEndpointsValidateBeforeDispatch` — invalid name/owner rejected before dispatch, no-agent-connected → `502` not `400`, delete of a nonexistent database → `404`); `packages/capabilities/db_test.go` (`TestValidDBIdentifier` and rejection tests for `handleDBCreate`/`handleDBDelete` on bad name/owner/password, which run without a live database). A real `CREATE DATABASE`/`CREATE USER`/`GRANT` round trip against live MariaDB is not exercised by `go test` in this environment (no MariaDB here) — manually verified against a real MariaDB in a prior session for the underlying capability logic; this session's new control-plane persistence/UI layer has not yet had that live round trip re-verified end-to-end (`BLOCKED_EXTERNAL` for that specific check — see §4).
+- **Current status**: `COMPLETE` (control-plane persistence + dashboard UI, validated at every layer `go test` can reach in this environment); the live-MariaDB end-to-end create/delete round trip through the new endpoints specifically is `BLOCKED_EXTERNAL`.
+- **Completion date**: 2026-08-25 (control-plane persistence + UI layer; the underlying `db.create`/`db.delete` capability logic was already manually verified against live MariaDB in a prior session).
+- **Known differences**: MongoDB support and a dedicated phpMyAdmin/DB-admin-UI integration don't exist yet (see DB-002/DB-003 below); `db.list` (reconciliation against what MariaDB actually has) is not wired into the control plane — the `databases` table is the source of truth for what this control plane believes exists, and could drift from reality if a database were created/dropped outside this system.
+- **Reason**: MongoDB/phpMyAdmin are explicitly later Phase 2/3 items (`product-plan.md` §9); `db.list` reconciliation is a good candidate for a future consistency-check/repair pass, not required for the create/delete/persist workflow to be complete.
 
 ### BAK-001 — On-demand backup (files/db/full)
 - **Category**: Backups
@@ -261,7 +261,7 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | DB-002 | MongoDB support | `NOT_STARTED` | |
 | DB-003 | phpMyAdmin / DB admin UI integration | `NOT_STARTED` | |
 | DB-004 | Database process/query monitoring | `NOT_STARTED` | |
-| DB-005 | Control-plane persistence + dashboard UI for databases (mirroring what BAK-001 just got) | `NOT_STARTED` | See DB-001's "Known differences" |
+| DB-005 | Control-plane persistence + dashboard UI for databases (mirroring what BAK-001 got) | `COMPLETE` | Folded into DB-001's detail block above — see §1 |
 
 ### WordPress Toolkit (WP-*)
 | ID | Feature | Status |
@@ -295,9 +295,9 @@ capability surface (per task-brief §3/§101), not just what's already built.
 
 | Status | Count (detailed entries) | Count (summary-table rows) |
 |---|---|---|
-| `COMPLETE` | 3 (SRV-001, BAK-002, ACC-001) | 1 (PROV-006) |
-| `PARTIAL` | 3 (SRV-002, APP-001, APP-002, DB-001, BAK-001 — 5 total, see note) | 6 |
-| `NOT_STARTED` | 0 | ~55 |
+| `COMPLETE` | 4 (SRV-001, BAK-002, ACC-001, DB-001) | 2 (PROV-006, DB-005) |
+| `PARTIAL` | 4 (SRV-002, APP-001, APP-002, BAK-001 — see note) | 5 |
+| `NOT_STARTED` | 0 | ~54 |
 | `BLOCKED_EXTERNAL` | 0 (sub-scoped within BAK-001/BAK-002's db/full-scope MariaDB verification) | 0 |
 | `INTENTIONALLY_NOT_APPLICABLE` | 0 | 1 |
 
@@ -315,12 +315,25 @@ and `product-plan.md` for the estimates behind it.
 
 No feature is currently blocked *purely* on missing external credentials in a way that
 would justify a top-level `BLOCKED_EXTERNAL` status (the sub-scoped MariaDB gap in
-BAK-001/BAK-002 is an environment limitation of *this* session, not a missing
+BAK-001/BAK-002/DB-001 is an environment limitation of *this* session, not a missing
 credential — a real Ubuntu host with MariaDB installed, per `INSTALLATION.md`, resolves
 it without any external account). This section will be populated as provider
 integrations (Cloudflare, cloud storage, cloud compute, payment processors) are
 implemented and reach the point where only real credentials stand between "implemented"
 and "verified end-to-end."
+
+- **DB-001** (sub-scope: live-MariaDB verification of the new `databases` control-plane
+  persistence/UI layer specifically): what's implemented — `POST/GET
+  /api/v1/servers/{id}/databases` and `DELETE .../{dbId}`, dispatch-then-persist,
+  generated-once owner password, dashboard panel. What's already tested — every
+  validation/persistence/scoping path `go test` can reach without a live database (see
+  DB-001's Test coverage above), plus the underlying `db.create`/`db.delete` SQL logic
+  against real MariaDB in a prior session (pre-dating this specific endpoint layer).
+  What's still needed — one end-to-end run of `POST .../databases` against a connected
+  agent on a real Ubuntu host with MariaDB installed, confirming the created database/
+  user/grants actually exist and the returned password authenticates, per
+  `INSTALLATION.md`'s real-install test procedure. No external account/credential is
+  needed for this, only a real Linux host — this environment has none.
 
 ## 5. INTENTIONALLY_NOT_APPLICABLE detail
 
@@ -354,6 +367,14 @@ establish the tracking process and close the single highest-priority gap
 
 ## Change history
 
+- **2026-08-25**: DB-001/DB-005 — added control-plane persistence (`databases` table)
+  and a dashboard "Databases" panel (create/list/delete) for `db.create`/`db.delete`,
+  which previously only existed as agent-side capabilities with no durable record or
+  UI (the gap DB-001 itself had flagged as "good candidate for the next iteration").
+  Exported `capabilities.ValidDBIdentifier` so the control plane can validate before
+  dispatch instead of duplicating the regex. Added `packages/capabilities/db_test.go`
+  and two new `apps/controlplane` tests. DB-001 moves `PARTIAL` → `COMPLETE`; DB-005
+  moves `NOT_STARTED` → `COMPLETE`.
 - **2026-08-17**: initial version. Established the tracking process; recorded
   SRV-001/002, APP-001/002, DB-001, ACC-001 (pre-existing work) at accurate status, and
   BAK-001/BAK-002 reflecting this session's backup-restore implementation. ~60

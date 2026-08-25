@@ -2,6 +2,39 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-25 — Database control-plane persistence and dashboard UI
+
+- **Closed the DB-001 gap flagged in the previous entry's parity matrix**: `db.create`/
+  `db.delete` (`packages/capabilities/db.go`) now return structured JSON results
+  (`dbCreateResult`/`dbDeleteResult`, mirroring `backupResult`) instead of a free-form
+  message string, and the identifier allow-list regex is exported as
+  `capabilities.ValidDBIdentifier` so the control plane can validate a name/owner
+  before ever dispatching a task, the same defense-in-depth pattern used everywhere
+  else in this codebase.
+- Wired databases into the control plane end-to-end: a new `databases` table
+  (`id`, `server_id`, `name`, `owner_user`, `status`, `created_at` — deliberately no
+  password column), `store.go` methods (`createDatabaseRecord`/`listDatabases`/
+  `getDatabase`/`deleteDatabaseRecord`, each scoped by server ID), three new endpoints
+  (`GET`/`POST /api/v1/servers/{id}/databases`, `DELETE
+  /api/v1/servers/{id}/databases/{dbId}`), and a "Databases" panel per server in the
+  dashboard (create-database modal, a databases table, per-row delete with a
+  destructive-action confirmation dialog).
+- The owner password is generated control-plane-side with `crypto/rand` (48 hex
+  characters) at creation time, sent to the agent to set as the MySQL user's password,
+  and returned to the caller exactly once in the `201` response — it is never written
+  to the `databases` table or logged anywhere, the same "shown once, never stored"
+  pattern already used for bootstrap tokens.
+- Added 8 new capability-layer tests (`packages/capabilities/db_test.go`: identifier
+  validation, and rejection of invalid name/owner/password for `handleDBCreate`/
+  `handleDBDelete` — all runnable without a live MariaDB) and 2 new control-plane
+  tests (`TestDatabaseCreateListGetDeleteRoundTrip`, `TestDatabaseEndpointsValidateBeforeDispatch`).
+  Full suite passes, `go vet`/`gofmt` clean.
+- Updated `SYSTEM.md`, `API.md`, and `SERVERAVATAR_PARITY.md` (DB-001 moves
+  `PARTIAL` → `COMPLETE`; DB-005 moves `NOT_STARTED` → `COMPLETE`; a live-MariaDB
+  end-to-end verification of the new endpoints specifically is recorded as
+  `BLOCKED_EXTERNAL` — this environment has no real Linux host to run it against, per
+  `INSTALLATION.md`'s real-install test procedure).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

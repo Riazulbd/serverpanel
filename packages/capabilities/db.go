@@ -3,6 +3,7 @@ package capabilities
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"regexp"
 
@@ -15,6 +16,26 @@ import (
 // before backtick-quoting and interpolating, never to accept an arbitrary
 // string into a CREATE DATABASE/USER statement.
 var identifierRe = regexp.MustCompile(`^[a-z][a-z0-9_]{0,30}$`)
+
+// ValidDBIdentifier reports whether s is safe to interpolate into a
+// CREATE/DROP DATABASE/USER statement as an unquoted identifier. Exported
+// so the control plane (apps/controlplane/databases.go) can reject an
+// obviously-invalid name before ever dispatching a task to an agent,
+// without duplicating — and risking drift from — the pattern enforced here.
+func ValidDBIdentifier(s string) bool { return identifierRe.MatchString(s) }
+
+// dbCreateResult is handleDBCreate's structured, machine-parseable result
+// (mirrors backupResult/restoreResult in backup.go), so the control plane
+// can persist a durable record after the agent confirms success rather than
+// re-deriving it from a free-form message string.
+type dbCreateResult struct {
+	Name      string `json:"name"`
+	OwnerUser string `json:"owner_user"`
+}
+
+type dbDeleteResult struct {
+	Name string `json:"name"`
+}
 
 func mariaDBConn() (*sql.DB, error) {
 	// Connects as root over the local Unix socket, matching MariaDB's
@@ -75,7 +96,11 @@ func handleDBCreate(ctx context.Context, params map[string]any, progress Progres
 		return "", fmt.Errorf("flush privileges: %w", err)
 	}
 
-	return fmt.Sprintf("database %q created, owned by user %q with grants scoped to that database only", name, owner), nil
+	out, err := json.Marshal(dbCreateResult{Name: name, OwnerUser: owner})
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
 }
 
 func handleDBDelete(ctx context.Context, params map[string]any, progress Progress) (string, error) {
@@ -100,7 +125,11 @@ func handleDBDelete(ctx context.Context, params map[string]any, progress Progres
 		}
 		db.ExecContext(ctx, fmt.Sprintf("DROP USER IF EXISTS `%s`@'localhost'", owner))
 	}
-	return fmt.Sprintf("database %q deleted", name), nil
+	out, err := json.Marshal(dbDeleteResult{Name: name})
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
 }
 
 func handleDBList(ctx context.Context, params map[string]any, progress Progress) (string, error) {
