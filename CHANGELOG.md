@@ -2,6 +2,35 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-25 — Database control-plane persistence and dashboard UI
+
+- **Added a `databases` table** (`apps/controlplane/db.go`) and store methods
+  (`createDatabase`/`listDatabases`/`getDatabase`/`deleteDatabase`, each scoped per
+  site/server the same way backups are) so a created database is now a durable,
+  listable, deletable record instead of only existing as a one-off dispatched task
+  result — this was the gap DB-001 in `docs/SERVERAVATAR_PARITY.md` had explicitly
+  flagged as "good candidate for the next iteration."
+- **New `apps/controlplane/databases.go`**: `POST`/`GET /api/v1/servers/{id}/sites/
+  {siteId}/databases` and `DELETE /api/v1/servers/{id}/databases/{databaseId}`,
+  following the same dispatch-then-persist-on-success pattern `handleCreateBackup` and
+  `handleCreateSite` use. Create generates a random 32-character owner password
+  control-plane-side (never caller-supplied, never persisted — returned exactly once in
+  the response, the same one-time-reveal pattern as the server bootstrap-token install
+  command); delete reads the stored `name`/`owner_user` back and dispatches those to
+  `db.delete`, never trusting client-supplied identifiers for the destructive path.
+- **Dashboard**: new "Databases" panel on the site-detail view (list, "+ Create
+  database" modal, per-row delete with a confirmation dialog), mirroring the existing
+  "Backups" panel's layout and interaction pattern.
+- **Tests**: `TestDatabaseCreateListGetDeleteRoundTrip` (store), and
+  `TestDatabaseEndpointsRequireARealSite`/`TestCreateDatabaseRejectsInvalidName` (HTTP
+  validation and not-found scoping) — `go test ./...` passes. The underlying MariaDB
+  round trip for `db.create`/`db.delete` itself remains manually verified only (no
+  MariaDB in this environment), consistent with BAK-001/BAK-002's existing db-scope
+  gap.
+- Updated `docs/SERVERAVATAR_PARITY.md` (DB-001 → `PARTIAL` with the persistence/UI
+  layer now `COMPLETE`; added detailed entry DB-005, status `COMPLETE`) and
+  `docs/SYSTEM.md`.
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

@@ -263,6 +263,45 @@ func TestGetSiteIsScopedToServerID(t *testing.T) {
 	}
 }
 
+func TestDatabaseCreateListGetDeleteRoundTrip(t *testing.T) {
+	st := newTestStore(t)
+	serverID, _, _ := st.createServer("web-11", "", nil, time.Hour, "admin@example.com")
+	site, err := st.createSite(serverID, "d.example.com", "sp_d", "/home/sites/sp_d", "wordpress", "8.3")
+	if err != nil {
+		t.Fatalf("createSite: %v", err)
+	}
+
+	rec, err := st.createDatabase(serverID, site.ID, "wp_d", "wp_d_owner")
+	if err != nil {
+		t.Fatalf("createDatabase: %v", err)
+	}
+	if rec.ID == "" || rec.Status != "active" {
+		t.Fatalf("unexpected database record: %+v", rec)
+	}
+
+	list := st.listDatabases(serverID, site.ID)
+	if len(list) != 1 || list[0].Name != "wp_d" || list[0].OwnerUser != "wp_d_owner" {
+		t.Fatalf("listDatabases = %+v, want one entry matching the created database", list)
+	}
+
+	got, ok := st.getDatabase(serverID, rec.ID)
+	if !ok || got.Name != "wp_d" {
+		t.Fatalf("getDatabase = %+v, ok=%v, fields don't round-trip", got, ok)
+	}
+
+	otherServer, _, _ := st.createServer("web-12", "", nil, time.Hour, "admin@example.com")
+	if _, ok := st.getDatabase(otherServer, rec.ID); ok {
+		t.Fatal("getDatabase scoped to the wrong server should not find the record")
+	}
+
+	if err := st.deleteDatabase(serverID, rec.ID); err != nil {
+		t.Fatalf("deleteDatabase: %v", err)
+	}
+	if _, ok := st.getDatabase(serverID, rec.ID); ok {
+		t.Fatal("expected database to be gone after deleteDatabase")
+	}
+}
+
 func TestBackupCreateListGetRoundTrip(t *testing.T) {
 	st := newTestStore(t)
 	serverID, _, _ := st.createServer("web-7", "", nil, time.Hour, "admin@example.com")
