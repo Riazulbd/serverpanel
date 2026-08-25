@@ -2,6 +2,47 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-25 — SSL auto-renewal and a dedicated dashboard SSL panel
+
+- **Closed the SSL auto-renewal gap** `SYSTEM.md`/`SERVERAVATAR_PARITY.md` (APP-016)
+  had flagged since the last session: `stack.install` now enables certbot's own
+  `certbot.timer` (runs `certbot renew` twice daily) and installs a deploy hook
+  (`/etc/letsencrypt/renewal-hooks/deploy/serverpanel-reload-nginx.sh`, `nginx -t &&
+  systemctl reload nginx`) so a certificate that actually renews reaches nginx's live
+  worker processes, not just disk — both steps are idempotent, added to the existing
+  `phase1LEMPSteps()` list.
+- **Added the `ssl.check_renewal` capability** (`packages/capabilities/ssl.go`) —
+  read-only, parses `certbot certificates -d <domain>`'s plain-text output (certbot has
+  no `--json` mode) into a structured result. `ssl.issue_letsencrypt` now returns the
+  same structured shape (best-effort expiry lookup right after issuing), and
+  `ssl.install_custom` now validates the cert/key pair with `crypto/tls`/`crypto/x509`
+  (rejecting a mismatched or already-expired pair *before* touching disk or nginx) and
+  returns the certificate's real expiry — none of the three previously returned
+  anything more than a plain success string.
+- **Gave SSL its first control-plane persistence and dedicated dashboard UI**: new
+  `sites.ssl_status`/`sites.ssl_expires_at` columns (idempotent migration), three new
+  endpoints (`POST /api/v1/servers/{id}/sites/{siteId}/ssl/{issue,check-renewal,
+  custom}`) following the same dispatch-then-persist-on-success pattern as
+  `handleCreateBackup`, and an "SSL" panel per site in the dashboard (status line,
+  issue/check/upload actions) — previously SSL was only reachable through generic task
+  dispatch with no UI at all.
+- Added 14 new capability-layer tests (`parseCertbotCertificates` parsing, `crypto/
+  x509`-backed cert/key-pair validation using real in-memory-generated certificates, no
+  shelling out) and 5 new control-plane tests (SSL status round trip/cross-server
+  scoping, HTTP not-found/validation-before-dispatch boundaries). Full suite: 78 test
+  functions, `go vet`/`gofmt -l`/`-race` clean. A parser bug was caught by the new tests
+  before commit: `strings.Contains(status, "VALID")` matched `"INVALID"` too (it
+  contains `"VALID"` as a substring), so every expired certificate was being reported
+  as valid — fixed by checking the status *starts with* `"VALID"` instead.
+- Verified the new dashboard panel in a real headless-Chromium (Playwright) session:
+  login → server detail → site detail → SSL panel renders correctly, all three modals
+  open with the right fields, and the "no agent connected" error path surfaces
+  correctly in the UI rather than failing silently.
+- Updated `SYSTEM.md`, `API.md`, `OPERATIONS.md`, `TESTING.md`, and
+  `SERVERAVATAR_PARITY.md` (APP-015 moved to `COMPLETE`, APP-016 moved to `PARTIAL`
+  with a `BLOCKED_EXTERNAL` detail entry — real certbot/ACME/public-DNS end-to-end
+  verification needs a real Ubuntu host, which this environment doesn't have).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

@@ -263,6 +263,36 @@ func TestGetSiteIsScopedToServerID(t *testing.T) {
 	}
 }
 
+func TestUpdateSiteSSLRoundTripsAndIsScoped(t *testing.T) {
+	st := newTestStore(t)
+	serverA, _, _ := st.createServer("web-ssl-a", "", nil, time.Hour, "admin@example.com")
+	serverB, _, _ := st.createServer("web-ssl-b", "", nil, time.Hour, "admin@example.com")
+	site, err := st.createSite(serverA, "ssl.example.com", "sp_ssl", "/home/sites/sp_ssl", "static", "")
+	if err != nil {
+		t.Fatalf("createSite: %v", err)
+	}
+	if site.SSLStatus != "" || site.SSLExpiresAt != "" {
+		t.Fatalf("newly created site SSL fields = (%q, %q), want empty", site.SSLStatus, site.SSLExpiresAt)
+	}
+
+	if err := st.updateSiteSSL(serverA, site.ID, "active", "2026-11-23T10:15:32Z"); err != nil {
+		t.Fatalf("updateSiteSSL: %v", err)
+	}
+	got, ok := st.getSite(serverA, site.ID)
+	if !ok {
+		t.Fatal("getSite: not found after updateSiteSSL")
+	}
+	if got.SSLStatus != "active" || got.SSLExpiresAt != "2026-11-23T10:15:32Z" {
+		t.Fatalf("SSL fields after update = (%q, %q), want (active, 2026-11-23T10:15:32Z)", got.SSLStatus, got.SSLExpiresAt)
+	}
+
+	// Same isolation guarantee as getSite: a site can't be updated through
+	// the wrong server's ID.
+	if err := st.updateSiteSSL(serverB, site.ID, "active", "2027-01-01T00:00:00Z"); err == nil {
+		t.Fatal("expected updateSiteSSL to refuse a site ID under the wrong server")
+	}
+}
+
 func TestBackupCreateListGetRoundTrip(t *testing.T) {
 	st := newTestStore(t)
 	serverID, _, _ := st.createServer("web-7", "", nil, time.Hour, "admin@example.com")

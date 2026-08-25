@@ -46,6 +46,9 @@ protected route; there is no route that skips it by omission.
 | `GET` | `/api/v1/servers/{id}/sites/{siteId}/backups` | List backups for a site, newest first |
 | `POST` | `/api/v1/servers/{id}/sites/{siteId}/backups` | Dispatch `backup.run` and persist the resulting backup record |
 | `POST` | `/api/v1/servers/{id}/backups/{backupId}/restore` | Dispatch `backup.restore` for a previously recorded backup |
+| `POST` | `/api/v1/servers/{id}/sites/{siteId}/ssl/issue` | Dispatch `ssl.issue_letsencrypt` for the site's own domain and persist the resulting status/expiry |
+| `POST` | `/api/v1/servers/{id}/sites/{siteId}/ssl/check-renewal` | Dispatch `ssl.check_renewal` (read-only status refresh) and persist the resulting status/expiry |
+| `POST` | `/api/v1/servers/{id}/sites/{siteId}/ssl/custom` | Dispatch `ssl.install_custom` with a caller-supplied cert/key pair and persist the resulting status/expiry |
 | `GET` | `/api/v1/audit` | Most recent 500 audit-log entries, newest first |
 
 ## 2. Request/response details
@@ -137,6 +140,37 @@ isn't connected; `422` if `backup.restore` itself failed on the agent (the agent
 error message explains why, and any checkpoint already taken is named in it so it's
 never a silent loss).
 
+### `POST /api/v1/servers/{id}/sites/{siteId}/ssl/issue`
+```json
+{"email": "ops@example.com"}
+```
+Dispatches `ssl.issue_letsencrypt` for the site's own recorded `domain` (never a
+caller-supplied domain), 5-minute dispatch timeout (a real ACME HTTP-01 challenge round
+trip). Only on success is the site's `ssl_status`/`ssl_expires_at` updated. → `200` with
+`{"domain", "status", "expires_at", "days_left", "message"}`. `400` if `email` is
+missing; `404` if the site doesn't exist on that server; `502` if the agent isn't
+connected; `422` if issuance failed on the agent (e.g. DNS doesn't resolve to this
+server yet, rate-limited, challenge failed).
+
+### `POST /api/v1/servers/{id}/sites/{siteId}/ssl/check-renewal`
+No request body. Dispatches `ssl.check_renewal` (read-only — does not issue or change
+anything) for the site's domain and persists the returned status/expiry. → `200` with
+the same shape as `.../ssl/issue`. `404`/`502`/`422` as above; `422` also covers "no
+certbot-managed certificate found for this domain yet".
+
+### `POST /api/v1/servers/{id}/sites/{siteId}/ssl/custom`
+```json
+{"cert_pem": "-----BEGIN CERTIFICATE-----...", "key_pem": "-----BEGIN PRIVATE KEY-----..."}
+```
+Dispatches `ssl.install_custom` for the site's domain. The agent validates the
+certificate and private key are a matching pair (`crypto/tls.X509KeyPair`) and that the
+certificate isn't already expired *before* writing anything to disk or touching nginx.
+→ `200` with the same shape as `.../ssl/issue` (`status` is always `"active"` on
+success, since an already-expired cert is rejected). `400` if `cert_pem`/`key_pem` are
+missing; `404`/`502` as above; `422` if validation or `nginx -t` failed on the agent —
+the failing certificate is never activated. Certificate/key material is never written
+to the audit log or any error message.
+
 ### `POST /agents/register`
 ```json
 {"token": "<bootstrap token>", "csr_pem": "<PEM-encoded CSR>"}
@@ -177,8 +211,35 @@ The full allow-listed capability names `packages/capabilities.Default()` registe
 (see `SYSTEM.md` §12 for the allow-list rationale): `system.ping`, `service.control`,
 `diagnostics.basic`, `stack.install`, `site.create`, `site.set_php_version`,
 `site.set_status`, `app.wordpress_install`, `ssl.issue_letsencrypt`,
-`ssl.install_custom`, `db.create`, `db.delete`, `db.list`, `file.list`, `file.read`,
-`file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`.
+`ssl.install_custom`, `ssl.check_renewal`, `db.create`, `db.delete`, `db.list`,
+`file.list`, `file.read`, `file.write`, `file.delete`, `backup.run`, `backup.restore`,
+`logs.tail`.
+
+### `ssl.issue_letsencrypt` / `ssl.install_custom` / `ssl.check_renewal`
+All three return the same JSON shape (`packages/capabilities.sslResult`):
+`{"domain", "status", "expires_at", "days_left", "message"}`, where `status` is one of
+`"active"`, `"expired"`, or `"unknown"` (expiry couldn't be determined). This is what
+lets the control plane persist a real expiry on the site record from any of the three
+without three different parsers.
+
+`ssl.issue_letsencrypt` calls certbot's `--nginx` authenticator, then best-effort looks
+up the issued certificate's expiry via `certbot certificates -d <domain>` so the result
+is populated immediately (a lookup failure doesn't fail the issuance — the cert is
+already live — it just leaves `expires_at` empty until `ssl.check_renewal` is run).
+
+`ssl.check_renewal` is read-only: it runs `certbot certificates -d <domain>` and parses
+certbot's plain-text output (there's no `--json` mode) into `sslResult`, failing if no
+certificate matching that domain exists yet.
+
+`ssl.install_custom` validates the certificate/key pair with Go's `crypto/tls`/
+`crypto/x509` (never shelling out to openssl, never logging the key material) before
+writing anything, rejects an already-expired certificate outright, and returns the
+certificate's real `NotAfter` as `expires_at`.
+
+Auto-renewal itself is handled at the OS level, not by a capability: `stack.install`
+enables certbot's own `certbot.timer` (runs `certbot renew` twice daily) and installs a
+deploy hook (`/etc/letsencrypt/renewal-hooks/deploy/serverpanel-reload-nginx.sh`) that
+reloads nginx after any certificate actually renews — see `SYSTEM.md` §15.
 
 ### `backup.restore`
 ```json

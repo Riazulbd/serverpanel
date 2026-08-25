@@ -287,6 +287,93 @@ func TestCreateBackupRejectsInvalidScope(t *testing.T) {
 	}
 }
 
+func TestSSLEndpointsRequireARealSite(t *testing.T) {
+	secureCookies = false
+	defer func() { secureCookies = true }()
+
+	a := newTestAPIServer(t)
+	h := a.routes()
+
+	doJSON(t, h, "POST", "/api/v1/auth/signup", map[string]string{
+		"Email": "ssl-ops@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	rec := doJSON(t, h, "POST", "/api/v1/auth/login", map[string]string{
+		"Email": "ssl-ops@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	cookie := sessionCookie(rec)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers", map[string]any{"Name": "web-ssl"}, cookie)
+	var created struct {
+		ServerID string `json:"server_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+
+	for _, tc := range []struct {
+		path string
+		body map[string]any
+	}{
+		{"/ssl/issue", map[string]any{"email": "ops@example.com"}},
+		{"/ssl/check-renewal", nil},
+		{"/ssl/custom", map[string]any{"cert_pem": "x", "key_pem": "y"}},
+	} {
+		rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/sites/site_nonexistent"+tc.path, tc.body, cookie)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("%s for nonexistent site: status = %d, want 404", tc.path, rec.Code)
+		}
+	}
+}
+
+func TestSSLEndpointsValidateBeforeDispatch(t *testing.T) {
+	secureCookies = false
+	defer func() { secureCookies = true }()
+
+	a := newTestAPIServer(t)
+	h := a.routes()
+
+	doJSON(t, h, "POST", "/api/v1/auth/signup", map[string]string{
+		"Email": "ssl-ops2@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	rec := doJSON(t, h, "POST", "/api/v1/auth/login", map[string]string{
+		"Email": "ssl-ops2@example.com", "Password": "correcthorsebattery",
+	}, nil)
+	cookie := sessionCookie(rec)
+
+	rec = doJSON(t, h, "POST", "/api/v1/servers", map[string]any{"Name": "web-ssl2"}, cookie)
+	var created struct {
+		ServerID string `json:"server_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+
+	site, err := a.store.createSite(created.ServerID, "d.example.com", "sp_d", "/home/sites/sp_d", "static", "")
+	if err != nil {
+		t.Fatalf("createSite: %v", err)
+	}
+
+	// Missing email rejected before any dispatch attempt.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/sites/"+site.ID+"/ssl/issue", map[string]any{}, cookie)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("issue without email: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// Missing cert/key rejected before any dispatch attempt.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/sites/"+site.ID+"/ssl/custom", map[string]any{"cert_pem": "x"}, cookie)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("custom without key_pem: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// A well-formed request against a site with no connected agent fails
+	// as a gateway error, not a validation error.
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/sites/"+site.ID+"/ssl/issue",
+		map[string]any{"email": "ops@example.com"}, cookie)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("issue with no agent connected: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	rec = doJSON(t, h, "POST", "/api/v1/servers/"+created.ServerID+"/sites/"+site.ID+"/ssl/check-renewal", nil, cookie)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("check-renewal with no agent connected: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestRegisterEndpointRejectsBadToken(t *testing.T) {
 	a := newTestAPIServer(t)
 	h := a.routes()

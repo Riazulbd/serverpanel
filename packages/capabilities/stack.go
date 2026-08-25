@@ -19,6 +19,11 @@ import (
 // read before deciding what to do.
 const stackReportPath = "/var/lib/serverpanel-agent/stack-report.json"
 
+// certbotDeployHookPath is where the auto-renewal nginx-reload hook is
+// installed — certbot runs every executable file under
+// renewal-hooks/deploy/ after any certificate actually renews.
+const certbotDeployHookPath = "/etc/letsencrypt/renewal-hooks/deploy/serverpanel-reload-nginx.sh"
+
 // installStep is one idempotent unit of the stack installer. check reports
 // whether the step's target state already holds (so a retried
 // stack.install skips everything already done rather than re-running it),
@@ -136,6 +141,58 @@ func phase1LEMPSteps() []installStep {
 			Check: func(ctx context.Context) bool { return isPackageInstalled(ctx, "certbot") },
 			Run: func(ctx context.Context) error {
 				_, err := aptInstall(ctx, "certbot", "python3-certbot-nginx")
+				return err
+			},
+		},
+		{
+			Name: "certbot renewal deploy-hook (reload nginx after renewal)",
+			// certbot's --nginx authenticator reloads nginx itself right
+			// after *issuing* a cert, but the unattended renewal path
+			// (certbot.timer -> `certbot renew`) only reloads the
+			// authenticator plugin's config, which is not guaranteed for
+			// every renewal outcome. A deploy hook is certbot's own
+			// documented mechanism for "always run this after a
+			// certificate actually renews" and is what "automatic SSL ...
+			// renewal" (docs/SERVERAVATAR_PARITY.md APP-016) depends on:
+			// without it, a renewed certificate on disk with a
+			// still-hot-reloaded old cert in nginx's worker processes is a
+			// silent near-miss.
+			Check: func(ctx context.Context) bool {
+				_, err := os.Stat(certbotDeployHookPath)
+				return err == nil
+			},
+			Run: func(ctx context.Context) error {
+				if err := os.MkdirAll("/etc/letsencrypt/renewal-hooks/deploy", 0755); err != nil {
+					return err
+				}
+				content := "#!/bin/sh\n" +
+					"# Managed by ServerPanel. Runs after every certbot renewal\n" +
+					"# (certbot.timer -> `certbot renew`) so a renewed certificate is\n" +
+					"# always picked up by nginx's live worker processes, not just\n" +
+					"# written to disk.\n" +
+					"set -e\n" +
+					"nginx -t && systemctl reload nginx\n"
+				if err := os.WriteFile(certbotDeployHookPath, []byte(content), 0755); err != nil {
+					return err
+				}
+				return nil
+			},
+		},
+		{
+			Name: "certbot auto-renewal timer",
+			// The certbot Debian/Ubuntu package ships certbot.timer
+			// (runs `certbot renew` twice daily) but does not always
+			// enable it by default depending on systemd preset policy on
+			// the image — explicitly enabling it here, rather than
+			// assuming the package default, is what closes the
+			// documented "certbot's own renewal timer is not wired up by
+			// stack.install yet" gap.
+			Check: func(ctx context.Context) bool {
+				out, err := run(ctx, "systemctl", "is-enabled", "certbot.timer")
+				return err == nil && strings.TrimSpace(out) == "enabled"
+			},
+			Run: func(ctx context.Context) error {
+				_, err := run(ctx, "systemctl", "enable", "--now", "certbot.timer")
 				return err
 			},
 		},

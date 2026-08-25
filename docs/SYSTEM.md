@@ -102,9 +102,13 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | Site cloning, cross-server migration | ⬜ Phase 2 |
 | Maintenance mode | ⬜ not implemented |
 | Basic auth on a site | ⬜ not implemented |
-| Custom + Let's Encrypt SSL | ✅ `ssl.issue_letsencrypt` (certbot), `ssl.install_custom` |
-| Automatic SSL renewal | ⬜ not implemented (certbot's own renewal timer is not
-  wired up by `stack.install` yet) |
+| Custom + Let's Encrypt SSL | ✅ `ssl.issue_letsencrypt` (certbot), `ssl.install_custom`
+  — both validated (cert/key matching for custom, domain format for both) and now have a
+  dedicated dashboard "SSL" panel per site (issue/check/upload), not just generic task
+  dispatch |
+| Automatic SSL renewal | ✅ `stack.install` enables certbot's own `certbot.timer` (runs
+  `certbot renew` twice daily) and installs a deploy-hook that reloads nginx after any
+  renewal; `ssl.check_renewal` reads current status/expiry on demand |
 | WordPress auto-login/auto-update | ⬜ not implemented |
 | Application enable/disable | ✅ `site.set_status` |
 | Secure file manager | ✅ `file.list/read/write/delete`, scoped + symlink-safe |
@@ -164,11 +168,12 @@ Phase boundaries and full milestone/estimate tables are in `product-plan.md` §6
 is the condensed status:
 
 - **Phase 1 — secure working foundation:** ~90% of the *capability* surface exists and
-  is tested per-capability (see the tables above); the biggest real gaps are backup
-  **restore**, an automated test suite (now added, see `TESTING.md`), SSL auto-renewal,
-  and agent cert auto-rotation. Not "GA-ready" yet, but the architecture and security
-  primitives it depends on (mTLS, allow-listed capabilities, per-app isolation, audit
-  log) are real and proven, not stubs.
+  is tested per-capability (see the tables above); backup **restore**, an automated
+  test suite, and SSL auto-renewal (`stack.install`'s `certbot.timer` + deploy-hook
+  wiring, `ssl.check_renewal`) have since closed; the biggest remaining gap is agent
+  cert auto-rotation before 30-day expiry. Not "GA-ready" yet, but the architecture and
+  security primitives it depends on (mTLS, allow-listed capabilities, per-app
+  isolation, audit log) are real and proven, not stubs.
 - **Phase 2 — professional server management:** not started. Git deployment,
   cron/process management, SSH/firewall management UI, remote backups, cross-server
   migration all remain ⬜.
@@ -251,7 +256,7 @@ EXISTS`, applied on every `openDB` call — idempotent, no separate migration to
 | `bootstrap_tokens` | SHA-256-hashed single-use token → server, expiry |
 | `revoked_certs` | cert serial → server, revoked-at (checked on every gateway handshake) |
 | `audit_log` | append-only: seq, timestamp, server, actor, action, detail |
-| `sites` | id, server, domain, system user, docroot, app type, PHP version, status |
+| `sites` | id, server, domain, system user, docroot, app type, PHP version, status, SSL status, SSL expiry |
 | `backups` | id, server, site, scope, path, size, sha256, status, created_at |
 
 No ORM — every query is a small, explicit SQL statement in `store.go`. All secrets
@@ -295,10 +300,11 @@ in `packages/capabilities/capabilities_test.go`), not just convention.
 
 Current capability list: `system.ping`, `service.control`, `diagnostics.basic`,
 `stack.install`, `site.create`, `site.set_php_version`, `site.set_status`,
-`app.wordpress_install`, `ssl.issue_letsencrypt`, `ssl.install_custom`, `db.create`,
-`db.delete`, `db.list`, `file.list`, `file.read`, `file.write`, `file.delete`,
-`backup.run`, `backup.restore`, `logs.tail`. Notably absent (by design, until reviewed
-and added): `git.deploy`, `cron.upsert`, `ssh.*`, `firewall.*`, `agent.self_update`.
+`app.wordpress_install`, `ssl.issue_letsencrypt`, `ssl.install_custom`,
+`ssl.check_renewal`, `db.create`, `db.delete`, `db.list`, `file.list`, `file.read`,
+`file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`. Notably absent
+(by design, until reviewed and added): `git.deploy`, `cron.upsert`, `ssh.*`,
+`firewall.*`, `agent.self_update`.
 
 ## 13. Installation and deployment
 
@@ -314,7 +320,9 @@ by the agent itself (`checkOSSupported` in `packages/capabilities/exec_helpers.g
 ## 15. Supported hosting stacks
 
 Phase 1 ships exactly one stack profile: `phase1-lemp` — nginx, PHP 8.3-FPM (+
-extensions), MariaDB, Redis, Git, Composer, WP-CLI, Certbot, UFW, Fail2Ban. Apache,
+extensions), MariaDB, Redis, Git, Composer, WP-CLI, Certbot (with its `certbot.timer`
+auto-renewal timer enabled and an nginx-reload deploy hook installed), UFW, Fail2Ban.
+Apache,
 OpenLiteSpeed, and additional app-type adapters (Node.js, Laravel, n8n, Mautic) are
 explicitly postponed to Phase 3 (`product-plan.md` §9), though the capability registry
 is structured so adding a new stack profile or app type is additive (a new capability

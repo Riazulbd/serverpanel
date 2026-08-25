@@ -78,6 +78,44 @@ task detail) recorded, verify its SHA-256 matches, then either re-run the same r
 via a direct `backup.restore` task dispatch or extract/restore by hand as a last
 resort.
 
+## 3a. SSL and renewal
+
+**Issue a Let's Encrypt certificate**: from the dashboard, open a server → a site →
+"Issue Let's Encrypt" in the SSL panel, supply a notification email. This calls
+`POST /api/v1/servers/{id}/sites/{siteId}/ssl/issue`, which dispatches
+`ssl.issue_letsencrypt` for the site's own recorded domain (never a caller-supplied
+one) with a 5-minute timeout — Let's Encrypt performs a real HTTP-01 validation
+challenge, so the domain must already resolve to this server first. On success the
+site's `ssl_status`/`ssl_expires_at` are persisted.
+
+**Auto-renewal**: `stack.install` enables certbot's own `certbot.timer` (runs
+`certbot renew` twice daily, certbot's documented default) and installs a deploy hook
+at `/etc/letsencrypt/renewal-hooks/deploy/serverpanel-reload-nginx.sh` that
+runs `nginx -t && systemctl reload nginx` after any certificate actually renews —
+this is what makes a renewed certificate on disk actually reach nginx's live worker
+processes, not just sit unused. Running `stack.install` again on a server that already
+has certbot installed is safe and idempotent: it only adds the timer/hook if they're
+missing.
+
+**Check renewal status on demand**: "Check status" in the SSL panel calls
+`POST /api/v1/servers/{id}/sites/{siteId}/ssl/check-renewal`, which dispatches the
+read-only `ssl.check_renewal` capability (parses `certbot certificates -d <domain>`)
+and refreshes the persisted status/expiry — useful for confirming the auto-renewal
+timer actually renewed a certificate, without waiting for the next scheduled run.
+There is no automated expiry-alerting job yet (see §4) — this is a manual/on-demand
+check today.
+
+**Custom certificates**: "Upload custom cert" in the SSL panel accepts a PEM
+certificate (with any intermediate chain) and private key. The agent validates they're
+a matching pair and that the certificate isn't already expired (`crypto/tls`/
+`crypto/x509`, never shelling out to openssl) *before* writing anything to disk or
+reloading nginx — a mismatched or expired pair is rejected with the existing
+certificate left untouched.
+
+**Manual verification** (e.g. the control plane itself is unreachable): SSH to the VPS
+and run `certbot certificates` directly, or `systemctl status certbot.timer` to confirm
+the renewal timer is active.
+
 ## 4. Monitoring and alerting
 
 Server health is visible in the dashboard's server-detail view (uptime, 1-minute load

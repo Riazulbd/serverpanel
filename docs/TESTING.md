@@ -2,7 +2,7 @@
 
 ## 1. Current automated coverage
 
-`go test ./...` — 61 test functions across two packages, all passing, no `-race`
+`go test ./...` — 78 test functions across two packages, all passing, no `-race`
 failures, `go vet` clean, `gofmt -l` clean:
 
 ```
@@ -15,8 +15,8 @@ go test ./... -race
 
 | Package | Tests | What they cover |
 |---|---|---|
-| `apps/controlplane` | 27 | Auth/session lifecycle (create, MFA-verify, expiry, delete), bcrypt password rules, email normalization/uniqueness, TOTP round-trip/skew/rejection, bootstrap-token single-use/expiry/unknown-token, server create/list/get, revocation (cert-serial blocking + status transitions, including that a stray disconnect can't resurrect a revoked server), heartbeat recording, audit-log append, site create/list, `getSite`'s cross-server scoping, backup create/list/get round trip and its own cross-server scoping, and 6 full HTTP integration tests through `routes()` with `httptest` covering signup→login→protected-route, the full 2FA enroll→logout→login→MFA-challenge→access flow, server create/list/revoke, agent registration with a bad token, the backup endpoints' not-found boundaries, and backup-request validation (bad scope, missing `db_name`, and confirming validation runs before dispatch) |
-| `packages/capabilities` | 34 | Capability dispatch (unknown name rejected, `system.ping` works, nil `Progress` doesn't panic, the registry has a handler for every declared `Cap*` constant), `service.control`'s allow-list boundary (unit, action, and an explicit shell-metacharacter-injection attempt, all rejected before `systemctl` is ever invoked), the file manager's path-traversal and symlink-escape defenses (`resolveScopedPath`), oversized-read/write rejection, refusal to delete the site root itself, a real list+write round trip against a real filesystem, log redaction (token/password query params, `Authorization: Bearer`/`Basic`), `logs.tail`'s input validation, domain-name validation (including injection-shaped inputs), `systemUserForDomain`'s bounding/sanitization, the deterministic php-fpm-pool/socket/vhost path builders, `backup.run`'s scope validation and a real files-backup-and-checksum round trip, and `backup.restore`'s archive-location/checksum validation, a real files backup→corrupt→restore round trip (with a real throwaway system user, verifying both content restoration and pre-restore checkpoint creation), and `extractTarGzSafely`'s rejection of path-traversal entries, absolute-path entries, and oversized archives |
+| `apps/controlplane` | 30 | Auth/session lifecycle (create, MFA-verify, expiry, delete), bcrypt password rules, email normalization/uniqueness, TOTP round-trip/skew/rejection, bootstrap-token single-use/expiry/unknown-token, server create/list/get, revocation (cert-serial blocking + status transitions, including that a stray disconnect can't resurrect a revoked server), heartbeat recording, audit-log append, site create/list, `getSite`'s cross-server scoping, backup create/list/get round trip and its own cross-server scoping, `updateSiteSSL`'s round trip and cross-server scoping, and 8 full HTTP integration tests through `routes()` with `httptest` covering signup→login→protected-route, the full 2FA enroll→logout→login→MFA-challenge→access flow, server create/list/revoke, agent registration with a bad token, the backup endpoints' not-found boundaries, backup-request validation (bad scope, missing `db_name`, and confirming validation runs before dispatch), the SSL endpoints' not-found boundaries across all three routes, and SSL-request validation (missing email/cert/key, confirming validation runs before dispatch) |
+| `packages/capabilities` | 48 | Capability dispatch (unknown name rejected, `system.ping` works, nil `Progress` doesn't panic, the registry has a handler for every declared `Cap*` constant), `service.control`'s allow-list boundary (unit, action, and an explicit shell-metacharacter-injection attempt, all rejected before `systemctl` is ever invoked), the file manager's path-traversal and symlink-escape defenses (`resolveScopedPath`), oversized-read/write rejection, refusal to delete the site root itself, a real list+write round trip against a real filesystem, log redaction (token/password query params, `Authorization: Bearer`/`Basic`), `logs.tail`'s input validation, domain-name validation (including injection-shaped inputs), `systemUserForDomain`'s bounding/sanitization, the deterministic php-fpm-pool/socket/vhost path builders, `backup.run`'s scope validation and a real files-backup-and-checksum round trip, `backup.restore`'s archive-location/checksum validation, a real files backup→corrupt→restore round trip (with a real throwaway system user, verifying both content restoration and pre-restore checkpoint creation), `extractTarGzSafely`'s rejection of path-traversal entries, absolute-path entries, and oversized archives, `parseCertbotCertificates`'s parsing of certbot's plain-text output (single cert, multiple certs, an expired cert — including the `INVALID` vs `VALID` substring trap that regression-tests a real bug this suite caught), `annotateExpiry`'s domain matching, and `validateCertKeyPair`'s acceptance of a real matching ECDSA cert/key pair and rejection of a mismatched key and an already-expired certificate (real `crypto/x509` certificates generated in-memory, no shelling out) |
 
 None of this is mocked where a cheap real implementation was possible: sessions/users/
 servers/audit run against a real temp-file SQLite database with the real schema (not
@@ -30,10 +30,18 @@ stub.
 
 Capabilities that require real system services this environment can't safely or
 meaningfully fake are **not** exercised by the automated suite:
-`stack.install` (apt/systemd), `app.wordpress_install` (real `wp-cli` + a running
-MariaDB), `ssl.issue_letsencrypt` (real ACME/public DNS), `db.create/delete/list`
-(a running MariaDB), `service.control`'s actual `systemctl` invocation, and the agent's
-registration/connect/reconnect loop against a live gateway. `backup.run`'s and
+`stack.install` (apt/systemd — including its new `certbot.timer`-enable and
+deploy-hook-install steps), `app.wordpress_install` (real `wp-cli` + a running
+MariaDB), `ssl.issue_letsencrypt`/`ssl.check_renewal` (real ACME/public DNS, a real
+`certbot` binary and its `certificates`/`certificates -d` output format),
+`db.create/delete/list` (a running MariaDB), `service.control`'s actual `systemctl`
+invocation, and the agent's registration/connect/reconnect loop against a live
+gateway. What *is* covered without a real certbot binary: all of `ssl.issue_letsencrypt`
+and `ssl.check_renewal`'s input validation, `ssl.install_custom`'s full logic (real
+`crypto/tls`/`crypto/x509` validation, no certbot involved), and the certbot
+plain-text-output parser (`parseCertbotCertificates`) against representative sample
+output — but a parser tested against hand-written samples is not the same claim as
+"confirmed against real certbot output," and that gap is listed in §3. `backup.run`'s and
 `backup.restore`'s **files** scope are exercised for real (real files, real archive,
 real throwaway system user, real `chown`); their **db**/**full** scope (real
 `mysqldump`/`mysql` against a running MariaDB) is not — this environment doesn't run
@@ -56,15 +64,24 @@ next testing investment worth making, tracked below.
   systemd as PID 1. The code path is a standard `systemctl <action> <unit>` argv
   invocation and should work unmodified on a real VPS, but hasn't been confirmed there.
 - Let's Encrypt issuance — no public DNS points at any environment this project has
-  been built/tested in.
+  been built/tested in. Same for `certbot.timer` actually firing and the deploy hook
+  actually running on a real renewal — the steps' idempotency checks (`systemctl
+  is-enabled certbot.timer`, the hook file's presence) are straightforward and the
+  deploy-hook script itself is two commands (`nginx -t && systemctl reload nginx`, both
+  already exercised elsewhere), but "should work" is not "confirmed on a real host with
+  a real certbot install."
+- `parseCertbotCertificates` against real `certbot certificates` output — it's tested
+  against hand-written samples matching certbot's documented output format, not output
+  actually captured from a real certbot run.
 - Agent behavior across a real network disconnect/reconnect cycle, a real VPS reboot,
   or a real control-plane restart while agents are live.
-- Dashboard mobile responsiveness at 320/375/390/414/768px — no browser-automation
-  screenshot pass has been run against the dashboard in this session. The dashboard is
-  plain HTML/CSS with no fixed-width layout assumptions spotted on inspection, but
-  "should be responsive" is not the same claim as "verified responsive," and this
-  should not be reported as done until it's actually been checked with real viewport
-  screenshots.
+- Dashboard mobile responsiveness at 320/375/390/414/768px — a desktop-viewport
+  (1280×900) Playwright pass was run this session covering login → server detail →
+  site detail → the new SSL panel (issue/check-status/custom-cert modals, and the
+  error path when no agent is connected), confirming no JS errors and correct
+  rendering at that one viewport — but that is not the same claim as "verified
+  responsive at the required mobile breakpoints," and no screenshot pass at
+  320/375/390/414/768px has been run against the dashboard as a whole.
 - Load/performance testing (dashboard CPU/memory under load, agent CPU/memory at idle
   and under task load, backup/restore throughput) — no measurements have been taken.
 - Cross-server workflows (migration/cloning) — not applicable yet, since the feature
@@ -94,10 +111,17 @@ From the prior session's manual integration pass:
 - Agent-reported version was logged but never saved onto the server record.
 - Heartbeats only ever populated uptime; load/memory/disk were implemented via
   `/proc/loadavg`, `/proc/meminfo`, and `syscall.Statfs`.
+- `parseCertbotCertificates`'s VALID/INVALID check used `strings.Contains(..., "VALID")`
+  against certbot's `(VALID: 89 days)` / `(INVALID: EXPIRED)` status text — since the
+  string `"INVALID"` itself contains `"VALID"` as a substring, every expired certificate
+  was being reported as valid. Caught immediately by
+  `TestParseCertbotCertificatesMultipleCertsAndExpired` on first run, before this ever
+  reached a real agent; fixed by checking the parenthesized status *starts with*
+  `"VALID"` instead of merely containing it.
 
-This session's automated-test pass (see §1) found **no new defects** — every test
-passed on the first correctly-written attempt, which is consistent with (not
-independent proof beyond) the prior manual pass having been genuine.
+This session's automated-test pass (see §1) found one new defect, listed above (the
+`INVALID`/`VALID` substring bug) — caught by the new tests before this feature was ever
+committed, not discovered after the fact.
 
 ## 5. Known gaps / recommended next testing investment, in priority order
 

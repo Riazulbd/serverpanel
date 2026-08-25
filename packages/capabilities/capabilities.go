@@ -42,6 +42,7 @@ const (
 	CapWordPressInstall = "app.wordpress_install"
 	CapSSLIssueLE       = "ssl.issue_letsencrypt"
 	CapSSLInstallCustom = "ssl.install_custom"
+	CapSSLCheckRenewal  = "ssl.check_renewal"
 	CapDBCreate         = "db.create"
 	CapDBDelete         = "db.delete"
 	CapDBList           = "db.list"
@@ -87,6 +88,7 @@ func Default() Registry {
 		CapWordPressInstall: handleWordPressInstall,
 		CapSSLIssueLE:       handleSSLIssueLetsEncrypt,
 		CapSSLInstallCustom: handleSSLInstallCustom,
+		CapSSLCheckRenewal:  handleSSLCheckRenewal,
 		CapDBCreate:         handleDBCreate,
 		CapDBDelete:         handleDBDelete,
 		CapDBList:           handleDBList,
