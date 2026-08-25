@@ -8,6 +8,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 	"net/http"
@@ -61,6 +62,13 @@ func main() {
 	}()
 
 	api := &apiServer{store: st, ca: ca, gw: gw, gatewayAddr: *gatewayPublic, tokenTTL: *tokenTTL, publicDir: *publicDir}
+
+	// Re-checks every site with an active SSL certificate so a renewal
+	// that silently starts failing on the agent's certbot.timer is
+	// noticed (see ssl.go's startSSLExpiryMonitor doc comment) instead of
+	// only being discovered once the certificate has already expired.
+	go startSSLExpiryMonitor(context.Background(), st, gw, 12*time.Hour)
+
 	log.Printf("public API listening on %s (db: %s)", *apiAddr, *dbPath)
 	if err := http.ListenAndServe(*apiAddr, api.routes()); err != nil {
 		log.Fatalf("public API: %v", err)

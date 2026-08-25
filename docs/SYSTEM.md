@@ -102,9 +102,16 @@ Legend: ✅ implemented and tested (see `TESTING.md`) · 🚧 partially implemen
 | Site cloning, cross-server migration | ⬜ Phase 2 |
 | Maintenance mode | ⬜ not implemented |
 | Basic auth on a site | ⬜ not implemented |
-| Custom + Let's Encrypt SSL | ✅ `ssl.issue_letsencrypt` (certbot), `ssl.install_custom` |
-| Automatic SSL renewal | ⬜ not implemented (certbot's own renewal timer is not
-  wired up by `stack.install` yet) |
+| Custom + Let's Encrypt SSL | ✅ `ssl.issue_letsencrypt` (certbot), `ssl.install_custom`
+  — both now wired end-to-end: dashboard UI (site detail → SSL certificate) → API
+  (`POST .../ssl/letsencrypt`, `POST .../ssl/custom`) → agent dispatch → parsed real
+  certificate expiry persisted on the site record. Custom-cert install validates the
+  cert/key actually match (`tls.X509KeyPair`) before writing anything to disk. |
+| Automatic SSL renewal | ✅ `stack.install` enables `certbot.timer` (renews 30 days
+  before expiry, twice-daily checks — the package's own standard mechanism); the
+  control plane's `startSSLExpiryMonitor` independently re-checks every active
+  certificate every 12h via `ssl.status` and logs an `ssl.expiry_warning` audit entry if
+  one is still within 14 days of expiring (i.e. renewal already failed once) |
 | WordPress auto-login/auto-update | ⬜ not implemented |
 | Application enable/disable | ✅ `site.set_status` |
 | Secure file manager | ✅ `file.list/read/write/delete`, scoped + symlink-safe |
@@ -374,8 +381,21 @@ first) remains a Phase 2 gap — see §21.
 
 Heartbeat-based only: uptime/load/mem%/disk% every connection cycle, surfaced in the
 dashboard's server-detail view. No threshold-based alerting, no email/Slack/Telegram/
-Discord/webhook notifications, no SSL-expiration or backup-failure alerts exist yet —
-all ⬜, scoped to Phase 2 per `product-plan.md` §9.
+Discord/webhook notifications exist yet — all ⬜, scoped to Phase 2 per
+`product-plan.md` §9.
+
+**SSL renewal monitoring** (implemented): `apps/controlplane/ssl.go`'s
+`startSSLExpiryMonitor` runs every 12h for the life of the process. For every site with
+`ssl_status = active`, it dispatches the agent's read-only `ssl.status` capability,
+records the freshly-read expiry, and — if a certificate is still within 14 days of
+expiring — writes an `ssl.expiry_warning` audit-log entry (visible on the Audit tab).
+This exists because `certbot.timer` (enabled once, idempotently, by `stack.install`'s
+"certbot automatic renewal timer" step) runs entirely on the customer's VPS and is
+otherwise invisible to the control plane: a renewal that silently starts failing (DNS
+moved off this server, Let's Encrypt rate-limited, the site's nginx config broke) would
+previously only be discovered once the certificate had already expired. This is
+audit-log-only today, not a push notification — wiring it into the notification-channel
+system described above is Phase 2 work, not yet started.
 
 ## 21. Known limitations
 

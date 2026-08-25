@@ -334,21 +334,36 @@ func (s *store) auditLog() []auditEntry {
 }
 
 type siteRecord struct {
-	ID         string
-	ServerID   string
-	Domain     string
-	SystemUser string
-	Docroot    string
-	AppType    string
-	PHPVersion string
-	Status     string
-	CreatedAt  time.Time
+	ID           string
+	ServerID     string
+	Domain       string
+	SystemUser   string
+	Docroot      string
+	AppType      string
+	PHPVersion   string
+	Status       string
+	SSLStatus    string
+	SSLExpiresAt string
+	SSLError     string
+	CreatedAt    time.Time
+}
+
+const siteColumns = `id, server_id, domain, system_user, docroot, app_type, php_version, status, ssl_status, ssl_expires_at, ssl_error, created_at`
+
+func scanSite(row interface{ Scan(...any) error }) (*siteRecord, error) {
+	var rec siteRecord
+	var createdAt string
+	if err := row.Scan(&rec.ID, &rec.ServerID, &rec.Domain, &rec.SystemUser, &rec.Docroot,
+		&rec.AppType, &rec.PHPVersion, &rec.Status, &rec.SSLStatus, &rec.SSLExpiresAt, &rec.SSLError, &createdAt); err != nil {
+		return nil, err
+	}
+	rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+	return &rec, nil
 }
 
 func (s *store) listSites(serverID string) []*siteRecord {
 	rows, err := s.db.Query(
-		`SELECT id, server_id, domain, system_user, docroot, app_type, php_version, status, created_at
-		 FROM sites WHERE server_id = ? ORDER BY created_at DESC`, serverID)
+		`SELECT `+siteColumns+` FROM sites WHERE server_id = ? ORDER BY created_at DESC`, serverID)
 	if err != nil {
 		return nil
 	}
@@ -356,14 +371,11 @@ func (s *store) listSites(serverID string) []*siteRecord {
 
 	var out []*siteRecord
 	for rows.Next() {
-		var rec siteRecord
-		var createdAt string
-		if err := rows.Scan(&rec.ID, &rec.ServerID, &rec.Domain, &rec.SystemUser, &rec.Docroot,
-			&rec.AppType, &rec.PHPVersion, &rec.Status, &createdAt); err != nil {
+		rec, err := scanSite(rows)
+		if err != nil {
 			continue
 		}
-		rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
-		out = append(out, &rec)
+		out = append(out, rec)
 	}
 	return out
 }
@@ -371,12 +383,13 @@ func (s *store) listSites(serverID string) []*siteRecord {
 func (s *store) createSite(serverID, domain, systemUser, docroot, appType, phpVersion string) (*siteRecord, error) {
 	rec := &siteRecord{
 		ID: randID("site"), ServerID: serverID, Domain: domain, SystemUser: systemUser,
-		Docroot: docroot, AppType: appType, PHPVersion: phpVersion, Status: "active", CreatedAt: time.Now().UTC(),
+		Docroot: docroot, AppType: appType, PHPVersion: phpVersion, Status: "active", SSLStatus: "none",
+		CreatedAt: time.Now().UTC(),
 	}
 	_, err := s.db.Exec(
-		`INSERT INTO sites (id, server_id, domain, system_user, docroot, app_type, php_version, status, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		rec.ID, rec.ServerID, rec.Domain, rec.SystemUser, rec.Docroot, rec.AppType, rec.PHPVersion, rec.Status,
+		`INSERT INTO sites (id, server_id, domain, system_user, docroot, app_type, php_version, status, ssl_status, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		rec.ID, rec.ServerID, rec.Domain, rec.SystemUser, rec.Docroot, rec.AppType, rec.PHPVersion, rec.Status, rec.SSLStatus,
 		rec.CreatedAt.Format(time.RFC3339Nano),
 	)
 	if err != nil {
@@ -390,17 +403,51 @@ func (s *store) createSite(serverID, domain, systemUser, docroot, appType, phpVe
 // backup/restore request for site X on server A can't be redirected at
 // site X's docroot if X actually belongs to server B).
 func (s *store) getSite(serverID, siteID string) (*siteRecord, bool) {
-	row := s.db.QueryRow(
-		`SELECT id, server_id, domain, system_user, docroot, app_type, php_version, status, created_at
-		 FROM sites WHERE id = ? AND server_id = ?`, siteID, serverID)
-	var rec siteRecord
-	var createdAt string
-	if err := row.Scan(&rec.ID, &rec.ServerID, &rec.Domain, &rec.SystemUser, &rec.Docroot,
-		&rec.AppType, &rec.PHPVersion, &rec.Status, &createdAt); err != nil {
+	row := s.db.QueryRow(`SELECT `+siteColumns+` FROM sites WHERE id = ? AND server_id = ?`, siteID, serverID)
+	rec, err := scanSite(row)
+	if err != nil {
 		return nil, false
 	}
-	rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
-	return &rec, true
+	return rec, true
+}
+
+// updateSiteSSL records the outcome of an ssl.issue_letsencrypt,
+// ssl.install_custom, or ssl.status dispatch against a site. status is one
+// of "active" or "error"; on error, expiresAt is left untouched (a failed
+// renewal attempt against a site that already has a valid, unexpired
+// certificate should not blank out the expiry the dashboard is showing).
+func (s *store) updateSiteSSL(serverID, siteID, status, expiresAt, errMsg string) error {
+	if status == "active" {
+		_, err := s.db.Exec(
+			`UPDATE sites SET ssl_status = ?, ssl_expires_at = ?, ssl_error = '' WHERE id = ? AND server_id = ?`,
+			status, expiresAt, siteID, serverID)
+		return err
+	}
+	_, err := s.db.Exec(
+		`UPDATE sites SET ssl_status = ?, ssl_error = ? WHERE id = ? AND server_id = ?`,
+		status, errMsg, siteID, serverID)
+	return err
+}
+
+// sitesWithActiveSSL returns every site, across all servers, whose last
+// known SSL state is "active" — the working set for the periodic renewal
+// monitor (see ssl.go's startSSLExpiryMonitor).
+func (s *store) sitesWithActiveSSL() []*siteRecord {
+	rows, err := s.db.Query(`SELECT ` + siteColumns + ` FROM sites WHERE ssl_status = 'active'`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var out []*siteRecord
+	for rows.Next() {
+		rec, err := scanSite(rows)
+		if err != nil {
+			continue
+		}
+		out = append(out, rec)
+	}
+	return out
 }
 
 type backupRecord struct {

@@ -163,6 +163,25 @@ actually exists — expand a row into a full block the moment work on it begins
 - **Known differences**: same-server restore only — there is no capability to restore a backup onto a *different* server (that needs a transfer step first).
 - **Reason**: cross-server restore is coupled to cross-server migration/cloning, both explicitly Phase 2 (`product-plan.md` §9); tracked as a follow-up, not silently dropped.
 
+### APP-015/016 — SSL certificates (Let's Encrypt + custom) and auto-renewal
+- **Category**: Application management
+- **Documentation page**: Application Management → SSL
+- **Short description**: Issue a free Let's Encrypt certificate for a site's domain, or upload a custom certificate/key pair; keep certificates renewed automatically and detect renewal failures before expiry.
+- **Expected behavior**: one click issues/installs a certificate and force-redirects HTTP→HTTPS; certificates renew themselves without user action; the dashboard shows current status and expiry.
+- **Our implementation**: agent capabilities `ssl.issue_letsencrypt` (certbot `--nginx`, non-interactive), `ssl.install_custom` (validates the cert/key are an actual matching pair via `tls.X509KeyPair` *before* writing anything to disk — previously unvalidated), and `ssl.status` (read-only, parses the real on-disk certificate's `NotAfter`/issuer via `crypto/x509` rather than assuming a fixed lifetime). `stack.install` now enables `certbot.timer` (the certbot Debian package's own systemd renewal timer, 30 days before expiry) as an idempotent install step. The control plane's `startSSLExpiryMonitor` (`apps/controlplane/ssl.go`) re-checks every site with an active certificate every 12h via `ssl.status`, refreshes the recorded expiry, and logs an `ssl.expiry_warning` audit entry if a certificate is still within 14 days of expiring — the signal that `certbot.timer` already failed to renew it, since 14 days is well inside its own 30-day-out renewal window.
+- **Frontend**: site-detail "SSL certificate" panel — status badge (none/active/error) with expiry and days-remaining, "Issue Let's Encrypt cert" and "Install custom cert" modals (`apps/controlplane/web/index.html`).
+- **Backend service**: `apiServer.handleIssueLetsEncrypt`, `apiServer.handleInstallCustomSSL`, `startSSLExpiryMonitor` (`apps/controlplane/ssl.go`).
+- **API endpoint(s)**: `POST /api/v1/servers/{id}/sites/{siteId}/ssl/letsencrypt`, `POST /api/v1/servers/{id}/sites/{siteId}/ssl/custom`.
+- **Agent command**: `ssl.issue_letsencrypt`, `ssl.install_custom`, `ssl.status`.
+- **DB tables**: `sites.ssl_status`, `sites.ssl_expires_at`, `sites.ssl_error` (added this iteration, migrated via `addColumnIfMissing` for existing databases).
+- **Required permission**: authenticated session; the domain dispatched is always the site's own recorded `domain`, never accepted as free-form client input, so a caller can't point issuance at an arbitrary hostname the site doesn't own.
+- **Security considerations**: custom-cert install rejects a mismatched cert/key pair before any filesystem write or nginx reload (fixes a real gap — the prior version wrote unvalidated files first); private key never logged (only cert/key *presence*, not content, appears in dispatch audit-log details); nginx config is validated (`nginx -t`) before any reload, so a malformed cert can't take a site offline.
+- **Test coverage**: `packages/capabilities/ssl_test.go` (cert-expiry parsing against a real generated cert, garbage/missing-file rejection, mismatched cert/key rejection with a proof nothing was written to disk, invalid-domain rejection, missing-param rejection); `apps/controlplane/ssl_test.go` (endpoint validation ordering — 404 for unknown site, 400 before any dispatch, 502 with no agent connected — plus `updateSiteSSL`/`sitesWithActiveSSL` store-level coverage including that a failed renewal never blanks out a previously-recorded expiry). Real ACME issuance against Let's Encrypt's live API is `BLOCKED_EXTERNAL` (no real DNS-resolvable test domain / outbound port 80 in this environment) — certbot's own argv and the agent's expiry-parsing/persistence path are exercised in full; the actual HTTP-01 challenge round trip is not.
+- **Current status**: `COMPLETE` (issuance/install/status/renewal-monitoring, all layers); `BLOCKED_EXTERNAL` sub-scoped to the live Let's Encrypt ACME round trip specifically
+- **Completion date**: 2026-08-25
+- **Known differences**: multi-domain (SAN) certificates aren't supported — each site's single primary `domain` gets its own single-domain cert; wildcard certs (which need DNS-01, not HTTP-01) aren't implemented.
+- **Reason**: `site.create` today only records one domain per site (APP-003, additional-domains UI, is still `NOT_STARTED`) — SAN/wildcard support is coupled to that and tracked there, not silently dropped.
+
 ### ACC-001 — Authentication, 2FA, session management
 - **Category**: Account Management
 - **Documentation page**: Account Management → "Update Account Info"
@@ -252,8 +271,7 @@ capability surface (per task-brief §3/§101), not just what's already built.
 | APP-012 | Additional one-click installers (Laravel, Joomla, Mautic, Moodle, PrestaShop, Akaunting, Nextcloud, Statamic, Craft CMS, n8n, Node-RED, Uptime Kuma, NodeBB) | `NOT_STARTED` | WordPress is the only one-click installer today |
 | APP-013 | Log Monitoring Suite (traffic analytics) | `NOT_STARTED` | |
 | APP-014 | Application-level WAF / AI-bot blocker | `NOT_STARTED` | |
-| APP-015 | Custom SSL upload | `PARTIAL` | `ssl.install_custom` capability exists agent-side; no dedicated dashboard UI |
-| APP-016 | Let's Encrypt SSL + auto-renewal | `PARTIAL` | `ssl.issue_letsencrypt` implemented; certbot's own renewal timer not yet wired up by `stack.install` |
+| APP-015/016 | Custom SSL upload / Let's Encrypt SSL + auto-renewal | `COMPLETE` | Moved to a full detail block, see "APP-015/016 — SSL certificates" above |
 
 ### Database management — not yet started (DB-*)
 | ID | Feature | Status | Notes |
@@ -295,10 +313,10 @@ capability surface (per task-brief §3/§101), not just what's already built.
 
 | Status | Count (detailed entries) | Count (summary-table rows) |
 |---|---|---|
-| `COMPLETE` | 3 (SRV-001, BAK-002, ACC-001) | 1 (PROV-006) |
-| `PARTIAL` | 3 (SRV-002, APP-001, APP-002, DB-001, BAK-001 — 5 total, see note) | 6 |
-| `NOT_STARTED` | 0 | ~55 |
-| `BLOCKED_EXTERNAL` | 0 (sub-scoped within BAK-001/BAK-002's db/full-scope MariaDB verification) | 0 |
+| `COMPLETE` | 4 (SRV-001, BAK-002, ACC-001, APP-015/016) | 1 (PROV-006) |
+| `PARTIAL` | 3 (SRV-002, APP-001, APP-002, DB-001, BAK-001 — 5 total, see note) | 5 |
+| `NOT_STARTED` | 0 | ~54 |
+| `BLOCKED_EXTERNAL` | 1 (APP-015/016, sub-scoped to the live Let's Encrypt ACME round trip) plus the sub-scoped MariaDB gap in BAK-001/BAK-002 | 0 |
 | `INTENTIONALLY_NOT_APPLICABLE` | 0 | 1 |
 
 *Note: BAK-001 and BAK-002 are each simultaneously `COMPLETE` for their files-scope path
@@ -313,14 +331,24 @@ and `product-plan.md` for the estimates behind it.
 
 ## 4. BLOCKED_EXTERNAL detail
 
-No feature is currently blocked *purely* on missing external credentials in a way that
-would justify a top-level `BLOCKED_EXTERNAL` status (the sub-scoped MariaDB gap in
-BAK-001/BAK-002 is an environment limitation of *this* session, not a missing
-credential — a real Ubuntu host with MariaDB installed, per `INSTALLATION.md`, resolves
-it without any external account). This section will be populated as provider
-integrations (Cloudflare, cloud storage, cloud compute, payment processors) are
-implemented and reach the point where only real credentials stand between "implemented"
-and "verified end-to-end."
+- **APP-015/016** (SSL certificates): everything up to the actual ACME HTTP-01 challenge
+  is implemented and unit-tested — capability argv construction, cert/key match
+  validation, real `crypto/x509` expiry parsing, control-plane persistence, the renewal
+  monitor, and the dashboard UI. What's *not* exercised in this environment: a live
+  round trip against Let's Encrypt's production or staging ACME API, which needs a real
+  DNS-resolvable domain pointed at a real Ubuntu host with port 80 reachable from the
+  internet (Let's Encrypt's HTTP-01 challenge validator) — none of which this
+  development environment has. **Still required**: run `stack.install` +
+  `ssl.issue_letsencrypt` against a real registered domain on a real Ubuntu VPS (see
+  `SYSTEM.md` §25/task-brief §84 step 13) and confirm certbot actually completes
+  issuance end-to-end.
+- The sub-scoped MariaDB gap in BAK-001/BAK-002 is an environment limitation of *this*
+  session, not a missing credential — a real Ubuntu host with MariaDB installed, per
+  `INSTALLATION.md`, resolves it without any external account.
+
+This section will be further populated as provider integrations (Cloudflare, cloud
+storage, cloud compute, payment processors) are implemented and reach the point where
+only real credentials stand between "implemented" and "verified end-to-end."
 
 ## 5. INTENTIONALLY_NOT_APPLICABLE detail
 

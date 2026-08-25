@@ -62,9 +62,10 @@
   tr.clickable { cursor: pointer; }
   tr.clickable:hover { background: var(--gray-bg); }
   .badge { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
-  .badge.connected { background: var(--ok-bg); color: var(--ok); }
+  .badge.connected, .badge.ok, .badge.active { background: var(--ok-bg); color: var(--ok); }
   .badge.offline { background: var(--warn-bg); color: var(--warn); }
   .badge.disconnected, .badge.pending { background: var(--gray-bg); color: var(--muted); }
+  .badge.fail, .badge.error { background: var(--danger-bg); color: var(--danger); }
   .tag { display: inline-block; background: var(--gray-bg); border-radius: 6px; padding: 1px 8px; margin-right: 4px; font-size: 12px; color: var(--muted); }
   pre.code {
     background: #0f172a; color: #e2e8f0; padding: 14px; border-radius: 8px; overflow-x: auto;
@@ -182,6 +183,16 @@
       <div class="card">
         <h2 id="siteDetailDomain" style="margin:0 0 4px"></h2>
         <p class="muted" id="siteDetailMeta" style="margin:0 0 20px"></p>
+
+        <div class="section-title" style="display:flex;justify-content:space-between;align-items:center">
+          <span>SSL certificate</span>
+          <div>
+            <button onclick="openIssueLetsEncryptModal()">Issue Let's Encrypt cert</button>
+            <button onclick="openCustomSSLModal()">Install custom cert</button>
+          </div>
+        </div>
+        <div id="sslResult" class="task-result hidden"></div>
+        <div id="sslStatus" class="muted">No certificate installed.</div>
 
         <div class="section-title" style="display:flex;justify-content:space-between;align-items:center">
           <span>Backups</span>
@@ -474,8 +485,105 @@ async function openSiteDetail(siteId) {
     document.getElementById('siteDetailDomain').textContent = site.Domain;
     document.getElementById('siteDetailMeta').textContent =
       site.AppType + (site.PHPVersion ? (' · PHP ' + site.PHPVersion) : '') + ' · ' + site.Status;
+    renderSSLStatus(site);
   }
   await refreshBackups();
+}
+
+function renderSSLStatus(site) {
+  const el = document.getElementById('sslStatus');
+  if (!site.SSLStatus || site.SSLStatus === 'none') {
+    el.textContent = 'No certificate installed.';
+    return;
+  }
+  if (site.SSLStatus === 'error') {
+    el.innerHTML = '<span class="badge fail">error</span> ' + escapeHtml(site.SSLError || 'last certificate operation failed');
+    return;
+  }
+  const expires = site.SSLExpiresAt ? new Date(site.SSLExpiresAt) : null;
+  const daysLeft = expires ? Math.round((expires - Date.now()) / 86400000) : null;
+  el.innerHTML = '<span class="badge ok">active</span> expires ' +
+    (expires ? expires.toLocaleDateString() + (daysLeft !== null ? ' (' + daysLeft + ' days)' : '') : 'unknown') +
+    ' &middot; auto-renews via certbot.timer';
+}
+
+function currentSiteRecord() {
+  return (state.sites || []).find(s => s.ID === state.selectedSiteId);
+}
+
+function openIssueLetsEncryptModal() {
+  const root = document.getElementById('modalRoot');
+  root.innerHTML = `
+    <div class="modal-backdrop" onclick="if(event.target===this) closeModal()">
+      <div class="modal">
+        <h2>Issue Let's Encrypt certificate</h2>
+        <p class="muted">The domain must already resolve to this server's IP address before Let's Encrypt can validate it.</p>
+        <div class="field"><label>Contact email (for expiry/urgent notices)</label><input id="leEmail" type="email" placeholder="admin@example.com"></div>
+        <button class="primary" style="width:100%" onclick="issueLetsEncrypt()">Issue certificate</button>
+        <div class="error" id="leError"></div>
+        <p class="muted" id="leStatus"></p>
+      </div>
+    </div>`;
+}
+
+async function issueLetsEncrypt() {
+  const email = document.getElementById('leEmail').value.trim();
+  const err = document.getElementById('leError');
+  const status = document.getElementById('leStatus');
+  err.textContent = '';
+  if (!email) { err.textContent = 'Email is required.'; return; }
+  status.textContent = 'Requesting certificate from Let\'s Encrypt... this can take up to a minute.';
+  try {
+    await api(API + '/servers/' + state.selectedServerId + '/sites/' + state.selectedSiteId + '/ssl/letsencrypt', {
+      method: 'POST', body: JSON.stringify({email})
+    });
+    closeModalNoRefresh();
+    const sites = await api(API + '/servers/' + state.selectedServerId + '/sites') || [];
+    renderSites(sites);
+    const site = currentSiteRecord();
+    if (site) renderSSLStatus(site);
+  } catch (e) {
+    status.textContent = '';
+    err.textContent = e.message;
+  }
+}
+
+function openCustomSSLModal() {
+  const root = document.getElementById('modalRoot');
+  root.innerHTML = `
+    <div class="modal-backdrop" onclick="if(event.target===this) closeModal()">
+      <div class="modal">
+        <h2>Install custom certificate</h2>
+        <div class="field"><label>Certificate (PEM, including any intermediate chain)</label><textarea id="customCertPem" rows="6" placeholder="-----BEGIN CERTIFICATE-----"></textarea></div>
+        <div class="field"><label>Private key (PEM)</label><textarea id="customKeyPem" rows="6" placeholder="-----BEGIN PRIVATE KEY-----"></textarea></div>
+        <button class="primary" style="width:100%" onclick="installCustomSSL()">Install certificate</button>
+        <div class="error" id="customSslError"></div>
+        <p class="muted" id="customSslStatus"></p>
+      </div>
+    </div>`;
+}
+
+async function installCustomSSL() {
+  const certPem = document.getElementById('customCertPem').value.trim();
+  const keyPem = document.getElementById('customKeyPem').value.trim();
+  const err = document.getElementById('customSslError');
+  const status = document.getElementById('customSslStatus');
+  err.textContent = '';
+  if (!certPem || !keyPem) { err.textContent = 'Both certificate and private key are required.'; return; }
+  status.textContent = 'Validating and installing certificate...';
+  try {
+    await api(API + '/servers/' + state.selectedServerId + '/sites/' + state.selectedSiteId + '/ssl/custom', {
+      method: 'POST', body: JSON.stringify({cert_pem: certPem, key_pem: keyPem})
+    });
+    closeModalNoRefresh();
+    const sites = await api(API + '/servers/' + state.selectedServerId + '/sites') || [];
+    renderSites(sites);
+    const site = currentSiteRecord();
+    if (site) renderSSLStatus(site);
+  } catch (e) {
+    status.textContent = '';
+    err.textContent = e.message;
+  }
 }
 
 async function refreshBackups() {

@@ -2,6 +2,53 @@
 
 All notable changes to this project are recorded here, newest first. Dates are UTC.
 
+## 2026-08-25 — SSL certificates wired end-to-end, auto-renewal monitoring
+
+Closes the next highest-priority documented gap: `ssl.issue_letsencrypt` and
+`ssl.install_custom` existed agent-side already, but had no control-plane API, no
+dashboard UI, no persisted status, and no renewal monitoring — the feature was
+unreachable from the product. It now is.
+
+- **Fixed a real security gap**: `ssl.install_custom` previously wrote a caller-supplied
+  certificate and private key to disk with no check that they actually matched each
+  other, before falling back to `nginx -t` to catch the problem. It now validates the
+  pair with `tls.X509KeyPair` *before* writing anything — a mismatched upload is
+  rejected outright rather than leaving a site half-configured with a cert nginx will
+  refuse to serve.
+- **New agent capability `ssl.status`** (read-only): parses the real on-disk
+  certificate's expiry/issuer via `crypto/x509` (Let's Encrypt live path checked first,
+  then the custom-cert path) instead of anyone assuming a fixed 90-day lifetime.
+  `ssl.issue_letsencrypt`/`ssl.install_custom` now also read back and return real
+  parsed expiry on success, in a shared structured `{domain, source, expires_at,
+  issuer}` JSON result.
+- **`stack.install` now enables `certbot.timer`** (idempotent step) — the certbot
+  Debian/Ubuntu package's own systemd renewal timer was not previously guaranteed
+  enabled, meaning every issued certificate would have silently expired in 90 days
+  with nothing renewing it.
+- **Control-plane wiring**: `sites` table gains `ssl_status`/`ssl_expires_at`/
+  `ssl_error` columns (migrated for existing databases); two new endpoints
+  (`POST /api/v1/servers/{id}/sites/{siteId}/ssl/letsencrypt`,
+  `.../ssl/custom`) dispatch-then-persist on success, matching the existing
+  create-site/create-backup pattern; new dashboard "SSL certificate" panel on the
+  site-detail view (status badge, expiry/days-remaining, issue/install modals).
+- **New `startSSLExpiryMonitor`** background goroutine (12h interval): re-checks every
+  site with an active certificate via `ssl.status`, refreshes the recorded expiry, and
+  logs an `ssl.expiry_warning` audit entry if a certificate is still within 14 days of
+  expiring — since `certbot.timer` renews 30 days out, still being this close means
+  renewal already failed at least once. This is what makes "certbot has an automatic
+  renewal timer" an actual observable property of the platform rather than something
+  happening invisibly on the customer's VPS.
+- 19 new tests: `packages/capabilities/ssl_test.go` (cert-expiry parsing against a real
+  generated certificate/CA, garbage/missing-file rejection, mismatched cert/key
+  rejection with proof nothing was written to disk, invalid-domain/missing-param
+  rejection) and `apps/controlplane/ssl_test.go` (endpoint validation ordering, and
+  store-level coverage proving a failed renewal never blanks out a previously-recorded
+  expiry).
+- Updated `docs/SYSTEM.md`, `docs/API.md`, and `docs/SERVERAVATAR_PARITY.md` (SSL
+  promoted from two `PARTIAL` summary rows to one `COMPLETE` detail block, sub-scoped
+  `BLOCKED_EXTERNAL` only for the live Let's Encrypt ACME round trip, which needs a
+  real internet-reachable domain this environment doesn't have).
+
 ## 2026-08-17 — Backup restore, ServerAvatar parity tracking
 
 - **Implemented `backup.restore`** (`packages/capabilities/backup.go`), closing the

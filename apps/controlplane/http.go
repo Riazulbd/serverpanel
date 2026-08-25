@@ -55,6 +55,8 @@ func (a *apiServer) routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/servers/{id}/sites", a.requireAuth(a.handleCreateSite))
 	mux.HandleFunc("GET /api/v1/servers/{id}/sites/{siteId}/backups", a.requireAuth(a.handleListBackups))
 	mux.HandleFunc("POST /api/v1/servers/{id}/sites/{siteId}/backups", a.requireAuth(a.handleCreateBackup))
+	mux.HandleFunc("POST /api/v1/servers/{id}/sites/{siteId}/ssl/letsencrypt", a.requireAuth(a.handleIssueLetsEncrypt))
+	mux.HandleFunc("POST /api/v1/servers/{id}/sites/{siteId}/ssl/custom", a.requireAuth(a.handleInstallCustomSSL))
 	mux.HandleFunc("POST /api/v1/servers/{id}/backups/{backupId}/restore", a.requireAuth(a.handleRestoreBackup))
 	mux.HandleFunc("GET /api/v1/audit", a.requireAuth(a.handleAudit))
 

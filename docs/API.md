@@ -119,6 +119,41 @@ sites can run long). Only on the agent reporting success is a `backups` row pers
 on that server; `400` for an invalid/missing scope; `502` if the agent isn't connected;
 `422` if `backup.run` itself failed on the agent.
 
+### `POST /api/v1/servers/{id}/sites/{siteId}/ssl/letsencrypt`
+```json
+{"email": "admin@example.com"}
+```
+Dispatches `ssl.issue_letsencrypt` for the site's own recorded `domain` (never
+caller-supplied). 3-minute dispatch timeout. On success the site's `ssl_status` is set
+to `active` and `ssl_expires_at` recorded from the agent's parsed certificate expiry
+(read back from the on-disk cert, not merely assumed from certbot's fixed 90-day
+lifetime). On agent-side failure the site's `ssl_status` is set to `error` with the
+failure message recorded in `ssl_error`, and an `ssl.issue_failed` audit entry is
+written. → `200` with `{"domain", "source": "letsencrypt", "expires_at", "issuer"}`.
+`404` if the site doesn't exist on that server; `400` if `email` is missing; `502` if
+the agent isn't connected; `422` if issuance itself failed on the agent.
+
+### `POST /api/v1/servers/{id}/sites/{siteId}/ssl/custom`
+```json
+{"cert_pem": "-----BEGIN CERTIFICATE-----...", "key_pem": "-----BEGIN PRIVATE KEY-----..."}
+```
+Dispatches `ssl.install_custom` for the site's domain. The agent validates the
+certificate and private key actually form a matching pair (`tls.X509KeyPair`) *before*
+writing anything to disk — a mismatched pair is rejected outright rather than leaving a
+site half-configured with an unusable certificate. Same success/failure recording as
+the Let's Encrypt endpoint above. → `200` with
+`{"domain", "source": "custom", "expires_at", "issuer"}`. `404`/`400`/`502`/`422` as
+above.
+
+Every site record returned by the sites endpoints also carries `SSLStatus` (`none` |
+`active` | `error`), `SSLExpiresAt` (RFC 3339, empty if unknown), and `SSLError`.
+Certificates are also periodically re-checked in the background (`ssl.status`, no
+issuance side effects) — see `SYSTEM.md` §20 "SSL renewal monitoring" — so
+`SSLExpiresAt` stays current between explicit issue/install calls, and a certificate
+within 14 days of expiry without having renewed logs an `ssl.expiry_warning` audit
+entry (certbot's own timer, enabled by `stack.install`, renews 30 days out — still
+being this close means renewal already failed at least once).
+
 ### `GET /api/v1/servers/{id}/sites/{siteId}/backups`
 → `200` with an array of `backupRecord`, newest first. `404` if the site doesn't exist
 on that server.
@@ -177,8 +212,19 @@ The full allow-listed capability names `packages/capabilities.Default()` registe
 (see `SYSTEM.md` §12 for the allow-list rationale): `system.ping`, `service.control`,
 `diagnostics.basic`, `stack.install`, `site.create`, `site.set_php_version`,
 `site.set_status`, `app.wordpress_install`, `ssl.issue_letsencrypt`,
-`ssl.install_custom`, `db.create`, `db.delete`, `db.list`, `file.list`, `file.read`,
-`file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`.
+`ssl.install_custom`, `ssl.status`, `db.create`, `db.delete`, `db.list`, `file.list`,
+`file.read`, `file.write`, `file.delete`, `backup.run`, `backup.restore`, `logs.tail`.
+
+### `ssl.status`
+```json
+{"domain": "example.com"}
+```
+Read-only — reports the certificate currently on file for a domain (checking the
+Let's Encrypt live path first, then the custom-cert path) without issuing or installing
+anything. Returns the same `{"domain", "source", "expires_at", "issuer"}` shape as
+`ssl.issue_letsencrypt`/`ssl.install_custom`, or an error if no certificate exists for
+the domain. Used both inline (right after a fresh issuance) and by the control plane's
+periodic renewal monitor.
 
 ### `backup.restore`
 ```json
